@@ -13,6 +13,12 @@ import threading
 
 threadLock = threading.Lock()
 
+#Controllers
+def build(*args, **kwargs):
+	"""Starts the GUI making process."""
+
+	return Database(*args, **kwargs)
+
 class Database():
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
