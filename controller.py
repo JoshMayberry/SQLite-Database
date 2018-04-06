@@ -265,11 +265,14 @@ class Database():
 				valueList = (valueList,)
 
 		#Run Command
+		# print("@0", command, valueList)
 		try:
 			threadLock.acquire(True)
 			result = list(self.cursor.execute(command, valueList))
 		finally:
 			threadLock.release()
+
+		# print("@0.1", result)
 
 		return result
 
@@ -859,7 +862,10 @@ class Database():
 				#Determien how to update the foreign key
 				if (updateForeign == None):
 					#Get the current foreign value
+					# print("\n@1", relation, attribute, nextTo)
 					currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False)
+					# print("@2", currentValue, "\n")
+
 					currentValue = currentValue[attribute][0]
 					
 					#Get all instances of that value for this attribute
@@ -1850,11 +1856,11 @@ class Database():
 
 		self.renameRelation(oldName, newName, applyChanges = applyChanges)
 
-	def createTable(self, name, contract = {}, applyChanges = None, autoPrimary = True, notNull = {}, 
+	def createTable(self, name, contract = {}, applyChanges = None, autoPrimary = True, notNull = {}, default = {}, 
 		primary = {}, autoIncrement = {}, unsigned = {}, unique = {}, foreign = None, noReplication = True):
 		"""User-friendly function for createRelation()."""
 
-		self.createRelation(name, schema = contract, applyChanges = applyChanges, autoPrimary = autoPrimary, notNull = notNull, 
+		self.createRelation(name, schema = contract, applyChanges = applyChanges, autoPrimary = autoPrimary, notNull = notNull, default = default,
 			primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, foreign = foreign, noReplication = noReplication)
 
 	def addRow(self, table, addThis, applyChanges = None, autoPrimary = False, notNull = False, 
@@ -1864,12 +1870,12 @@ class Database():
 		self.addTuple(table, addThis, applyChanges = applyChanges, autoPrimary = autoPrimary, notNull = notNull, 
 		primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, checkForeigen = checkForeigen)
 
-	def removeRow(self, removeThis, nextTo = None, like = {}, applyChanges = None,
-		checkForeigen = True, updateForeign = True, exclude = []):
+	def removeRow(self, removeThis, nextToThis = None, like = {}, applyChanges = None,
+		checkForeigen = True, updateForeign = True, exclude = [], nextToCondition = True):
 		"""User-friendly function for removeTuple()."""
 
-		self.removeTuple(removeThis, nextTo = nextTo, like = like, applyChanges = applyChanges,
-		checkForeigen = checkForeigen, updateForeign = updateForeign, exclude = exclude)
+		self.removeTuple(removeThis, nextToThis = nextToThis, like = like, applyChanges = applyChanges,
+		checkForeigen = checkForeigen, updateForeign = updateForeign, exclude = exclude, nextToCondition = nextToCondition)
 
 	def changeCell(self, changeThis, nextToThis, toThis, forceMatch = None, defaultValues = {}, applyChanges = None, 
 		checkForeigen = True, updateForeign = None, exclude = []):
