@@ -862,9 +862,9 @@ class Database():
 				#Determien how to update the foreign key
 				if (updateForeign == None):
 					#Get the current foreign value
-					# print("\n@1", relation, attribute, nextTo)
+					# print("\n@3.1", relation, attribute, nextTo)
 					currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False)
-					# print("@2", currentValue, "\n")
+					# print("@3.2", currentValue, "\n")
 
 					currentValue = currentValue[attribute][0]
 					
@@ -979,6 +979,7 @@ class Database():
 			valueList = []
 			if (checkForeigen):
 				value = configureForeign(valueList, relation, attribute)
+				# print("@2.1", value, valueList, relation, attribute)
 
 			#Determine location
 			locationInfo = ""
@@ -993,7 +994,18 @@ class Database():
 						locationInfo += " OR "
 
 				locationInfo += "[{}].[{}] = ?".format(relation, criteriaAttribute)
-				valueList.append(criteriaValue)
+
+				if (checkForeigen):
+					foreign_results = self.findForeign(relation, criteriaAttribute)
+					# print("@2.2", criteriaValue)
+					if (len(foreign_results) != 0):
+						foreign_relation, foreign_attribute = foreign_results
+
+						criteriaValue = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"]
+
+					# print("@2.3", criteriaValue)
+
+				valueList.append(criteriaValue[0])
 
 			#Add or update
 			if (forceMatch != None):
