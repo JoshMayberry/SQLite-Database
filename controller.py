@@ -864,8 +864,6 @@ class Database():
 					#Get the current foreign value
 					# print("\n@3.1", relation, attribute, nextTo)
 					currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False)
-					# print("@3.2", currentValue, "\n")
-
 					currentValue = currentValue[attribute][0]
 					
 					#Get all instances of that value for this attribute
@@ -983,6 +981,7 @@ class Database():
 
 			#Determine location
 			locationInfo = ""
+			# print("@3", nextTo)
 			for i, item in enumerate(nextTo.items()):
 				criteriaAttribute, criteriaValue = item
 
@@ -1005,7 +1004,10 @@ class Database():
 
 					# print("@2.3", criteriaValue)
 
-				valueList.append(criteriaValue[0])
+				if (isinstance(criteriaValue, (tuple, list))):
+					valueList.append(criteriaValue[0])
+				else:
+					valueList.append(criteriaValue)
 
 			#Add or update
 			if (forceMatch != None):
