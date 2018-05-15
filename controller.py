@@ -265,14 +265,14 @@ class Database():
 				valueList = (valueList,)
 
 		#Run Command
-		# print("@0", command, valueList)
+		# print("@0.1", command, valueList)
 		try:
 			threadLock.acquire(True)
 			result = list(self.cursor.execute(command, valueList))
 		finally:
 			threadLock.release()
 
-		# print("@0.1", result)
+		# print("@0.2", result)
 
 		return result
 
@@ -1435,56 +1435,64 @@ class Database():
 				if (len(foreign_results) != 0):
 					foreign_relation, foreign_attribute = foreign_results
 
-					#Account for multiple results
-					for item in results:
-						#Skip empty cells
-						if (item != None):
-							#Modifying the results catalogue
-							foreign_command = "SELECT [{}].[{}] FROM [{}] WHERE [id] = ?".format(foreign_relation, foreign_attribute, foreign_relation)
+					#Account for foreign keys having foreign keys
+					while True:
+						valueList = []
+						#Account for multiple results
+						for item in results:
+							#Skip empty cells
+							if (item != None):
+								#Modifying the results catalogue
+								foreign_command = "SELECT [{}].[{}] FROM [{}] WHERE [id] = ?".format(foreign_relation, foreign_attribute, foreign_relation)
 
-							#Format results
-							if (filterTuple):
-								# print("@1", foreign_command, item)
-								result = self.executeCommand(foreign_command, item)
-								result = tuple(result)
+								#Format results
+								if (filterTuple):
+									# print("@1", foreign_command, item)
+									result = self.executeCommand(foreign_command, item)
+									result = tuple(result)
 
-								#Account for value not existing
-								if (len(result[0]) != 0):
-									result = result[0][0]
-								else:
-									if (filterForeign != None):
-										if (filterForeign):
-											result = []
-										else:
-											result = item
+									#Account for value not existing
+									if (len(result[0]) != 0):
+										result = result[0][0]
 									else:
-										result = None
+										if (filterForeign != None):
+											if (filterForeign):
+												result = []
+											else:
+												result = item
+										else:
+											result = None
+								else:
+									result = self.executeCommand(foreign_command, item[0])
+									result = tuple(result)
 
+									#Account for value not existing
+									if (len(result[0]) != 0):
+										result = result[0]
+									else:
+										if (filterForeign != None):
+											if (filterForeign):
+												result = []
+											else:
+												result = item
+										else:
+											result = None
 							else:
-								result = self.executeCommand(foreign_command, item[0])
-								result = tuple(result)
+								result = None
 
-								#Account for value not existing
-								if (len(result[0]) != 0):
-									result = result[0]
-								else:
-									if (filterForeign != None):
-										if (filterForeign):
-											result = []
-										else:
-											result = item
-									else:
-										result = None
+							if (result != None):
+								# if (len(str(result)) != 0):
+								valueList.append(result)
+							else:
+								valueList.append(result)
 
+						#Account for foreign keys having foreign keys
+						foreign_results = self.findForeign(foreign_relation, foreign_attribute)
+						if (len(foreign_results) != 0):
+							foreign_relation, foreign_attribute = foreign_results
+							results = valueList[:]
 						else:
-							result = None
-
-						if (result != None):
-							# if (len(str(result)) != 0):
-							valueList.append(result)
-						else:
-							valueList.append(result)
-
+							break
 
 			if (valuesAsList):
 				valueList = list(valueList)
