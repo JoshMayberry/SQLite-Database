@@ -77,6 +77,12 @@ def build(*args, **kwargs):
 
 	return Database(*args, **kwargs)
 
+class NULL():
+	"""Used to get values correctly."""
+
+	def __init__(self):
+		pass
+
 class Database():
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
@@ -206,13 +212,14 @@ class Database():
 		"""
 
 		#Setup
-		schema = []
-		notNull = {}
-		primary = {}
-		autoIncrement = {}
-		unsigned = {}
-		unique = {}
-		foreign = []
+		data = {}
+		data["schema"] = []
+		data["notNull"] = {}
+		data["primary"] = {}
+		data["autoIncrement"] = {}
+		data["unsigned"] = {}
+		data["unique"] = {}
+		data["foreign"] = []
 
 		#Get Schema Info
 		table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
@@ -230,37 +237,37 @@ class Database():
 		for item in table_info:
 			columnName, dataType, null, default, primaryKey = item[1], item[2], item[3], item[4], item[5]
 
-			schema.append({columnName: dataType})
-			notNull[columnName] = bool(null)
-			primary[columnName] = bool(primaryKey)
+			data["schema"].append({columnName: dataType})
+			data["notNull"][columnName] = bool(null)
+			data["primary"][columnName] = bool(primaryKey)
 
 			if (columnName in autoIncrement_list):
-				autoIncrement[columnName] = True
+				data["autoIncrement"][columnName] = True
 
 			if (columnName in unsigned_list):
-				unsigned[columnName] = True
+				data["unsigned"][columnName] = True
 
 			if (columnName in unique_list):
-				unique[columnName] = True
+				data["unique"][columnName] = True
 
 		#Foreign
 		for item in foreign_key_list:
 			foreign_relation, attribute, foreign_attribute = item[2], item[3], item[4]
 
-			foreign.append({attribute: {foreign_relation: foreign_attribute}})
+			data["foreign"].append({attribute: {foreign_relation: foreign_attribute}})
 
-			for subItem in schema:
+			for subItem in data["schema"]:
 				if (attribute in subItem):
 					del subItem[attribute]
 
-		# schema = list(self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation)))
+		# data["schema"] = list(self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation)))
 
-		# if (len(schema) == 0):
-		# 	schema = None
+		# if (len(data["schema"]) == 0):
+		# 	data["schema"] = None
 		# else:
-		# 	schema = schema[0]
+		# 	data["schema"] = data["schema"][0]
 
-		return schema, notNull, primary, autoIncrement, unsigned, unique, foreign
+		return data
 
 	def updateInternalforeignSchemas(self):
 		"""Only remembers data from schema (1) is wanted and (2) that is tied to a foreign key.
@@ -298,15 +305,22 @@ class Database():
 				foreignKey = (self.foreignKeys_catalogue[relation][attribute])
 		return foreignKey
 
-	def insertForeign(self, relation, attribute, value, valueList):
+	def insertForeign(self, relation, attribute, value, valueList, foreignNone = False):
 		"""Adds a foreign key to the table if needed."""
 
 		foreign_results = self.findForeign(relation, attribute)
 		if (len(foreign_results) != 0):
 			foreign_relation, foreign_attribute = foreign_results
+
+			if (value == None):
+				value = NULL()
+			if ((isinstance(value, NULL)) and ((isinstance(foreignNone, dict) and (attribute not in foreignNone) and foreignNone[attribute]) or (not foreignNone))):
+				valueList.append(value)
+				return valueList
+
 			self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
 
-			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True)["id"]
+			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
 			valueList.append(foreign_id[0])
 		else:
 			valueList.append(value)
@@ -320,14 +334,15 @@ class Database():
 		if (len(foreign_results) != 0):
 			foreign_relation, foreign_attribute = foreign_results
 
-			currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False)[attribute]
-			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: currentValue}, filterRelation = True)["id"]
+			currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False, returnNull = False)[attribute]
+			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: currentValue}, filterRelation = True, returnNull = False)["id"]
 
 			if (len(foreign_id) == 0):
 				if (not forceMatch):
-					errorMessage = f"There is no foreign key {foreign_attribute} with the value {currentValue} in the relation {foreign_relation}"
+					errorMessage = f"There is no foreign key {foreign_attribute} with the value {currentValue} in the relation {foreign_relation} for changeForeign()"
 					raise KeyError(errorMessage)
 				self.addTuple(foreign_relation, myTuple = {foreign_attribute: currentValue}, unique = None)
+				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: currentValue}, filterRelation = True, returnNull = False)["id"]
 			else:
 				self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value, unique = None)
 			valueList.append(foreign_id[0])
@@ -336,7 +351,7 @@ class Database():
 
 		return valueList
 
-	def configureForeign(self, results, relation, attribute, filterTuple, filterForeign, valuesAsList):
+	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False):
 		"""Allows the user to use foreign keys.
 		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
 		"""
@@ -344,15 +359,38 @@ class Database():
 		foreign_results = self.findForeign(relation, attribute)
 		if (len(foreign_results) != 0):
 			foreign_relation, foreign_attribute = foreign_results
-			foreign_results = self.getValue({foreign_relation: foreign_attribute}, {"id": results}, nextToCondition = False, filterRelation = filterForeign, filterAttribute = True)
 
-			#Account for no foreign keys
-			if ((isinstance(foreign_results, dict) and len(foreign_results[foreign_relation]) != 0) or (isinstance(foreign_results, (list, tuple)) and len(foreign_results) != 0)):
-				return foreign_results
+			valueList = []
+			for value in results:
+				# print("@5", results, relation, attribute, returnNull, value)
+				if (value == None):
+					if (returnNull):
+						value = NULL()
+					else:
+						valueList.append(value)
+						continue
 
+				subResults = self.getValue({foreign_relation: foreign_attribute}, {"id": value}, nextToCondition = False, filterRelation = filterForeign, filterAttribute = True, returnNull = True)
+
+				if (isinstance(subResults, dict) and len(subResults[foreign_relation]) != 0):
+					subList = subResults[foreign_relation]
+				elif(isinstance(subResults, (list, tuple)) and len(subResults) != 0):
+					subList = subResults[0]
+				else:
+					subList = value
+
+				if (returnNull):
+					valueList.append(subList)
+				else:
+					if (isinstance(subList, (list, tuple))):
+						valueList.append([item if not isinstance(item, NULL) else None for item in subList])
+					else:
+						valueList.append(subList if not isinstance(subList, NULL) else None)
+
+			return valueList
 		return results
 
-	def configureLocation(self, relation, nextTo, valueList, nextToCondition = True, checkForeigen = True, like = {}, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}):
+	def configureLocation(self, relation, nextTo, valueList, nextToCondition = True, checkForeigen = True, like = {}, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, forceMatch = True):
 		"""Sets up the location portion of the SQL message."""
 
 		locationInfo = ""
@@ -371,9 +409,18 @@ class Database():
 					foreign_results = self.findForeign(relation, criteriaAttribute)
 					if (len(foreign_results) != 0):
 						foreign_relation, foreign_attribute = foreign_results
-						criteriaValue = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"][0]
+						result = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"]
 
-				if (criteriaValue == None):
+						if (len(result) == 0):
+							if (not forceMatch):
+								errorMessage = f"There is no foreign key {foreign_attribute} with the value {criteriaValue} in the relation {foreign_relation} for configureLocation()"
+								raise KeyError(errorMessage)
+							self.addTuple(foreign_relation, myTuple = {foreign_attribute: criteriaValue}, unique = None)
+							result = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"]
+
+						criteriaValue = result[0]
+
+				if ((criteriaValue == None) or (isinstance(criteriaValue, NULL))):
 					locationInfo += "[{}].[{}] is null or [{}].[{}] = ''".format(relation, criteriaAttribute, relation, criteriaAttribute)
 				else:
 					locationInfo += "[{}].[{}] ".format(relation, criteriaAttribute)
@@ -433,11 +480,18 @@ class Database():
 			else:
 				valueList = (valueList,)
 
+		#Filter NULL placeholder
+		valueList = [item if not isinstance(item, NULL) else None for item in valueList]
+		valueList = tuple(valueList)
+
 		#Run Command
 		# print("@0.1", command, valueList)
 		try:
 			threadLock.acquire(True)
 			result = list(self.cursor.execute(command, valueList))
+		except Exception as error:
+			print(f"-- {command}, {valueList}")
+			raise error
 		finally:
 			threadLock.release()
 
@@ -659,20 +713,20 @@ class Database():
 			foreignList = foreign
 
 		#Get current data
-		old_schema, old_notNull, old_primary, old_autoIncrement, old_unsigned, old_unique, old_foreign = self.getSchema(relation)
+		data = self.getSchema(relation)
 		table_contents = self.getAllValues(relation, orderBy = "id", filterRelation = False, valuesAsList = True, valuesAsRows = None, checkForeigen = False)
 
 		#Rename old table
 		self.renameRelation(relation, "tempCopy_{}".format(relation))
 
 		#Apply changes
-		new_schema = applyChanges(old_schema, schemaList)
-		new_notNull = applyChanges(old_notNull, notNull)
-		new_primary = applyChanges(old_primary, primary)
-		new_autoIncrement = applyChanges(old_autoIncrement, autoIncrement)
-		new_unsigned = applyChanges(old_unsigned, unsigned)
-		new_unique = applyChanges(old_unique, unique)
-		new_foreign = applyChanges(old_foreign, foreignList)
+		new_schema = applyChanges(data["schema"], schemaList)
+		new_notNull = applyChanges(data["notNull"], notNull)
+		new_primary = applyChanges(data["primary"], primary)
+		new_autoIncrement = applyChanges(data["autoIncrement"], autoIncrement)
+		new_unsigned = applyChanges(data["unsigned"], unsigned)
+		new_unique = applyChanges(data["unique"], unique)
+		new_foreign = applyChanges(data["foreign"], foreignList)
 
 		# #Create new table
 		self.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
@@ -869,7 +923,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def addTuple(self, relation, myTuple = {}, applyChanges = None, autoPrimary = False, notNull = False, 
+	def addTuple(self, relation, myTuple = {}, applyChanges = None, autoPrimary = False, notNull = False, foreignNone = False,
 		primary = False, autoIncrement = False, unsigned = True, unique = False, checkForeigen = True):
 		"""Adds a tuple to the given relation.
 		Special thanks to DSM for how to check if a key exists in a list of dictionaries on http://stackoverflow.com/questions/14790980/how-can-i-check-if-key-exists-in-list-of-dicts-in-python
@@ -891,15 +945,26 @@ class Database():
 			- If False: Will not account for the value being a unique attribute
 			- If None:  Will only insert if that value for the attribute does not yet exist
 		checkForeigen (bool) - Determines if foreign keys will be take in account
+		foreignNone (bool)   - Determines what to do if an attribute with a foreign key will be None. Can be a dict of {attribute (str): state (bool)}
+			- If True: Will place the None in the foreign key relation
+			- If False: Will place the None in the domestic relation
 
 		Example Input: addTuple("Lorem", autoPrimary = True)
 		Example Input: addTuple("Lorem", {"Ipsum": "Dolor", "Sit": 5})
 		Example Input: addTuple("Lorem", {"Ipsum": "Dolor", "Sit": 5}, unique = None)
 		"""
 
-		##Build SQL command
-		command = "INSERT "
+		if (unique == None):
+			#For the case of None, multiple items can be inserted even if the attribuite is 'unique' in the table's schema
+			uniqueState = self.getSchema(relation)["unique"]
+			for attribute, value in myTuple.items():
+				if ((attribute in uniqueState) and (uniqueState[attribute]) and (isinstance(value, NULL))):
+					existsCheck = self.getValue({relation: "id"}, {attribute: value})["id"]
+					# print("@3", existsCheck, relation, myTuple)
+					if (len(existsCheck) != 0):
+						return
 
+		command = "INSERT "
 		if (unique != None):
 			if (unique):
 				command += "OR REPLACE "
@@ -914,7 +979,7 @@ class Database():
 		for i, (attribute, value) in enumerate(itemList):
 			#Remember the associated value for the attribute
 			if (checkForeigen):
-				valueList = self.insertForeign(relation, attribute, value, valueList)
+				valueList = self.insertForeign(relation, attribute, value, valueList, foreignNone = foreignNone)
 			else:
 				valueList.append(value)
 			command += "[{}]".format(attribute)
@@ -1101,8 +1166,8 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, guessType = False, 
-		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = None, filterAttribute = False,
+	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False,
+		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False,
 		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, like = {}):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
@@ -1193,7 +1258,7 @@ class Database():
 		Example Input: getValue({"Users": "name", "Names": ["first_name", "extra_data"]})
 
 		Example Input: getValue({"Users": "name"}, filterTuple = False)
-		Example Input: getValue({"Users": "name"}, filterForeign = True)
+		Example Input: getValue({"Users": "name"}, filterForeign = None)
 		Example Input: getValue({"Users": "name"}, filterForeign = False)
 
 		Example Input: getValue({"Users": "name"}, {"age": 24})
@@ -1206,6 +1271,8 @@ class Database():
 
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
 		"""
+
+		# print("@7", myTuple, nextTo, returnNull)
 
 		if (filterRelation and filterAttribute):
 			results_catalogue = []
@@ -1257,7 +1324,10 @@ class Database():
 
 				#Check Foreign
 				if (checkForeigen):
-					result = self.configureForeign(result, relation, attribute, filterTuple, filterForeign, valuesAsList)
+					# print("@6.1", result, relation, attribute)
+					result = self.configureForeign(result, relation, attribute, filterTuple = filterTuple, filterForeign = filterForeign, valuesAsList = valuesAsList, returnNull = returnNull)
+
+					# print("@6.2", result, relation, attribute)
 
 				#Add result to catalogue
 				if (filterRelation):
@@ -1327,6 +1397,12 @@ class Database():
 			new_results_catalogue = new_results_catalogue[relation]
 
 		return new_results_catalogue
+
+	def onCleanForeignKeys(self, event, cleanList = None, exclude = [], filterType = True):
+		"""An event function in the wxPython format for cleanForeignKeys()."""
+
+		self.cleanForeignKeys(cleanList = cleanList, exclude = exclude, filterType = filterType)
+		event.Skip()
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1443,74 +1519,6 @@ class Database():
 
 		return n
 
-	#User-friendly functions	
-	def removeTable(self, table = None, applyChanges = None):
-		"""User-friendly function for removeRelation()."""
-
-		self.removeRelation(relation = table, applyChanges = applyChanges)
-
-	def clearTable(self, table = None, applyChanges = None):
-		"""User-friendly function for clearRelation()."""
-
-		self.clearRelation(relation = table, applyChanges = applyChanges)
-
-	def renameTable(self, oldName, newName, applyChanges = None):
-		"""User-friendly function for renameRelation()."""
-
-		self.renameRelation(oldName, newName, applyChanges = applyChanges)
-
-	def createTable(self, name, contract = {}, applyChanges = None, autoPrimary = True, notNull = {}, default = {}, 
-		primary = {}, autoIncrement = {}, unsigned = {}, unique = {}, foreign = None, noReplication = True):
-		"""User-friendly function for createRelation()."""
-
-		self.createRelation(name, schema = contract, applyChanges = applyChanges, autoPrimary = autoPrimary, notNull = notNull, default = default,
-			primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, foreign = foreign, noReplication = noReplication)
-
-	def addRow(self, table, addThis, applyChanges = None, autoPrimary = False, notNull = False, 
-		primary = False, autoIncrement = False, unsigned = True, unique = False, checkForeigen = True):
-		"""User-friendly function for addTuple()."""
-
-		self.addTuple(table, addThis, applyChanges = applyChanges, autoPrimary = autoPrimary, notNull = notNull, 
-		primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, checkForeigen = checkForeigen)
-
-	def removeRow(self, removeThis, nextToThis = None, like = {}, applyChanges = None,
-		checkForeigen = True, updateForeign = True, exclude = [], nextToCondition = True):
-		"""User-friendly function for removeTuple()."""
-
-		self.removeTuple(removeThis, nextToThis = nextToThis, like = like, applyChanges = applyChanges,
-		checkForeigen = checkForeigen, updateForeign = updateForeign, exclude = exclude, nextToCondition = nextToCondition)
-
-	def changeCell(self, changeThis, nextToThis, toThis, forceMatch = None, defaultValues = {}, applyChanges = None, 
-		checkForeigen = True, updateForeign = None, exclude = []):
-		"""User-friendly function for changeTuple()."""
-
-		self.changeTuple(changeThis, nextToThis, toThis, forceMatch = forceMatch, defaultValues = defaultValues, 
-			checkForeigen = checkForeigen, applyChanges = applyChanges, updateForeign = updateForeign, exclude = exclude)
-
-	def getTableNames(self, exclude = []):
-		"""User-friendly function for getRelationNames()."""
-
-		tableNames = self.getRelationNames(exclude = exclude)
-		return tableNames
-
-	def getColumnNames(self, table, exclude = []):
-		"""User-friendly function for getAttributeNames()."""
-
-		columnNames = self.getAttributeNames(table, exclude = exclude)
-		return columnNames
-
-	def getRowCount(self, table):
-		"""User-friendly function for getTupleCount()."""
-
-		count = self.getTupleCount(table)
-		return count
-
-	def onCleanForeignKeys(self, event, cleanList = None, exclude = [], filterType = True):
-		"""An event function in the wxPython format for cleanForeignKeys()."""
-
-		self.cleanForeignKeys(cleanList = cleanList, exclude = exclude, filterType = filterType)
-		event.Skip()
-
 def main():
 	"""The main program controller."""
 
@@ -1562,7 +1570,7 @@ def main():
 
 	# database_API.changeCell({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
 	print(database_API.getValue({"Users": "name"}))
-	print(database_API.getValue({"Users": "name"}, filterForeign = True))
+	print(database_API.getValue({"Users": "name"}, filterForeign = None))
 	print(database_API.getValue({"Users": "name"}, filterForeign = False))
 	print(database_API.getValue({"Users": "name"}, checkForeigen = False))
 
