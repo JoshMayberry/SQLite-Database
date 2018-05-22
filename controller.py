@@ -37,23 +37,26 @@ def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 	return decorator
 
 #Decorators
-def wrap_errorCheck(fileName = "error_log.log", timestamp = True):
+def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = True):
 	def decorator(function):
 		@functools.wraps(function)
-		def wrapper(*args, **kwargs):
+		def wrapper(self, *args, **kwargs):
 			"""Logs errors.
 
 			Example Usage: @wrap_errorCheck()
 			"""
 
 			try:
-				answer = function(*args, **kwargs)
+				answer = function(self, *args, **kwargs)
 			except SystemExit:
 				sys.exit()
-			except:
+			except Exception as error:
 				answer = None
-				error = traceback.format_exc()
-				print(error)
+				errorMessage = traceback.format_exc()
+				
+				print(f"Previous Command: {self.previousCommand}")
+				if (not raiseError):
+					print(errorMessage)
 
 				try:
 					with open(fileName, "a") as fileHandle:
@@ -61,11 +64,23 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True):
 							content = f"{time.strftime('%Y/%m/%d %H:%M:%S', time.localtime())} --- "
 						else:
 							content = ""
-						content += " " .join([str(item) for item in args])
+
+						content += "\n\targs: "
+						content += ", " .join([f"{item}" for item in args])
+						
+						content += "\n\tkwargs: "
+						content += ", " .join([f"{key}: {value}" for key, value in kwargs.items()])
+						
+						content += "\n\terror: "
+						content += errorMessage
+						
 						fileHandle.write(content)
 						fileHandle.write("\n")
 				except:
 					traceback.print_exc()
+
+				if (raiseError):
+					raise error
 
 			return answer
 		return wrapper
@@ -104,6 +119,7 @@ class Database():
 		self.cursor = None
 		self.defaultCommit = None
 		self.fileName = None
+		self.previousCommand = (None, None, None) #(command (str), valueList (tuple), result (any))
 
 		self.foreignKeys_catalogue = {} #A dictionary of already found foreign keys. {relation: {attribute: [foreign_relation, foreign_attribute]}}
 
@@ -327,34 +343,75 @@ class Database():
 
 		return valueList
 
-	def changeForeign(self, relation, attribute, nextTo, value, valueList, forceMatch):
-		"""Adds a foreign key to the table if needed."""
+	def changeForeign(self, relation, attribute, nextTo, value, valueList, forceMatch, updateForeign):
+		"""Adds a foreign key to the table if needed.
+
+		updateForeign (bool) - Determines what happens to existing foreign keys
+			- If True: Foreign keys will be updated to the new value
+			- If False: A new foreign tuple will be inserted
+			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
+			"""
 
 		foreign_results = self.findForeign(relation, attribute)
 		if (len(foreign_results) != 0):
 			foreign_relation, foreign_attribute = foreign_results
 
-			currentValue = self.getValue({relation: attribute}, nextTo = nextTo, checkForeigen = False, returnNull = False)[attribute]
-			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: currentValue}, filterRelation = True, returnNull = False)["id"]
-
-			if (len(foreign_id) == 0):
+			#Get foreign key id
+			currentValue = self.getValue({relation: attribute}, nextTo = nextTo, returnNull = False)[attribute]#, returnForeign = False)[attribute]
+			if (len(currentValue) == 0):
 				if (not forceMatch):
-					errorMessage = f"There is no foreign key {foreign_attribute} with the value {currentValue} in the relation {foreign_relation} for changeForeign()"
+					errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation} for changeForeign()"
 					raise KeyError(errorMessage)
-				self.addTuple(foreign_relation, myTuple = {foreign_attribute: currentValue}, unique = None)
-				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: currentValue}, filterRelation = True, returnNull = False)["id"]
+			currentValue = currentValue[0]
+
+			if (currentValue == None):
+				hjukyoiui
+				valueList.append(value)
 			else:
-				self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value, unique = None)
-			valueList.append(foreign_id[0])
+				#Determine if foreign key already exists
+				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+				if (len(foreign_id) == 0):
+					if (not forceMatch):
+						errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for changeForeign()"
+						raise KeyError(errorMessage)
+					self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
+					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+				else:
+					if (updateForeign == None):
+						#Determine if the foreign key is used in other places
+						command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
+						results = self.executeCommand(command, value, valuesAsList = True)
+						if (len(results) > 1):
+							#Add a new foreign key
+							updateForeign = False
+						else:
+							#Determine if the foreign key is used in other tables
+							usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
+							if (len(usedKeys) != 0):
+								#Add a new foreign key
+								updateForeign = False
+							else:
+								#Update the existing foreign key
+								updateForeign = True
+
+					if (updateForeign):
+						self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
+					else:
+						self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
+						foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+				valueList.append(foreign_id[0])
 		else:
 			valueList.append(value)
 
 		return valueList
 
-	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False):
+	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False, returnForeign = True):
 		"""Allows the user to use foreign keys.
 		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
 		"""
+
+		if (not returnForeign):
+			return results
 
 		foreign_results = self.findForeign(relation, attribute)
 		if (len(foreign_results) != 0):
@@ -362,7 +419,6 @@ class Database():
 
 			valueList = []
 			for value in results:
-				# print("@5", results, relation, attribute, returnNull, value)
 				if (value == None):
 					if (returnNull):
 						value = NULL()
@@ -508,6 +564,7 @@ class Database():
 			if (not valuesAsList):
 				result = tuple(result)
 
+		self.previousCommand = (command, valueList, result)
 		return result
 
 	#Interaction Functions
@@ -960,7 +1017,6 @@ class Database():
 			for attribute, value in myTuple.items():
 				if ((attribute in uniqueState) and (uniqueState[attribute]) and (isinstance(value, NULL))):
 					existsCheck = self.getValue({relation: "id"}, {attribute: value})["id"]
-					# print("@3", existsCheck, relation, myTuple)
 					if (len(existsCheck) != 0):
 						return
 
@@ -1011,7 +1067,8 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def changeTuple(self, myTuple, nextTo, value, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, updateForeign = None, exclude = [], nextToCondition = True, like = {}):
+	def changeTuple(self, myTuple, nextTo, value, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
+		updateForeign = None, exclude = [], nextToCondition = True, like = {}):
 		"""Changes a tuple for a given relation.
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
@@ -1041,11 +1098,14 @@ class Database():
 		Example Input: changeTuple({"Users": "name"}, {"age": 26}, "Amet")
 		"""
 
+		if (value == None):
+			value = NULL()
+
 		#Account for multiple tuples to change
 		for relation, attribute in myTuple.items():
 			valueList = []
 			if (checkForeigen):
-				valueList = self.changeForeign(relation, attribute, nextTo, value, valueList, forceMatch)
+				valueList = self.changeForeign(relation, attribute, nextTo, value, valueList, forceMatch, updateForeign)
 
 			currentValue = self.getValue({relation: attribute}, nextTo, filterRelation = True)[attribute]
 			if (len(currentValue) == 0):
@@ -1166,7 +1226,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False,
+	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False, returnForeign = True,
 		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False,
 		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, like = {}):
 		"""Gets the value of an attribute in a tuple for a given relation.
@@ -1272,8 +1332,6 @@ class Database():
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
 		"""
 
-		# print("@7", myTuple, nextTo, returnNull)
-
 		if (filterRelation and filterAttribute):
 			results_catalogue = []
 		else:
@@ -1324,10 +1382,7 @@ class Database():
 
 				#Check Foreign
 				if (checkForeigen):
-					# print("@6.1", result, relation, attribute)
-					result = self.configureForeign(result, relation, attribute, filterTuple = filterTuple, filterForeign = filterForeign, valuesAsList = valuesAsList, returnNull = returnNull)
-
-					# print("@6.2", result, relation, attribute)
+					result = self.configureForeign(result, relation, attribute, filterTuple = filterTuple, filterForeign = filterForeign, valuesAsList = valuesAsList, returnNull = returnNull, returnForeign = returnForeign)
 
 				#Add result to catalogue
 				if (filterRelation):
@@ -1404,21 +1459,39 @@ class Database():
 		self.cleanForeignKeys(cleanList = cleanList, exclude = exclude, filterType = filterType)
 		event.Skip()
 
-	@wrap_errorCheck()
-	@wrap_connectionCheck()
-	def cleanForeignKeys(self, cleanList = None, exclude = [], filterType = True):
-		"""Removes unused foreign keys from foreign relations (tables) not in the provided exclude list.
-		Special thanks to Alex Martelli for removing duplicates quickly from a list on https://www.peterbe.com/plog/uniqifiers-benchmark
+	def getForeignLinks(self, relationList, updateSchema = True):
+		"""Returns foreign keys that are linked attributes in the given relation.
+		{foreign relation: {foreign attribute: {relation that links to it: [attributes that link to it]}}}
 
-		cleanList (list)  - A list of which relations to clean unused tuples from
-			- If None: All tables will be evaluated
-		exclude (list)    - A list of which relations to excude from the cleaning process
-		filterType (bool) - Determines if value type matters in comparing
-			- If True: Numbers and numbers as strings count as the same thing
-			- If False: Numbers and numbers as strings are different things
+		Example Input: getForeignLinks("Users")
+		"""
 
-		Example Input: cleanForeignKeys()
-		Example Input: cleanForeignKeys(['Lorem', 'Ipsum'])
+		if (updateSchema):
+			self.updateInternalforeignSchemas()
+		if (not isinstance(relationList, (list, tuple, range))):
+			relationList = [relationList]
+
+		links = {}
+		for relation in relationList:
+			if (relation in self.foreignKeys_catalogue):
+				for attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
+					if (foreign_relation not in links):
+						links[foreign_relation] = {}
+					if (foreign_attribute not in links[foreign_relation]):
+						links[foreign_relation][foreign_attribute] = {}
+					if (relation not in links[foreign_relation][foreign_attribute]):
+						links[foreign_relation][foreign_attribute][relation] = []
+
+					if (attribute not in links[foreign_relation][foreign_attribute][relation]):
+						links[foreign_relation][foreign_attribute][relation].append(attribute)
+		return links
+
+	def getForeignUses(self, relationList = None, attributeList = None, updateSchema = True, keepDuplicates = False, exclude = []):
+		"""Returns how many places this foreign key is used.
+		{foreign relation: {foreign attribute: list of keys used}}
+
+		Example Input: getForeignUses("Users")
+		Example Input: getForeignUses("Users", "name")
 		"""
 
 		def removeDuplicates(seq, idFunction=None):
@@ -1442,51 +1515,87 @@ class Database():
 				result.append(item)
 			return result
 
+		#Setup
+		if (updateSchema):
+			self.updateInternalforeignSchemas()
+
+		if (not isinstance(exclude, (list, tuple, range))):
+			exclude = [exclude]
+
+		if (relationList == None):
+			relationList = self.getRelationNames(exclude)
+		elif (not isinstance(relationList, (list, tuple, range))):
+			relationList = [relationList] if (item not in exclude) else []
+		else:
+			relationList = [item for item in relationList if (item not in exclude)]
+
+		if ((attributeList != None) and (not isinstance(attributeList, (list, tuple, range)))):
+			attributeList = [attributeList]
+
+		#Look for relations in the list that are a foreign relation
+		links = self.getForeignLinks(relationList, updateSchema = False)
+				
+		#Get all usages of the foreign keys
+		existing = {} #{foreign relation: {foreign attribute: list of keys used}}
+		for foreign_relation, item in links.items():
+			if (foreign_relation not in existing):
+				existing[foreign_relation] = {}
+			
+			for foreign_attribute, myTuple in item.items():
+				if (foreign_attribute not in existing[foreign_relation]):
+					existing[foreign_relation][foreign_attribute] = []
+
+				#Catalogue useage
+				results = self.getValue(myTuple, checkForeigen = False)
+				for attribute, valueList in results.items():
+					if ((attributeList == None) or (attribute in attributeList)):
+						existing[foreign_relation][foreign_attribute].extend(valueList)
+
+				#Clear out duplicates
+				if (not keepDuplicates):
+					existing[foreign_relation][foreign_attribute] = removeDuplicates(existing[foreign_relation][foreign_attribute])
+
+		#Remove blank items
+		used = {}
+		for foreign_relation, item in existing.items():
+			for foreign_attribute, myTuple in item.items():
+				if (len(myTuple) != 0):
+					if (foreign_relation not in used):
+						used[foreign_relation] = {}
+					used[foreign_relation][foreign_attribute] = myTuple
+
+		return used
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def cleanForeignKeys(self, cleanList = None, exclude = [], filterType = True):
+		"""Removes unused foreign keys from foreign relations (tables) not in the provided exclude list.
+		Special thanks to Alex Martelli for removing duplicates quickly from a list on https://www.peterbe.com/plog/uniqifiers-benchmark
+
+		cleanList (list)  - A list of which relations to clean unused tuples from
+			- If None: All tables will be evaluated
+		exclude (list)    - A list of which relations to excude from the cleaning process
+		filterType (bool) - Determines if value type matters in comparing
+			- If True: Numbers and numbers as strings count as the same thing
+			- If False: Numbers and numbers as strings are different things
+
+		Example Input: cleanForeignKeys()
+		Example Input: cleanForeignKeys(['Lorem', 'Ipsum'])
+		"""
+
 		#Make sure the internal schema is up to date
 		self.updateInternalforeignSchemas()
 
 		#Get a values
+		if (not isinstance(exclude, (list, tuple, range))):
+			exclude = [exclude]
+		
 		if (cleanList == None):
 			cleanList = self.getRelationNames(exclude)
 		else:
 			cleanList = [item for item in cleanList if (item not in exclude)]
 
-		cleanDict = {} #{foreign relation: {foreign attribute: {relation that links to it: [attributes that link to it]}}}
-
-		#Look for relations in the list that are a foreign relation
-		for relation, foreign_key_list in self.foreignKeys_catalogue.items():
-			for attribute, foreign_key in foreign_key_list.items():
-				foreign_relation, foreign_attribute = foreign_key
-				if (foreign_relation in cleanList):
-					#Error Check
-					if (foreign_relation not in cleanDict):
-						cleanDict[foreign_relation] = {}
-					if (foreign_attribute not in cleanDict[foreign_relation]):
-						cleanDict[foreign_relation][foreign_attribute] = {}
-					if (relation not in cleanDict[foreign_relation][foreign_attribute]):
-						cleanDict[foreign_relation][foreign_attribute][relation] = []
-
-					#Catalogue how things are linked
-					if (attribute not in cleanDict[foreign_relation][foreign_attribute][relation]):
-						cleanDict[foreign_relation][foreign_attribute][relation].append(attribute)
-				
-		#Get all usages of the foreign keys
-		usedKeys = {} #{foreign relation: {foreign attribute: list of keys used}}
-		for foreign_relation, item in cleanDict.items():
-			if (foreign_relation not in usedKeys):
-				usedKeys[foreign_relation] = {}
-			
-			for foreign_attribute, myTuple in item.items():
-				if (foreign_attribute not in usedKeys[foreign_relation]):
-					usedKeys[foreign_relation][foreign_attribute] = []
-
-				#Catalogue useage
-				results = self.getValue(myTuple, checkForeigen = False)
-				for attribute, valueList in results.items():
-					usedKeys[foreign_relation][foreign_attribute].extend(valueList)
-
-				#Clear out duplicates
-				usedKeys[foreign_relation][foreign_attribute] = removeDuplicates(usedKeys[foreign_relation][foreign_attribute])
+		usedKeys = self.getForeignUses(cleanList, updateSchema = False)
 
 		#Determine which keys to remove
 		removeKeys = {}
