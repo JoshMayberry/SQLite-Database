@@ -1100,6 +1100,8 @@ class Database():
 
 		if (value == None):
 			value = NULL()
+		else:
+			value = f"{value}"
 
 		#Account for multiple tuples to change
 		for relation, attribute in myTuple.items():
