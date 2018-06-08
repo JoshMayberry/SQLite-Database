@@ -350,8 +350,9 @@ class Database():
 			- If True: Foreign keys will be updated to the new value
 			- If False: A new foreign tuple will be inserted
 			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
-			"""
+		"""
 
+		#Determine if a foreign link exists
 		foreign_results = self.findForeign(relation, attribute)
 		if (len(foreign_results) != 0):
 			foreign_relation, foreign_attribute = foreign_results
@@ -362,31 +363,53 @@ class Database():
 				if (not forceMatch):
 					errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for changeForeign()"
 					raise KeyError(errorMessage)
-				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+
+				#Determine if current value already exists as a foreign key instead
+				checkValue = self.getValue({relation: attribute}, nextTo = nextTo, returnNull = False)[attribute]#, returnForeign = False)[attribute]
+				if (len(checkValue) == 0):
+					if (not forceMatch):
+						errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation} for changeForeign()"
+						raise KeyError(errorMessage)
+					
+					#Add a new foreign key
+					updateForeign = False
+				else:
+					checkValue = checkValue[0]
+					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: checkValue}, filterRelation = True, returnNull = False)["id"]
+					
+					if (len(foreign_id) == 0):
+						#Add a new foreign key
+						updateForeign = False
 			else:
-				if (updateForeign == None):
-					#Determine if the foreign key is used in other places
-					command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
-					results = self.executeCommand(command, value, valuesAsList = True)
-					if (len(results) > 1):
+				checkValue = value
+
+			#Determine how to modify the foreign relation
+			if (updateForeign == None):
+				#Determine if the foreign key is used in other places
+				command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
+				results = self.executeCommand(command, checkValue, valuesAsList = True)
+				
+				if (len(results) > 1):
+					#Add a new foreign key
+					updateForeign = False
+				else:
+					#Determine if the foreign key is used in other tables
+					usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
+					if (len(usedKeys) != 0):
 						#Add a new foreign key
 						updateForeign = False
 					else:
-						#Determine if the foreign key is used in other tables
-						usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
-						if (len(usedKeys) != 0):
-							#Add a new foreign key
-							updateForeign = False
-						else:
-							#Update the existing foreign key
-							updateForeign = True
+						#Update the existing foreign key
+						updateForeign = True
 
-				if (updateForeign):
-					self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
-				else:
-					self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+			#Modify the foreign relation
+			if (updateForeign):
+				self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
+			else:
+				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
+				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+
+			#Apply foreign id in place of value
 			valueList.append(foreign_id[0])
 		else:
 			valueList.append(value)
@@ -395,7 +418,7 @@ class Database():
 
 	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False, returnForeign = True):
 		"""Allows the user to use foreign keys.
-		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
+		-		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
 		"""
 
 		if (not returnForeign):
@@ -1088,7 +1111,7 @@ class Database():
 
 		if (value == None):
 			value = NULL()
-		else:
+		elif (not isinstance(value, NULL)):
 			value = f"{value}"
 
 		#Account for multiple tuples to change
