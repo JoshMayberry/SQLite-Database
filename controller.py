@@ -145,7 +145,7 @@ class Database():
 		"""
 
 		sqlType = None
-		if (pythonType in ["TEXT", "INTEGER"]):
+		if (pythonType in ["TEXT", "INTEGER", "REAL"]):
 			sqlType = pythonType
 
 		elif (pythonType == str):
@@ -154,9 +154,8 @@ class Database():
 		elif (pythonType == int):
 			sqlType = "INTEGER"
 
-		#I am not sure if this is correct
-		# elif (pythonType == float):
-		# 	sqlType = "REAL"
+		elif (pythonType == float):
+			sqlType = "REAL"
 
 		else:
 			errorMessage = f"Add {pythonType} to getType()"
@@ -227,15 +226,32 @@ class Database():
 		Example Input: getSchema("Users")
 		"""
 
+		def search(raw_sql, state):
+			"""Searches through the raw sql for the variable with the given type.
+
+			raw_sql (str) - The sql string to look through
+			state (str)   - What state to look for.
+
+			Example Input: search(raw_sql, "UNIQUE")
+			"""
+
+			return re.findall(f"""(?:, |\()\[?((?#
+				)(?<=\[)(?:[^,\[\]]+)|(?#      variable with brackets
+				)(?<!\[)(?:[^,\[\]\s]+))\]?(?# variable without brackets
+				)[^,\[\]]*?{state}""", raw_sql)
+
+		################################################################
+
 		#Setup
 		data = {}
-		data["schema"] = []
+		data["schema"] = {}
 		data["notNull"] = {}
 		data["primary"] = {}
 		data["autoIncrement"] = {}
 		data["unsigned"] = {}
 		data["unique"] = {}
-		data["foreign"] = []
+		data["foreign"] = {}
+		data["default"] = {}
 
 		#Get Schema Info
 		table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
@@ -243,19 +259,19 @@ class Database():
 		foreign_key_list = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
 		foreign_key_list.reverse()
 
-		raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))
-		raw_sql = raw_sql[0][0]
-		autoIncrement_list = re.findall("`(.*?)`.*?AUTOINCREMENT", raw_sql)
-		unsigned_list = re.findall("`(.*?)`.*?UNSIGNED", raw_sql)
-		unique_list = re.findall("`(.*?)`.*?UNIQUE", raw_sql)
+		raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))[0][0]
+		autoIncrement_list = search(raw_sql, "AUTOINCREMENT")
+		unsigned_list = re.findall(raw_sql, "UNSIGNED")
+		unique_list = re.findall(raw_sql, "UNIQUE")
 
 		#Keys
 		for item in table_info:
 			columnName, dataType, null, default, primaryKey = item[1], item[2], item[3], item[4], item[5]
 
-			data["schema"].append({columnName: dataType})
+			data["schema"][columnName] = dataType
 			data["notNull"][columnName] = bool(null)
 			data["primary"][columnName] = bool(primaryKey)
+			data["default"][columnName] = default
 
 			if (columnName in autoIncrement_list):
 				data["autoIncrement"][columnName] = True
@@ -270,18 +286,7 @@ class Database():
 		for item in foreign_key_list:
 			foreign_relation, attribute, foreign_attribute = item[2], item[3], item[4]
 
-			data["foreign"].append({attribute: {foreign_relation: foreign_attribute}})
-
-			for subItem in data["schema"]:
-				if (attribute in subItem):
-					del subItem[attribute]
-
-		# data["schema"] = list(self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation)))
-
-		# if (len(data["schema"]) == 0):
-		# 	data["schema"] = None
-		# else:
-		# 	data["schema"] = data["schema"][0]
+			data["foreign"][attribute] = {foreign_relation: foreign_attribute}
 
 		return data
 
@@ -509,7 +514,7 @@ class Database():
 
 		return locationInfo, valueList
 
-	def executeCommand(self, command, valueList = (), hackCheck = True, valuesAsList = None, filterTuple = False):
+	def executeCommand(self, command, valueList = (), hackCheck = True, valuesAsList = None, filterTuple = False, printError_command = True):
 		"""Executes an SQL command. Allows for multi-threading.
 		Special thanks to Joaquin Sargiotto for how to lock threads on https://stackoverflow.com/questions/26629080/python-and-sqlite3-programmingerror-recursive-use-of-cursors-not-allowed
 
@@ -557,7 +562,8 @@ class Database():
 			threadLock.acquire(True)
 			result = list(self.cursor.execute(command, valueList))
 		except Exception as error:
-			print(f"-- {command}, {valueList}")
+			if (printError_command):
+				print(f"-- {command}, {valueList}")
 			raise error
 		finally:
 			threadLock.release()
@@ -736,7 +742,7 @@ class Database():
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def setSchema(self, relation, schema = {}, notNull = {}, primary = {}, autoIncrement = {},
-		unsigned = {}, unique = {}, foreign = None, applyChanges = None):
+		unsigned = {}, unique = {}, default = {}, foreign = {}, applyChanges = None):
 		"""Renames a relation (table) to the given name the user provides.
 
 		relation (str)      - What the relation is called in the .db
@@ -744,41 +750,16 @@ class Database():
 			- If None: The default flag set upon opening the database will be used
 
 		Example Input: setSchema("Users", foreign = {"name": {"Names": "first_name"}})
+		Example Input: setSchema("Users", schema = {"counter": int})
 		"""
 
 		def applyChanges(old_thing, mod_thing):
 			"""Applies user modifications to the table settings."""
 
-			if (type(old_thing) == list):
-				#Apply Changes
-				for old_item in old_thing:
-					for old_key, old_value in old_item.items():
-						#Determine if the value should be re-defined
-						for item in mod_thing:
-							for new_key, new_value in item.items():
-								if (new_key == old_key):
-									old_item[old_key] = new_value
-									break
-			else:
-				for old_key, old_value in old_thing.items():
-					#Determine if the value should be re-defined
-					for new_key, new_value in mod_thing.items():
-						if (new_key == old_key):
-							old_thing[old_key] = new_value
-							break
+			for new_key, new_value in mod_thing.items():
+				old_thing[new_key] = new_value
 
 			return old_thing
-
-		#Ensure correct format
-		if ((type(schema) != list) and (type(schema) != tuple)):
-			schemaList = [schema]
-		else:
-			schemaList = schema
-
-		if ((type(foreign) != list) and (type(foreign) != tuple)):
-			foreignList = [foreign]
-		else:
-			foreignList = foreign
 
 		#Get current data
 		data = self.getSchema(relation)
@@ -788,18 +769,19 @@ class Database():
 		self.renameRelation(relation, "tempCopy_{}".format(relation))
 
 		#Apply changes
-		new_schema = applyChanges(data["schema"], schemaList)
+		new_schema = applyChanges(data["schema"], schema)
+		new_foreign = applyChanges(data["foreign"], foreign)
 		new_notNull = applyChanges(data["notNull"], notNull)
 		new_primary = applyChanges(data["primary"], primary)
 		new_autoIncrement = applyChanges(data["autoIncrement"], autoIncrement)
 		new_unsigned = applyChanges(data["unsigned"], unsigned)
 		new_unique = applyChanges(data["unique"], unique)
-		new_foreign = applyChanges(data["foreign"], foreignList)
+		new_default = applyChanges(data["default"], default)
 
-		# #Create new table
+		#Create new table
 		self.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
 			autoIncrement = new_autoIncrement, unsigned = new_unsigned, unique = new_unique, foreign = new_foreign, 
-			applyChanges = applyChanges, autoPrimary = False)
+			applyChanges = applyChanges, default = new_default, autoPrimary = False)
 
 		#Populate new table with old values
 		for i in range(len(table_contents[relation])):
@@ -848,6 +830,10 @@ class Database():
 		def formatSchema(schemaFormatted, item, autoPrimary_override):
 			"""A sub-function that formats the schema for the user."""
 
+			if ((len(default) != 0) and (item in default)):
+				if (default[item] != None):
+					schemaFormatted += " DEFAULT ({})".format(default[item])
+
 			if ((len(notNull) != 0) or (autoPrimary_override)):
 				if (item in notNull):
 					if (notNull[item]):
@@ -885,7 +871,7 @@ class Database():
 
 			return schemaFormatted
 
-		def addforeign(schemaFormatted, foreignList):
+		def addforeign(schemaFormatted, foreignList, schema):
 			"""A sub-function that adds a foreign key for the user.
 			More information at: http://www.sqlitetutorial.net/sqlite-foreign-key/
 			"""
@@ -894,20 +880,21 @@ class Database():
 			# schema_foreign = {} #
 			for foreign in foreignList:
 				for attribute, foreign_dict in foreign.items():
-					#Account for non-foreign keys
-					if (type(foreign_dict) == dict):
-						#Add the foreign key to the table
-						foreign_relation, foreign_attribute = list(foreign_dict.items())[0]
-						schemaFormatted += "[{}] INTEGER".format(attribute)
+					#Skip items that will be added in as foreign keys
+					for schema_item in schema:
+						if ((schema_item != None) and (attribute in schema_item)):
+							break
 					else:
-						#Add local key to the table
-						schemaFormatted += "[{}] {}".format(attribute, self.getType(foreign_dict))
 
-					schemaFormatted = formatSchema(schemaFormatted, attribute, False)
+						if (type(foreign_dict) == dict):
+							schemaFormatted += "[{}] INTEGER".format(attribute)
+						else:
+							schemaFormatted += "[{}] {}".format(attribute, self.getType(foreign_dict))
 
-					#Account for multiple attributes
-					if (schemaFormatted != ""):
-						schemaFormatted += ", "
+						schemaFormatted = formatSchema(schemaFormatted, attribute, False)
+
+						if (schemaFormatted != ""):
+							schemaFormatted += ", "
 
 			#Link foreign keys
 			for i, foreign in enumerate(foreignList):
@@ -926,6 +913,12 @@ class Database():
 
 			return schemaFormatted
 
+		#Ensure correct format
+		if (not isinstance(schema, (list, tuple))):
+			schema = [schema]
+		if (not isinstance(foreign, (list, tuple))):
+			foreign = [foreign]
+
 		#Build SQL command
 		command = "CREATE TABLE "
 
@@ -937,13 +930,6 @@ class Database():
 
 		command += "[" + str(relation) + "]"
 
-
-		#Ensure correct format
-		if ((type(schema) != list) and (type(schema) != tuple)):
-			schemaList = [schema]
-		else:
-			schemaList = schema
-
 		#Format schema
 		firstRun = True
 		schemaFormatted = ""
@@ -954,27 +940,21 @@ class Database():
 			schemaFormatted = formatSchema(schemaFormatted, "id", autoPrimary)
 
 		#Add given attributes
-		for schema in schemaList:
-			for i, (attribute, dataType) in enumerate(schema.items()):
+		for schema_item in schema:
+			for i, (attribute, dataType) in enumerate(schema_item.items()):
 				if (schemaFormatted != ""):
 					schemaFormatted += ", "
-
 				schemaFormatted += "[{}] {}".format(attribute, self.getType(dataType))
 				schemaFormatted = formatSchema(schemaFormatted, attribute, False)
 
 		#Add foreign keys
-		if (foreign != None):
-			#Ensure correct format
-			if ((type(foreign) != list) and (type(foreign) != tuple)):
-				foreignList = [foreign]
-			else:
-				foreignList = foreign
+		for foreign_item in foreign:
+			if (foreign_item != None):
+				#Account for primary key
+				if (schemaFormatted != ""):
+					schemaFormatted += ", "
 
-			#Account for primary key
-			if (schemaFormatted != ""):
-				schemaFormatted += ", "
-
-			schemaFormatted = addforeign(schemaFormatted, foreignList)
+				schemaFormatted = addforeign(schemaFormatted, [foreign_item], schema)
 
 		#Execute SQL
 		self.executeCommand(command + "({})".format(schemaFormatted))
@@ -991,7 +971,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def addAttribute(self, relation, attribute, dataType = str, applyChanges = None):
+	def addAttribute(self, relation, attribute, dataType = str, default = None, applyChanges = None):
 		"""Adds an attribute (column) to a relation (table).
 
 		relation (str)      - What the relation is called in the .db
@@ -1004,10 +984,22 @@ class Database():
 		"""
 
 		#Build SQL command
-		command = "ALTER TABLE [{}] ADD COLUMN [{}] {}".format(relation, attribute, self.getType(dataType))
+		command = "ALTER TABLE [{}] ADD COLUMN [{}] {} ".format(relation, attribute, self.getType(dataType))
+
+		if (default != None):
+			# command += "DEFAULT [{}]".format(default)
+			command += "DEFAULT ({})".format(default)
+			# command += "DEFAULT {}".format(default)
 
 		#Execute SQL
-		self.executeCommand(command)
+		try:
+			self.executeCommand(command, printError_command = False)
+		except Exception as error:
+			if (error.__str__() == "Cannot add a column with non-constant default"):
+				self.setSchema(relation, schema = {attribute: self.getType(dataType)}, default = {attribute: default})
+			else:
+				print(f"-- {command}, []")
+				raise error
 
 		#Save Changes
 		if (applyChanges == None):
@@ -1215,9 +1207,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getAllValues(self, relation, exclude = [], orderBy = None, nextTo = None, limit = None, direction = None, nextToCondition = True, guessType = False,
-		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = None, valuesAsList = False, valuesAsRows = True,
-		greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, like = {}):
+	def getAllValues(self, relation, exclude = [], **kwargs):
 		"""Returns all values in the given relation (table) that match the filter conditions.
 
 		relation (str) - Which relation to look in
@@ -1261,16 +1251,14 @@ class Database():
 			attributeNames = self.getAttributeNames(relation, excludeList)
 			myTuple[relation] = attributeNames
 
-		results_catalogue = self.getValue(myTuple, nextTo = nextTo, orderBy = orderBy, limit = limit, direction = direction, nextToCondition = nextToCondition, valuesAsRows = valuesAsRows,
-			checkForeigen = checkForeigen, filterTuple = filterTuple, filterRelation = filterRelation, filterForeign = filterForeign, valuesAsList = valuesAsList, guessType = guessType,
-			greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, lessThanOrEqualTo = lessThanOrEqualTo, like = like)
+		results_catalogue = self.getValue(myTuple, **kwargs)
 
 		return results_catalogue
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False, returnForeign = True,
-		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False,
+		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False, exclude = [],
 		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, like = {}):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
@@ -1295,6 +1283,7 @@ class Database():
 			- If True: Ascending order
 			- If False: Descending order
 			- If None: No action taken
+		exclude (list) - What values to not return
 
 		nextToCondition (bool) - Determines how to handle multiple nextTo criteria
 			- If True: All of the criteria given must match
@@ -1326,9 +1315,6 @@ class Database():
 			- If True: Returned values will be all the row values for that column {relation: {attribute 1: [row 1 value, row 2 value, row 3 value]}
 			- If False: Returned values will be all the column values for that row with the attribute names as a separate key {relation: {row 1: [attribute 1 value, attribute 2 value, attribute 3 value], "attributeNames": [name for attribute 1, name for attribute 2, name for attribute 3]}
 			- If None: Returned values will be all the column values for that row with the attribute names with each value {relation: {row 1: {attribute 1: value, attribute 2: value, attribute 3: value}}}
-		guessType (bool)       - Determines if returned values should try being non-strings. WARNING: Not secure yet
-			- If True: Returned values that would have been strings may be lists, tuples, dictionaries, integers, floats, bools, etc.
-			- If False: Returned values will not be interpreted
 
 		greaterThan (int)          - Determines if returned values must be '>' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
 			- If not None: Returned values will be '>' the given number
@@ -1448,9 +1434,14 @@ class Database():
 						pathway = results_catalogue[relation][attribute]
 
 				if (isinstance(result, dict)):
+					print("@1", result)
+					ujhjkhk
 					pathway.append(result)
 				else:
-					pathway.extend(result)
+					for item in result:
+						if (item not in exclude):
+							pathway.append(item)
+
 
 		#Determine output orientation
 		if (valuesAsRows != None):
@@ -1691,6 +1682,7 @@ class Database():
 		
 		event (str)           - What will fire the trigger. Only the first letter matters
 			~ 'insert', 'update', 'delete'
+			- If 'reaction' requires a specific one to work, then it will use that instead
 		event_when (str)      - At what time in relation to 'event' the trigger will fire. Only the first letter matters
 			~ 'before', 'after', 'instead'
 		event_relation (str)  - What table the event applies to
@@ -1698,22 +1690,34 @@ class Database():
 		event_attribute (str) - What attribute the event applies to
 			- If None: Will apply to all attributes in the table
 		
-		reaction (str)           - What will happen when the trigger fires. Only the first letter matters
-			~ 'ignore', 'validate', 'lastModification'
-		reaction_when (str)      - The condition that causes the trigger to fire. Only the first letter matters
+		
+		reaction_when (str) - The condition that causes the trigger to fire. Only the first letter matters
 			~ 'before', 'after', 'instead'
 			- If None: Will fire for every time the 'event' happens
-		reaction_relation (str)  - What table the reaction applies to
+		reaction (str) - What will happen when the trigger fires. Only the first letter matters
+			~ 'lastModified' - Updates 'reaction_attribute' in 'reaction_relation' to the current date
+				- reaction_attribute default: 'lastModified'
+				- Only works for the event 'update'
+
+			~ 'createdOn' - Marks when the row was first created 
+				- reaction_attribute default: 'createdOn'
+				- Only works for the event 'insert'
+
+			~ 'ignore'
+
+			~ 'validate'
+
+		- reaction_relation (str)  - What table the reaction applies to
 			- If None: Will use 'relation'
-		reaction_attribute (str) - What attribute the reaction applies to
-			- If None: Will apply to all attributes in the table
+		- reaction_attribute (str) - What attribute the reaction applies to
+			- If None: Will use the appropriate default name listed in the comments for 'reaction'. If this does not exist, it will create it
 
 		noReplication (bool) - If True: The trigger will not be created if it does not already exist
 			- If None: Will delete the previously existing trigger if it exists
 		applyChanges (bool)  - Determines if the database will be saved after the change is made
 			- If None: The default flag set upon opening the database will be used
 
-		Example Input: createTrigger("lastModification", "Users", reaction = "lastModified")
+		Example Input: createTrigger("Users_lastModified", "Users", reaction = "lastModified")
 		"""
 
 		#Setup
@@ -1724,8 +1728,26 @@ class Database():
 		else:
 			self.removeTrigger(label)
 		command += "[{}] ".format(label)
-	
+
+		#Ensure correct format
+		event = event.lower()
+		reaction = reaction.lower()
 		event_when = event_when.lower()
+
+		#Account for reaction specific events
+		if (reaction[0] == "l"):
+			event_when = "after"
+			if (event[0] != "u"):
+				event = "update"
+				warnings.warn(f"the reaction {reaction} needs 'event' to be 'update'", Warning, stacklevel = 2)
+		
+		elif (reaction[0] == "l"):
+			event_when = "after"
+			if (event[0] != "i"):
+				event = "insert"
+				warnings.warn(f"the reaction {reaction} needs 'event' to be 'insert'", Warning, stacklevel = 2)
+	
+		#Create Condition
 		if (event_when[0] == "b"):
 			command += "BEFORE "
 		elif (event_when[0] == "a"):
@@ -1733,7 +1755,6 @@ class Database():
 		else:
 			command += "INSTEAD OF "
 	
-		event = event.lower()
 		if (event[0] == "u"):
 			command += "UPDATE "
 		elif (event[0] == "i"):
@@ -1748,23 +1769,32 @@ class Database():
 			event_relation = relation
 		command += "ON [{}] FOR EACH ROW ".format(event_relation)
 
-		#Create Condition
-		if (reaction_when != None):
-			condition = "WHEN "
+		# if (reaction_when != None):
+		# 	condition = "WHEN "
 
-			#Apply Condition
-			command += condition
+		# 	#Apply Condition
+		# 	command += condition
 
 		#Create Reation
 		if (reaction_relation == None):
 			reaction_relation = relation
-		if (reaction == "lastModified"):
+		
+		if (reaction[0] == "l"):
 			if (reaction_attribute == None):
 				if ("lastModified" not in self.getAttributeNames(reaction_relation)):
-					self.addAttribute(reaction_relation, "lastModified", dataType = str)
+					self.addAttribute(reaction_relation, "lastModified", dataType = str, default = "strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime')")
 				reaction_attribute = "lastModified"
 
 			reaction = "UPDATE [{}] SET [{}] = strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime') WHERE (rowid = new.rowid);".format(reaction_relation, reaction_attribute)
+		
+		elif (reaction[0] == "c"):
+			if (reaction_attribute == None):
+				if ("createdOn" not in self.getAttributeNames(reaction_relation)):
+					self.addAttribute(reaction_relation, "createdOn", dataType = str, default = "strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime')")
+				reaction_attribute = "createdOn"
+
+			reaction = "UPDATE [{}] SET [{}] = strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime') WHERE (rowid = new.rowid);".format(reaction_relation, reaction_attribute)
+		
 		else:
 			errorMessage = f"Unknown reaction {reaction} in createTrigger() for {self.__repr__()}"
 			raise KeyError(errorMessage)
@@ -1791,7 +1821,7 @@ class Database():
 			- If None: Will return the names of all triggers
 
 		Example Input: getTrigger()
-		Example Input: getTrigger("lastModification")
+		Example Input: getTrigger("Users_lastModified")
 		"""
 
 		triggerList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'trigger'")
@@ -1814,7 +1844,7 @@ class Database():
 		applyChanges (bool)  - Determines if the database will be saved after the change is made
 			- If None: The default flag set upon opening the database will be used
 
-		Example Input: removeTrigger("lastModification")
+		Example Input: removeTrigger("Users_lastModified")
 		"""
 
 		triggerList = self.getTrigger(label)
@@ -1824,7 +1854,7 @@ class Database():
 
 			for trigger in triggerList:
 				#Execute SQL
-				self.executeCommand("DROP TRIGGER [{}] IF EXISTS".format(trigger))
+				self.executeCommand("DROP TRIGGER IF EXISTS [{}]".format(trigger))
 
 			#Save Changes
 			if (applyChanges == None):
@@ -1894,7 +1924,7 @@ def main():
 	print()
 
 	#Triggers
-	database_API.createTrigger("lastModification", "Users", reaction = "lastModified")
+	database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
 	print(database_API.getTrigger())
 	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
 	print(database_API.getValue({"Users": ["name", "lastModified"]}))
