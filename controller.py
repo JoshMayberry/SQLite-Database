@@ -991,9 +991,39 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
+	def addAttribute(self, relation, attribute, dataType = str, applyChanges = None):
+		"""Adds an attribute (column) to a relation (table).
+
+		relation (str)      - What the relation is called in the .db
+		attribute (str)     - What the attribute will be called
+		dataType (type)     - What type the attribute will be
+		applyChanges (bool) - Determines if the database will be saved after the change is made
+			- If None: The default flag set upon opening the database will be used
+
+		Example Input: addAttribute("Users", "date created", dataType = int)
+		"""
+
+		#Build SQL command
+		command = "ALTER TABLE [{}] ADD COLUMN [{}] {}".format(relation, attribute, self.getType(dataType))
+
+		#Execute SQL
+		self.executeCommand(command)
+
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
+
+		#Update internal foreign schema catalogue
+		self.updateInternalforeignSchemas()
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
 	def addTuple(self, relation, myTuple = {}, applyChanges = None, autoPrimary = False, notNull = False, foreignNone = False,
 		primary = False, autoIncrement = False, unsigned = True, unique = False, checkForeigen = True):
-		"""Adds a tuple to the given relation.
+		"""Adds a tuple (row) to the given relation (table).
 		Special thanks to DSM for how to check if a key exists in a list of dictionaries on http://stackoverflow.com/questions/14790980/how-can-i-check-if-key-exists-in-list-of-dicts-in-python
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 
@@ -1080,7 +1110,7 @@ class Database():
 	@wrap_connectionCheck()
 	def changeTuple(self, myTuple, nextTo, value, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
 		updateForeign = None, exclude = [], nextToCondition = True, like = {}):
-		"""Changes a tuple for a given relation.
+		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 
@@ -1141,7 +1171,7 @@ class Database():
 	@wrap_connectionCheck()
 	def removeTuple(self, myTuple, like = {}, applyChanges = None,
 		checkForeigen = True, updateForeign = True, exclude = [], nextToCondition = True):
-		"""Removes a tuple for a given relation.
+		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
 		WARNING: Does not currently look for forigen keys.
 
@@ -1466,12 +1496,6 @@ class Database():
 
 		return new_results_catalogue
 
-	def onCleanForeignKeys(self, event, cleanList = None, exclude = [], filterType = True):
-		"""An event function in the wxPython format for cleanForeignKeys()."""
-
-		self.cleanForeignKeys(cleanList = cleanList, exclude = exclude, filterType = filterType)
-		event.Skip()
-
 	def getForeignLinks(self, relationList, updateSchema = True):
 		"""Returns foreign keys that are linked attributes in the given relation.
 		{foreign relation: {foreign attribute: {relation that links to it: [attributes that link to it]}}}
@@ -1581,7 +1605,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def cleanForeignKeys(self, cleanList = None, exclude = [], filterType = True):
+	def cleanForeignKeys(self, cleanList = None, exclude = [], filterType = True, applyChanges = None):
 		"""Removes unused foreign keys from foreign relations (tables) not in the provided exclude list.
 		Special thanks to Alex Martelli for removing duplicates quickly from a list on https://www.peterbe.com/plog/uniqifiers-benchmark
 
@@ -1591,6 +1615,8 @@ class Database():
 		filterType (bool) - Determines if value type matters in comparing
 			- If True: Numbers and numbers as strings count as the same thing
 			- If False: Numbers and numbers as strings are different things
+		applyChanges (bool)  - Determines if the database will be saved after the change is made
+			- If None: The default flag set upon opening the database will be used
 
 		Example Input: cleanForeignKeys()
 		Example Input: cleanForeignKeys(['Lorem', 'Ipsum'])
@@ -1639,7 +1665,173 @@ class Database():
 			for subKey, subValue in value.items():
 				n += len(valueList)
 
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
+
 		return n
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def createTrigger(self, label, relation,
+
+		event = "update", event_when = "before", event_relation = None, event_attribute = None,
+		reaction = "ignore", reaction_when = None, reaction_relation = None, reaction_attribute = None,
+		
+		noReplication = None, applyChanges = None):
+		"""Creates an event trigger.
+		See: http://www.sqlitetutorial.net/sqlite-trigger/
+		See: https://www.tutlane.com/tutorial/sqlite/sqlite-triggers
+
+		label (str)    - What the trigger will be called in the .db
+		relation (str) - Which relation this applies to
+		
+		event (str)           - What will fire the trigger. Only the first letter matters
+			~ 'insert', 'update', 'delete'
+		event_when (str)      - At what time in relation to 'event' the trigger will fire. Only the first letter matters
+			~ 'before', 'after', 'instead'
+		event_relation (str)  - What table the event applies to
+			- If None: Will use 'relation'
+		event_attribute (str) - What attribute the event applies to
+			- If None: Will apply to all attributes in the table
+		
+		reaction (str)           - What will happen when the trigger fires. Only the first letter matters
+			~ 'ignore', 'validate', 'lastModification'
+		reaction_when (str)      - The condition that causes the trigger to fire. Only the first letter matters
+			~ 'before', 'after', 'instead'
+			- If None: Will fire for every time the 'event' happens
+		reaction_relation (str)  - What table the reaction applies to
+			- If None: Will use 'relation'
+		reaction_attribute (str) - What attribute the reaction applies to
+			- If None: Will apply to all attributes in the table
+
+		noReplication (bool) - If True: The trigger will not be created if it does not already exist
+			- If None: Will delete the previously existing trigger if it exists
+		applyChanges (bool)  - Determines if the database will be saved after the change is made
+			- If None: The default flag set upon opening the database will be used
+
+		Example Input: createTrigger("lastModification", "Users", reaction = "lastModified")
+		"""
+
+		#Setup
+		valueList = []
+		command = "CREATE TRIGGER "
+		if (noReplication != None):
+			command += "IF NOT EXISTS "
+		else:
+			self.removeTrigger(label)
+		command += "[{}] ".format(label)
+	
+		event_when = event_when.lower()
+		if (event_when[0] == "b"):
+			command += "BEFORE "
+		elif (event_when[0] == "a"):
+			command += "AFTER "
+		else:
+			command += "INSTEAD OF "
+	
+		event = event.lower()
+		if (event[0] == "u"):
+			command += "UPDATE "
+		elif (event[0] == "i"):
+			command += "INSERT "
+		else:
+			command += "DELETE "
+
+		if (event_attribute != None):
+			command += "OF [{}] ".format(event_attribute)
+		
+		if (event_relation == None):
+			event_relation = relation
+		command += "ON [{}] FOR EACH ROW ".format(event_relation)
+
+		#Create Condition
+		if (reaction_when != None):
+			condition = "WHEN "
+
+			#Apply Condition
+			command += condition
+
+		#Create Reation
+		if (reaction_relation == None):
+			reaction_relation = relation
+		if (reaction == "lastModified"):
+			if (reaction_attribute == None):
+				if ("lastModified" not in self.getAttributeNames(reaction_relation)):
+					self.addAttribute(reaction_relation, "lastModified", dataType = str)
+				reaction_attribute = "lastModified"
+
+			reaction = "UPDATE [{}] SET [{}] = strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime') WHERE (rowid = new.rowid);".format(reaction_relation, reaction_attribute)
+		else:
+			errorMessage = f"Unknown reaction {reaction} in createTrigger() for {self.__repr__()}"
+			raise KeyError(errorMessage)
+
+		#Apply Reaction
+		command += f"\nBEGIN \n{reaction} \nEND;"
+
+		#Execute SQL
+		self.executeCommand(command)
+
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def getTrigger(self, label = None, exclude = []):
+		"""Returns an event trigger.
+
+		label (str) - What the trigger will be called in the .db
+			- If None: Will return the names of all triggers
+
+		Example Input: getTrigger()
+		Example Input: getTrigger("lastModification")
+		"""
+
+		triggerList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+		triggerList = [trigger[0] for trigger in triggerList if trigger[0] not in exclude]
+
+		if (label != None):
+			if (label not in triggerList):
+				return
+			else:
+				return triggerList[triggerList.index(label)]
+		return triggerList
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def removeTrigger(self, label = None, applyChanges = None):
+		"""Removes an event trigger.
+
+		label (str) - What the trigger will be called in the .db
+			- If None: Will remove all triggers
+		applyChanges (bool)  - Determines if the database will be saved after the change is made
+			- If None: The default flag set upon opening the database will be used
+
+		Example Input: removeTrigger("lastModification")
+		"""
+
+		triggerList = self.getTrigger(label)
+		if (triggerList != None):
+			if (not isinstance(triggerList, (list, tuple, range))):
+				triggerList = [triggerList]
+
+			for trigger in triggerList:
+				#Execute SQL
+				self.executeCommand("DROP TRIGGER [{}] IF EXISTS".format(trigger))
+
+			#Save Changes
+			if (applyChanges == None):
+				applyChanges = self.defaultCommit
+
+			if (applyChanges):
+				self.saveDatabase()
 
 def main():
 	"""The main program controller."""
@@ -1647,56 +1839,65 @@ def main():
 	#Create the database
 	database_API = Database()
 	database_API.openDatabase("test.db", applyChanges = False)
-	database_API.removeTable("Users")
-	database_API.removeTable("Names")
-	database_API.removeTable("Address")
+	database_API.removeRelation("Users")
+	database_API.removeRelation("Names")
+	database_API.removeRelation("Address")
 
-	# #Create tables from the bottom up
-	database_API.createTable("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
-	database_API.createTable("Address", {"street": str}, unique = {"street": True})
-	database_API.createTable("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
+	#Create tables from the bottom up
+	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+	database_API.createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
 	database_API.saveDatabase()
 
-	database_API.addRow("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
+	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
 	
-	database_API.addRow("Users", {"name": "Ipsum", "age": 26, "height": 5}, unique = None)
-	database_API.addRow("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
-	database_API.addRow("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
-	database_API.addRow("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
-	database_API.addRow("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+	database_API.addTuple("Users", {"name": "Ipsum", "age": 26, "height": 5}, unique = None)
+	database_API.addTuple("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
+	database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
+	database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
+	database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
 
-	# # Simple actions
-	# print(database_API.getValue({"Users": "name"}))
-	# print(database_API.getValue({"Users": "name"}, filterRelation = False))
-	# print(database_API.getValue({"Users": ["name", "age"]}))
+	#Simple Actions
+	print("Simple Actions")
+	print(database_API.getValue({"Users": "name"}))
+	print(database_API.getValue({"Users": "name"}, filterRelation = False))
+	print(database_API.getValue({"Users": ["name", "age"]}))
+	print()
 
-	# #Ordering data
-	# print(database_API.getValue({"Users": "name"}, orderBy = "age"))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True))
+	#Ordering Data
+	print("Ordering Data")
+	print(database_API.getValue({"Users": "name"}, orderBy = "age"))
+	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
+	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True))
 
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False]))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
+	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
+	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False]))
+	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
 
-	# #Multiple Relations
-	# print(database_API.getValue({"Users": "name", "Names": "first_name"}))
-	# print(database_API.getValue({"Users": "name", "Names": "first_name"}, filterRelation = False))
-	# print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
+	print(database_API.getValue({"Users": "name", "Names": "first_name"}))
+	print(database_API.getValue({"Users": "name", "Names": "first_name"}, filterRelation = False))
+	print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
+	print()
 
-	# #Changing attributes
-	# print(database_API.getValue({"Users": "name"}))
-	# database_API.changeCell({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
-	# print(database_API.getValue({"Users": "name"}))
-	# print(database_API.getValue({"Users": "name"}, filterForeign = True))
+	#Changing Attributes
+	print("Changing Attributes")
+	print(database_API.getValue({"Users": "name"}))
+	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
+	print(database_API.getValue({"Users": "name"}))
+	print(database_API.getValue({"Users": "name"}, filterForeign = True))
 
-	# database_API.changeCell({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
+	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
 	print(database_API.getValue({"Users": "name"}))
 	print(database_API.getValue({"Users": "name"}, filterForeign = None))
 	print(database_API.getValue({"Users": "name"}, filterForeign = False))
 	print(database_API.getValue({"Users": "name"}, checkForeigen = False))
+	print()
 
-	# database_API.changeCell({"Users": "name"}, {"age": 26}, "Amet")
+	#Triggers
+	database_API.createTrigger("lastModification", "Users", reaction = "lastModified")
+	print(database_API.getTrigger())
+	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
+	print(database_API.getValue({"Users": ["name", "lastModified"]}))
 
 	database_API.saveDatabase()
 
