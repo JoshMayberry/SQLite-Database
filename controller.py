@@ -14,6 +14,10 @@ import functools
 # import sqlalchemy
 import threading
 
+#Required Modules
+##py -m pip install
+	# sqlite3
+
 threadLock = threading.Lock()
 
 #Decorators
@@ -201,13 +205,51 @@ class Database():
 		exclude (list) - A list of which attributes to excude from the returned result
 
 		Example Input: getAttributeNames("Users")
-		Example Input: getAttributeNames("Users", ["age", "height"])
+		Example Input: getAttributeNames("Users", exclude = ["age", "height"])
 		"""
 
 		table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
 		attributeList = [attribute[1] for attribute in table_info if attribute[1] not in exclude]
 
 		return attributeList
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def getAttributeDefaults(self, relation, attribute = None, exclude = []):
+		"""Returns the defaults of the requested attribute (columns) in the given relation (table).
+
+		relation (str) - The name of the relation
+		attribute (str) - The name of the attribute to get the default for. Can be a list of attributes
+			- If None: Will get the defaults for all attributes
+		exclude (list) - A list of which attributes to excude from the returned result
+
+		Example Input: getAttributeDefaults("Users")
+		Example Input: getAttributeDefaults("Users", ["age", "height"])
+		Example Input: getAttributeDefaults("Users", exclude = ["id"])
+		"""
+
+		if (not isinstance(exclude, (list, tuple, range))):
+			exclude = [exclude]
+		exclude = [str(item) for item in exclude]
+
+		if (attribute != None):
+			if (not isinstance(attribute, (list, tuple, range, ))):
+				attribute = [attribute]
+			attribute = [str(item) for item in attribute]
+
+		defaults = self.getSchema(relation)["default"]
+
+		if (attribute != None):
+			for item in defaults:
+				if (item not in attribute):
+					exclude.append(item)
+
+		for item in exclude:
+			if (str(item) in defaults):
+				del defaults[str(item)]
+
+		return defaults
+
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
