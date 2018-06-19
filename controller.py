@@ -131,12 +131,6 @@ class Database():
 		if (fileName != None):
 			self.openDatabase(fileName = fileName , applyChanges = applyChanges, multiThread = multiThread)
 
-	def __del__(self):
-		"""Makes sure that the opened database has been closed."""
-
-		if (self.connection != None):
-			self.closeDatabase()
-
 	#Utility Functions
 	def getType(self, pythonType):
 		"""Translates a python data type into an SQL data type.
@@ -303,8 +297,8 @@ class Database():
 
 		raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))[0][0]
 		autoIncrement_list = search(raw_sql, "AUTOINCREMENT")
-		unsigned_list = re.findall(raw_sql, "UNSIGNED")
-		unique_list = re.findall(raw_sql, "UNIQUE")
+		unsigned_list = search(raw_sql, "UNSIGNED")
+		unique_list = search(raw_sql, "UNIQUE")
 
 		#Keys
 		for item in table_info:
