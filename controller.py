@@ -5,6 +5,7 @@ __version__ = "3.2.0"
 
 import re
 import time
+import pyodbc
 import sqlite3
 import warnings
 import traceback
@@ -17,8 +18,9 @@ import threading
 #Required Modules
 ##py -m pip install
 	# sqlite3
+	# pyodbc
 
-threadLock = threading.Lock()
+threadLock = threading.RLock()
 
 #Decorators
 def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
@@ -107,7 +109,7 @@ class Database():
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 	"""
 
-	def __init__(self, fileName = None, applyChanges = True, multiThread = False):
+	def __init__(self, fileName = None, *args, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
@@ -119,6 +121,7 @@ class Database():
 
 		#Internal variables
 		self.defaultFileExtension = ".db"
+		self.connectionType = None
 		self.connection = None
 		self.cursor = None
 		self.defaultCommit = None
@@ -129,7 +132,7 @@ class Database():
 
 		#Initialization functions
 		if (fileName != None):
-			self.openDatabase(fileName = fileName , applyChanges = applyChanges, multiThread = multiThread)
+			self.openDatabase(fileName = fileName, *args, **kwargs)
 
 	#Utility Functions
 	def getType(self, pythonType):
@@ -161,6 +164,16 @@ class Database():
 
 		return sqlType
 
+	def getDriverList(self, key = None):
+		"""Returns a list of all drivers that can be accessed.
+
+		Example Input: getDriverList()
+		"""
+
+		if (key != None):
+			return [item for item in pyodbc.drivers() if (key in item)]
+		return list(pyodbc.drivers())
+
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def getFileName(self, includePath = True):
@@ -183,10 +196,13 @@ class Database():
 		Example Input: getRelationNames(["Users", "Names"])
 		"""
 
-		exclude.append("sqlite_sequence")
-
-		relationList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'table'")
-		relationList = [relation[0] for relation in relationList if relation[0] not in exclude]
+		if (isinstance(self.cursor, sqlite3.Cursor)):
+			exclude.append("sqlite_sequence")
+			relationList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'table'")
+			relationList = [relation[0] for relation in relationList if (relation[0] not in exclude)]
+		else:
+			relationList = [table_info.table_name for table_info in self.cursor.tables(tableType = 'TABLE')]
+			relationList = [relation for relation in relationList if (relation not in exclude)]
 
 		return relationList
 
@@ -258,6 +274,7 @@ class Database():
 
 	def getSchema(self, relation):
 		"""Returns the SQL Schema for the given relation (table).
+		Use: https://groups.google.com/forum/#!topic/comp.lang.python/l1UaZomqMSk
 
 		Example Input: getSchema("Users")
 		"""
@@ -277,7 +294,7 @@ class Database():
 				)[^,\[\]]*?{state}""", raw_sql)
 
 		################################################################
-
+	
 		#Setup
 		data = {}
 		data["schema"] = {}
@@ -289,41 +306,69 @@ class Database():
 		data["foreign"] = {}
 		data["default"] = {}
 
-		#Get Schema Info
-		table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
+		if (self.connectionType == "sqlite3"):
+			#Get Schema Info
+			table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
 
-		foreign_key_list = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
-		foreign_key_list.reverse()
+			foreign_key_list = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
+			foreign_key_list.reverse()
 
-		raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))[0][0]
-		autoIncrement_list = search(raw_sql, "AUTOINCREMENT")
-		unsigned_list = search(raw_sql, "UNSIGNED")
-		unique_list = search(raw_sql, "UNIQUE")
+			raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))[0][0]
+			autoIncrement_list = search(raw_sql, "AUTOINCREMENT")
+			unsigned_list = search(raw_sql, "UNSIGNED")
+			unique_list = search(raw_sql, "UNIQUE")
 
-		#Keys
-		for item in table_info:
-			columnName, dataType, null, default, primaryKey = item[1], item[2], item[3], item[4], item[5]
+			#Keys
+			for item in table_info:
+				columnName, dataType, null, default, primaryKey = item[1], item[2], item[3], item[4], item[5]
 
-			data["schema"][columnName] = dataType
-			data["notNull"][columnName] = bool(null)
-			data["primary"][columnName] = bool(primaryKey)
-			data["default"][columnName] = default
+				data["schema"][columnName] = dataType
+				data["notNull"][columnName] = bool(null)
+				data["primary"][columnName] = bool(primaryKey)
+				data["default"][columnName] = default
 
-			if (columnName in autoIncrement_list):
-				data["autoIncrement"][columnName] = True
+				if (columnName in autoIncrement_list):
+					data["autoIncrement"][columnName] = True
 
-			if (columnName in unsigned_list):
-				data["unsigned"][columnName] = True
+				if (columnName in unsigned_list):
+					data["unsigned"][columnName] = True
 
-			if (columnName in unique_list):
-				data["unique"][columnName] = True
+				if (columnName in unique_list):
+					data["unique"][columnName] = True
 
-		#Foreign
-		for item in foreign_key_list:
-			foreign_relation, attribute, foreign_attribute = item[2], item[3], item[4]
+			#Foreign
+			for item in foreign_key_list:
+				foreign_relation, attribute, foreign_attribute = item[2], item[3], item[4]
 
-			data["foreign"][attribute] = {foreign_relation: foreign_attribute}
+				data["foreign"][attribute] = {foreign_relation: foreign_attribute}
+		else:
+			for item in self.cursor.statistics(table = relation):
+				non_unique    = item[3]
+				column        = item[7]
+				attributeName = item[8]
+				rows          = item[10]
+				pages         = item[11]
 
+				if (not non_unique):
+					data["unique"][attributeName] = True
+
+			for item in self.cursor.columns(table = relation):
+				attributeName = item[3]
+				typeName      = item[5]
+				canBeNull     = item[9]
+				columnSize    = item[6]
+				default       = item[12]
+				includesNull  = item[17]
+
+				if (not canBeNull):
+					data["notNull"][attributeName] = True
+				data["default"][attributeName] = True
+
+			if (self.connectionType != "access"):
+				primary_key_list = self.cursor.primaryKeys(table = relation)
+				foreign_key_list = self.cursor.foreignKey(relation)
+				jkjkhkhjkkj
+			
 		return data
 
 	def updateInternalforeignSchemas(self):
@@ -331,12 +376,22 @@ class Database():
 		Special Thanks to Davoud Taghawi-Nejad for how to get a list of table names on https://stackoverflow.com/questions/305378/list-of-tables-db-schema-dump-etc-using-the-python-sqlite3-api
 		"""
 
+		if (self.connectionType == "access"):
+			#ODBC Driver does not support Foreign Keys for MS Access
+			self.foreignKeys_catalogue = {}
+			return 
+
 		#Get the table names
 		relationList = self.getRelationNames()
 
 		#Get the foreign schema for each relation
 		for relation in relationList:
-			foreign_schemaList = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
+				
+			if (self.connectionType != "sqlite3"):
+				foreign_key_list = self.cursor.foreignKeys(table = relation)
+				lkiuiulil
+			elif (self.connectionType == "sqlite3"):
+				foreign_schemaList = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
 
 			#Do not check for relations with no foreign keys in their schema
 			if (len(foreign_schemaList) > 0):
@@ -594,15 +649,18 @@ class Database():
 
 		#Run Command
 		# print("@0.1", command, valueList)
-		try:
-			threadLock.acquire(True)
-			result = list(self.cursor.execute(command, valueList))
-		except Exception as error:
-			if (printError_command):
-				print(f"-- {command}, {valueList}")
-			raise error
-		finally:
-			threadLock.release()
+		with threadLock:
+			try:
+				result = self.cursor.execute(command, valueList)
+				try:
+					result = list(result)
+				except pyodbc.ProgrammingError:
+					result = []
+
+			except Exception as error:
+				if (printError_command):
+					print(f"-- {command}, {valueList}")
+				raise error
 
 		# print("@0.2", result)
 
@@ -622,11 +680,16 @@ class Database():
 
 	#Interaction Functions
 	@wrap_errorCheck()
-	def openDatabase(self, fileName = "myDatabase", applyChanges = True, multiThread = False):
+	def openDatabase(self, fileName = "myDatabase", *args, applyChanges = True, multiThread = False, connectionType = "sqlite3", 
+		password = None, readOnly = False):
+
 		"""Opens a database.If it does not exist, then one is created.
 		Note: If a database is already opened, then that database will first be closed.
-		Special thanks toLarry Lustig for help with multi-threading on http://stackoverflow.com/questions/22739590/how-to-share-single-sqlite-connection-in-multi-threaded-python-application
-		# Special thanks to culix for help with multi-threading on http://stackoverflow.com/questions/6297404/multi-threaded-use-of-sqlalchemy
+		Use: toLarry Lustig for help with multi-threading on http://stackoverflow.com/questions/22739590/how-to-share-single-sqlite-connection-in-multi-threaded-python-application
+		Use: to culix for help with multi-threading on http://stackoverflow.com/questions/6297404/multi-threaded-use-of-sqlalchemy
+
+		Use: https://stackoverflow.com/questions/31164610/connect-to-sqlite3-server-using-pyodbc-python
+		Use: http://www.blog.pythonlibrary.org/2010/10/10/sqlalchemy-and-microsoft-access/
 
 		fileName (str)      - The name of the database file
 		applyChanges (bool) - Determines the default for when changes are saved to the database
@@ -650,13 +713,40 @@ class Database():
 
 		#Configure Options
 		self.defaultCommit = applyChanges
+		self.connectionType = connectionType
 
 		#Establish connection
-		if (multiThread):
-			#Temporary fix until I learn SQLAlchemy to do this right
-			self.connection = sqlite3.connect(fileName, check_same_thread = False)
+		if (connectionType == "sqlite3"):
+			if (multiThread):
+				#Temporary fix until I learn SQLAlchemy to do this right
+				self.connection = sqlite3.connect(fileName, check_same_thread = False)
+			else:
+				self.connection = sqlite3.connect(fileName)
+		elif (connectionType == "access"):
+			driverList = self.getDriverList("Microsoft Access Driver")
+			if (len(driverList) == 0):
+				errorMessage = "You need to install 'Microsoft Access Database Engine 2010 Redistributable'. It can be found at: https://www.microsoft.com/en-US/download/details.aspx?id=13255"
+				raise SyntaxError(errorMessage)
+
+			if ("Microsoft Access Driver (*.mdb, *.accdb)" in driverList):
+				driver = "Microsoft Access Driver (*.mdb, *.accdb)"
+
+			elif (".accdb" in fileName):
+				errorMessage = "You need to install 'Microsoft Access Database Engine 2010 Redistributable'. It can be found at: https://www.microsoft.com/en-US/download/details.aspx?id=13255"
+				raise SyntaxError(errorMessage)
+
+			else:
+				driver = "Microsoft Access Driver (*.mdb)"
+
+			self.connection = pyodbc.connect(driver = driver, dbq = fileName)
+
+			#Use: https://github.com/mkleehammer/pyodbc/wiki/Unicode
+			self.connection.setdecoding(pyodbc.SQL_CHAR, encoding = "utf-8")
+			self.connection.setdecoding(pyodbc.SQL_WCHAR, encoding = "utf-8")
+			self.connection.setencoding(encoding = "utf-8")
 		else:
-			self.connection = sqlite3.connect(fileName)
+			errorMessage = f"Unknown connection type {connectionType}"
+			raise KeyError(errorMessage)
 
 		self.cursor = self.connection.cursor()
 
@@ -708,7 +798,13 @@ class Database():
 
 		if (relation != None):
 			#Ensure correct spaces format
-			command = "DROP TABLE IF EXISTS [{}]".format(relation)
+			if (self.connectionType == "sqlite3"):
+				command = "DROP TABLE IF EXISTS [{}]".format(relation)
+			else:
+				if (relation not in self.getRelationNames()):
+					return
+
+				command = "DROP TABLE [{}]".format(relation)
 			self.executeCommand(command)
 
 			#Save Changes
@@ -884,19 +980,20 @@ class Database():
 				elif(autoPrimary_override):
 					schemaFormatted += " PRIMARY KEY"
 				
-			if ((len(autoIncrement) != 0) or (autoPrimary_override)):
-				if (item in autoIncrement):
-					if (autoIncrement[item]):
+			if (self.connectionType == "sqlite3"):
+				if ((len(autoIncrement) != 0) or (autoPrimary_override)):
+					if (item in autoIncrement):
+						if (autoIncrement[item]):
+							schemaFormatted += " AUTOINCREMENT"
+					elif(autoPrimary_override):
 						schemaFormatted += " AUTOINCREMENT"
-				elif(autoPrimary_override):
-					schemaFormatted += " AUTOINCREMENT"
 				
-			# if (len(unsigned) != 0):
-				# if (item in unsigned):
-				# 	if (unsigned[item]):
-				# 		schemaFormatted += " UNSIGNED"
-				# elif(autoPrimary_override):
-				# 	schemaFormatted += " UNSIGNED"
+				# if (len(unsigned) != 0):
+					# if (item in unsigned):
+					# 	if (unsigned[item]):
+					# 		schemaFormatted += " UNSIGNED"
+					# elif(autoPrimary_override):
+					# 	schemaFormatted += " UNSIGNED"
 				
 			if ((len(unique) != 0) or (autoPrimary_override)):
 				if (item in unique):
@@ -949,6 +1046,17 @@ class Database():
 
 			return schemaFormatted
 
+		################################
+
+		if (self.connectionType == "access"):
+			if ((foreign != None) and (len(foreign) != 0)):
+				errorMessage = "The ODBC driver for MS Access does not support foreign keys"
+				raise KeyError(errorMessage)
+			if ((primary != None) and (len(primary) != 0)):
+				errorMessage = "The ODBC driver for MS Access does not support primary keys"
+				raise KeyError(errorMessage)
+			autoPrimary = False
+
 		#Ensure correct format
 		if (not isinstance(schema, (list, tuple))):
 			schema = [schema]
@@ -958,7 +1066,7 @@ class Database():
 		#Build SQL command
 		command = "CREATE TABLE "
 
-		if (noReplication != None):
+		if ((noReplication != None) and (self.connectionType == "sqlite3")):
 			command += "IF NOT EXISTS "
 
 		else:
@@ -1085,16 +1193,33 @@ class Database():
 			uniqueState = self.getSchema(relation)["unique"]
 			for attribute, value in myTuple.items():
 				if ((attribute in uniqueState) and (uniqueState[attribute]) and (isinstance(value, NULL))):
-					existsCheck = self.getValue({relation: "id"}, {attribute: value})["id"]
+					existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
 					if (len(existsCheck) != 0):
 						return
 
 		command = "INSERT "
-		if (unique != None):
-			if (unique):
-				command += "OR REPLACE "
+		if (self.connectionType != "access"):
+			if (unique != None):
+				if (unique):
+					command += "OR REPLACE "
+			else:
+				command += "OR IGNORE "
 		else:
-			command += "OR IGNORE "
+			if (unique in [True, None]):
+				removeCatalogue = {} 
+				for attribute, value in myTuple.items():
+					existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
+					if (len(existsCheck) != 0):
+						removeCatalogue["attribute"] = existsCheck[0]
+
+				for attribute, oldValue in removeCatalogue.items():
+					if (unique):
+						jkjhjkhjhk #There are no row ids, so find a way to ensure only the one row is changed?
+						self.changeTuple({relation: attribute}, {attribute: oldValue}, myTuple[attribute], checkForeigen = checkForeigen)
+					del myTuple[attribute]
+				
+				if (len(myTuple) == 0):
+					return
 
 		command += "INTO [{}] (".format(relation)
 
@@ -1183,7 +1308,7 @@ class Database():
 				if (not forceMatch):
 					errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation}"
 					raise KeyError(errorMessage)
-				self.addTuple(relation, myTuple = {**{attribute: value}, **nextTo}, unique = None)
+				self.addTuple(relation, myTuple = {**nextTo, **{attribute: value}}, unique = None)
 			else:
 				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like)
 
@@ -1440,10 +1565,13 @@ class Database():
 						if (condition != None):
 							command += " ASC" if condition else " DESC"
 
-				if (limit != None):
+				if ((limit != None) and (self.connectionType != "access")):
 					command += " LIMIT {}".format(limit)
 
 				result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
+				
+				if ((limit != None) and (self.connectionType == "access")):
+					result = result[:limit]
 
 				#Check Foreign
 				if (checkForeigen):
@@ -1756,6 +1884,11 @@ class Database():
 		Example Input: createTrigger("Users_lastModified", "Users", reaction = "lastModified")
 		"""
 
+
+		if (self.connectionType == "access"):
+			errorMessage = "The ODBC driver for MS Access does not support adding triggers"
+			raise KeyError(errorMessage)
+
 		#Setup
 		valueList = []
 		command = "CREATE TRIGGER "
@@ -1860,6 +1993,11 @@ class Database():
 		Example Input: getTrigger("Users_lastModified")
 		"""
 
+
+		if (self.connectionType == "access"):
+			errorMessage = "The ODBC driver for MS Access does not support getting triggers"
+			raise KeyError(errorMessage)
+
 		triggerList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'trigger'")
 		triggerList = [trigger[0] for trigger in triggerList if trigger[0] not in exclude]
 
@@ -1883,6 +2021,10 @@ class Database():
 		Example Input: removeTrigger("Users_lastModified")
 		"""
 
+		if (self.connectionType == "access"):
+			errorMessage = "The ODBC driver for MS Access does not support removing triggers"
+			raise KeyError(errorMessage)
+
 		triggerList = self.getTrigger(label)
 		if (triggerList != None):
 			if (not isinstance(triggerList, (list, tuple, range))):
@@ -1899,12 +2041,11 @@ class Database():
 			if (applyChanges):
 				self.saveDatabase()
 
-def main():
-	"""The main program controller."""
-
+def test_sqlite():
 	#Create the database
-	database_API = Database()
+	database_API = build()
 	database_API.openDatabase("test.db", applyChanges = False)
+
 	database_API.removeRelation("Users")
 	database_API.removeRelation("Names")
 	database_API.removeRelation("Address")
@@ -1966,6 +2107,56 @@ def main():
 	print(database_API.getValue({"Users": ["name", "lastModified"]}))
 
 	database_API.saveDatabase()
+
+def test_access():
+	#Create the database
+	database_API = build()
+	database_API.openDatabase("H:/Python/Material_Tracker/empty.accdb", applyChanges = False, connectionType = "access")
+
+	database_API.removeRelation("Names")
+	database_API.removeRelation("Address")
+
+	#Create tables from the bottom up
+	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+	database_API.saveDatabase()
+
+	database_API.addTuple("Names", {"first_name": "Lorem", "extra_data": 4}, unique = None)
+	database_API.addTuple("Names", {"first_name": "Ipsum", "extra_data": 7}, unique = None)
+	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": 3}, unique = None)
+	database_API.addTuple("Names", {"first_name": "Sit",   "extra_data": 1}, unique = None)
+	database_API.addTuple("Names", {"first_name": "Amet",  "extra_data": 10}, unique = None)
+	
+	#Simple Actions
+	print("Simple Actions")
+	print(database_API.getValue({"Names": "first_name"}))
+	print(database_API.getValue({"Names": "first_name"}, filterRelation = False))
+	print(database_API.getValue({"Names": ["first_name", "extra_data"]}))
+	print()
+
+	#Ordering Data
+	print("Ordering Data")
+	print(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
+	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
+	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
+	print()
+
+	#Changing Attributes
+	print("Changing Attributes")
+	print(database_API.getValue({"Names": "first_name"}))
+	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
+	print(database_API.getValue({"Names": "first_name"}))
+	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
+	print(database_API.getValue({"Names": "first_name"}))
+	print()
+
+	database_API.saveDatabase()
+
+def main():
+	"""The main program controller."""
+
+	test_sqlite()
+	# test_access()
 
 if __name__ == '__main__':
 	main()
