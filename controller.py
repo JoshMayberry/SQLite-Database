@@ -22,6 +22,43 @@ import threading
 
 threadLock = threading.RLock()
 
+#Iterators
+class Iterator(object):
+	"""Used by handle objects to iterate over their nested objects."""
+
+	def __init__(self, data, filterNone = False):
+		if (not isinstance(data, (list, dict))):
+			data = data[:]
+
+		self.data = data
+		if (isinstance(self.data, dict)):
+			self.order = list(self.data.keys())
+
+			if (filterNone):
+				self.order = [key for key in self.data.keys() if key != None]
+			else:
+				self.order = [key if key != None else "" for key in self.data.keys()]
+
+			self.order.sort()
+
+			self.order = [key if key != "" else None for key in self.order]
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		if (not isinstance(self.data, dict)):
+			if not self.data:
+				raise StopIteration
+
+			return self.data.pop()
+		else:
+			if not self.order:
+				raise StopIteration
+
+			key = self.order.pop()
+			return self.data[key]
+
 #Decorators
 def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 	def decorator(function):
@@ -127,12 +164,49 @@ class Database():
 		self.defaultCommit = None
 		self.fileName = None
 		self.previousCommand = (None, None, None) #(command (str), valueList (tuple), result (any))
+		self.resultError_replacement = None
 
 		self.foreignKeys_catalogue = {} #A dictionary of already found foreign keys. {relation: {attribute: [foreign_relation, foreign_attribute]}}
 
 		#Initialization functions
 		if (fileName != None):
 			self.openDatabase(fileName = fileName, *args, **kwargs)
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		if (self.fileName != None):
+			output += f"-- File Name: {self.fileName}\n"
+		return output
+
+	# def __len__(self):
+	# 	return len(self[:])
+
+	# def __contains__(self, key):
+	# 	return self._get(key, returnExists = True)
+
+	# def __iter__(self):
+	# 	return Iterator(self.childCatalogue)
+
+	# def __getitem__(self, key):
+	# 	return self._get(key)
+
+	# def __setitem__(self, key, value):
+	# 	self.childCatalogue[key] = value
+
+	# def __delitem__(self, key):
+	# 	del self.childCatalogue[key]
+
+	def __enter__(self):			
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback != None):
+			print(exc_type, exc_value)
+			return False
 
 	#Utility Functions
 	def getType(self, pythonType):
@@ -201,7 +275,9 @@ class Database():
 			relationList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'table'")
 			relationList = [relation[0] for relation in relationList if (relation[0] not in exclude)]
 		else:
-			relationList = [table_info.table_name for table_info in self.cursor.tables(tableType = 'TABLE')]
+			relationList = [table_info.table_name for tableType in ("TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
+			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
+			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "SYSTEM TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
 			relationList = [relation for relation in relationList if (relation not in exclude)]
 
 		return relationList
@@ -218,8 +294,11 @@ class Database():
 		Example Input: getAttributeNames("Users", exclude = ["age", "height"])
 		"""
 
-		table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
-		attributeList = [attribute[1] for attribute in table_info if attribute[1] not in exclude]
+		if (isinstance(self.cursor, sqlite3.Cursor)):
+			table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation), valuesAsList = True)
+			attributeList = [attribute[1] for attribute in table_info if attribute[1] not in exclude]
+		else:
+			attributeList = [item[3] for item in self.cursor.columns(table = relation) if (item[3] not in exclude)]
 
 		return attributeList
 
@@ -650,12 +729,20 @@ class Database():
 		#Run Command
 		# print("@0.1", command, valueList)
 		with threadLock:
+			result = []
 			try:
-				result = self.cursor.execute(command, valueList)
+				resultCursor = self.cursor.execute(command, valueList)
 				try:
-					result = list(result)
+					while True:
+						try:
+							item = resultCursor.fetchone()
+							if (item == None):
+								break
+						except:
+							item = (self.resultError_replacement,)
+						result.append(item)
 				except pyodbc.ProgrammingError:
-					result = []
+					pass
 
 			except Exception as error:
 				if (printError_command):
@@ -680,8 +767,8 @@ class Database():
 
 	#Interaction Functions
 	@wrap_errorCheck()
-	def openDatabase(self, fileName = "myDatabase", *args, applyChanges = True, multiThread = False, connectionType = "sqlite3", 
-		password = None, readOnly = False):
+	def openDatabase(self, fileName = "myDatabase", *args, applyChanges = True, multiThread = False, connectionType = None, 
+		password = None, readOnly = False, resultError_replacement = None):
 
 		"""Opens a database.If it does not exist, then one is created.
 		Note: If a database is already opened, then that database will first be closed.
@@ -711,9 +798,19 @@ class Database():
 		if ("." not in fileName):
 			fileName += self.defaultFileExtension
 
+		if (connectionType == None):
+			if (fileName.endswith(("mdb", "accdb"))):
+				connectionType = "access"
+			else:
+				connectionType = "sqlite3"
+
 		#Configure Options
 		self.defaultCommit = applyChanges
 		self.connectionType = connectionType
+		self.resultError_replacement = resultError_replacement
+
+		if (self.resultError_replacement == None):
+			self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		#Establish connection
 		if (connectionType == "sqlite3"):
@@ -2042,6 +2139,7 @@ class Database():
 				self.saveDatabase()
 
 def test_sqlite():
+	print("sqlite3")
 	#Create the database
 	database_API = build()
 	database_API.openDatabase("test.db", applyChanges = False)
@@ -2109,9 +2207,10 @@ def test_sqlite():
 	database_API.saveDatabase()
 
 def test_access():
+	print("\n\naccess")
 	#Create the database
 	database_API = build()
-	database_API.openDatabase("H:/Python/Material_Tracker/empty.accdb", applyChanges = False, connectionType = "access")
+	database_API.openDatabase("H:/Python/Material_Tracker/empty.accdb", applyChanges = False)
 
 	database_API.removeRelation("Names")
 	database_API.removeRelation("Address")
@@ -2156,7 +2255,7 @@ def main():
 	"""The main program controller."""
 
 	test_sqlite()
-	# test_access()
+	test_access()
 
 if __name__ == '__main__':
 	main()
