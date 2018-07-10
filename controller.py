@@ -655,11 +655,30 @@ class Database():
 			return valueList
 		return results
 
-	def configureLocation(self, relation, nextTo, valueList, nextToCondition = True, checkForeigen = True, like = {}, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, forceMatch = True):
+	def configureLocation(self, relation, nextTo, valueList, nextToCondition = True, checkForeigen = True, like = {}, notLike = {}, isNull = {}, isNotNull = {},
+		greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, forceMatch = True):
 		"""Sets up the location portion of the SQL message."""
 
 		locationInfo = ""
-		for i, (criteriaAttribute, item) in enumerate(nextTo.items()):
+		def check(attribute, value, command, catalogue):
+			nonlocal locationInfo, valueList
+
+			if (attribute not in catalogue):
+				return True
+
+			if (not catalogue[attribute]):
+				return False
+
+			if (command in ["IS NULL", "IS NOT NULL"]):
+				locationInfo += f"{command}"
+			else:
+				locationInfo += f"{command} ?"
+				valueList.append(criteriaValue)
+
+		################################################
+
+		extendedCatalogue = {**nextTo, **like, **notLike, **isNull, **isNotNull, **greaterThan, **lessThan, **greaterThanOrEqualTo, **lessThanOrEqualTo}
+		for i, (criteriaAttribute, item) in enumerate(extendedCatalogue.items()):
 			if (not isinstance(item, (list, tuple))):
 				item = [item]
 			for j, criteriaValue in enumerate(item):
@@ -690,26 +709,22 @@ class Database():
 				else:
 					locationInfo += "[{}].[{}] ".format(relation, criteriaAttribute)
 
-					if ((relation in like) and (criteriaAttribute in like[relation])):
-						locationInfo += "LIKE "
-					elif ((relation in greaterThan) and (criteriaAttribute in greaterThan[relation])):
-						locationInfo += "> "
-					elif ((relation in lessThan) and (criteriaAttribute in lessThan[relation])):
-						locationInfo += "< "
-					elif ((relation in greaterThanOrEqualTo) and (criteriaAttribute in greaterThanOrEqualTo[relation])):
-						locationInfo += ">= "
-					elif ((relation in lessThanOrEqualTo) and (criteriaAttribute in lessThanOrEqualTo[relation])):
-						locationInfo += "<= "
+					for command, catalogue in {"LIKE": like, "NOT LIKE": notLike, "IS NULL": isNull, "IS NOT NULL": isNotNull, 
+					">": greaterThan, "<": lessThan, ">=": greaterThanOrEqualTo, "<=": lessThanOrEqualTo}.items():
+
+						answer = check(criteriaAttribute, criteriaValue, command, catalogue)
+						if (not answer):
+							break
 					else:
-						locationInfo += "= "
-					locationInfo += "?"
-					valueList.append(criteriaValue)
+						locationInfo += "= ?"
+						valueList.append(criteriaValue)
 
 		return locationInfo, valueList
 
 	def executeCommand(self, command, valueList = (), hackCheck = True, valuesAsList = None, filterTuple = False, printError_command = True):
 		"""Executes an SQL command. Allows for multi-threading.
 		Special thanks to Joaquin Sargiotto for how to lock threads on https://stackoverflow.com/questions/26629080/python-and-sqlite3-programmingerror-recursive-use-of-cursors-not-allowed
+		Use: https://stackoverflow.com/questions/5365451/problem-with-regexp-python-and-sqlite
 
 		command (str)     - The SQL command to run
 		valueList (tuple) - The variables to replace any '?' with in 'command'
@@ -1382,7 +1397,7 @@ class Database():
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def changeTuple(self, myTuple, nextTo, value, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
-		updateForeign = None, exclude = [], nextToCondition = True, like = {}):
+		updateForeign = None, exclude = [], nextToCondition = True, like = {}, notLike = {}, isNull = {}, isNotNull = {}):
 		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
@@ -1430,7 +1445,7 @@ class Database():
 					raise KeyError(errorMessage)
 				self.addTuple(relation, myTuple = {**nextTo, **{attribute: value}}, unique = None)
 			else:
-				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like)
+				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
 
 				command = "UPDATE [{}] SET [{}] = ? WHERE ({})".format(relation, attribute, locationInfo)
 				self.executeCommand(command, valueList)
@@ -1442,7 +1457,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def removeTuple(self, myTuple, like = {}, applyChanges = None,
+	def removeTuple(self, myTuple, like = {}, notLike = {}, isNull = {}, isNotNull = {}, applyChanges = None,
 		checkForeigen = True, updateForeign = True, exclude = [], nextToCondition = True):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
@@ -1475,7 +1490,7 @@ class Database():
 		#Account for multiple tuples to remove
 		for relation, nextTo in myTuple.items():
 			valueList = []
-			locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like)
+			locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
 			command = "DELETE FROM [{}] WHERE ({})".format(relation, locationInfo)
 			self.executeCommand(command, valueList)
 
@@ -1540,7 +1555,8 @@ class Database():
 	@wrap_connectionCheck()
 	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False, returnForeign = True,
 		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False, exclude = [],
-		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, like = {}):
+		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, 
+		like = {}, notLike = {}, isNull = {}, isNotNull = {}):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -1660,8 +1676,11 @@ class Database():
 				valueList = []
 				command = "SELECT [{}].[{}] FROM [{}]".format(relation, attribute, relation)
 
-				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition = nextToCondition, checkForeigen = checkForeigen, like = like, greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, lessThanOrEqualTo = lessThanOrEqualTo)
-				if (len(valueList) != 0):
+				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition = nextToCondition, checkForeigen = checkForeigen, 
+					like = like, notLike = notLike, isNull = isNull, isNotNull = isNotNull, 
+					greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, lessThanOrEqualTo = lessThanOrEqualTo)
+				# if (len(valueList) != 0):
+				if (len(locationInfo) != 0):
 					command += " WHERE ({})".format(locationInfo)
 
 				if (orderBy != None):
@@ -1691,6 +1710,7 @@ class Database():
 				if ((limit != None) and (self.connectionType != "access")):
 					command += " LIMIT {}".format(limit)
 
+				print("@3", command, valueList)
 				result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
 				
 				if ((limit != None) and (self.connectionType == "access")):
