@@ -5,6 +5,7 @@ __version__ = "3.2.0"
 
 import re
 import time
+import types
 import pyodbc
 import sqlite3
 import warnings
@@ -261,7 +262,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getRelationNames(self, exclude = []):
+	def getRelationNames(self, exclude = [], include = [], excludeFunction = None, includeFunction = None):
 		"""Returns the names of all relations (tables) in the database.
 
 		exclude (list) - A list of which relations to excude from the returned result
@@ -270,15 +271,31 @@ class Database():
 		Example Input: getRelationNames(["Users", "Names"])
 		"""
 
+		if (exclude == None):
+			exclude = []
+		elif (not isinstance(exclude, (list, tuple, range, types.GeneratorType))):
+			exclude = [exclude]
+
+		if (include == None):
+			include = []
+		elif (not isinstance(include, (list, tuple, range, types.GeneratorType))):
+			include = [include]
+
+		if (excludeFunction == None):
+			excludeFunction = lambda relation, myList: relation not in myList
+		if (includeFunction == None):
+			includeFunction = lambda relation, myList: relation in myList
+
 		if (isinstance(self.cursor, sqlite3.Cursor)):
 			exclude.append("sqlite_sequence")
 			relationList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'table'")
-			relationList = [relation[0] for relation in relationList if (relation[0] not in exclude)]
+			relationList = [relation[0] for relation in relationList if (((len(exclude) == 0) or excludeFunction(relation[0], exclude)) and ((len(include) == 0) or includeFunction(relation[0], include)))]
 		else:
 			relationList = [table_info.table_name for tableType in ("TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
 			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
 			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "SYSTEM TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
-			relationList = [relation for relation in relationList if (relation not in exclude)]
+			relationList = [relation for relation in relationList if (((len(exclude) == 0) or excludeFunction(relation, exclude)) and ((len(include) == 0) or includeFunction(relation, include)))]
+
 
 		return relationList
 
@@ -392,7 +409,13 @@ class Database():
 			foreign_key_list = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation), valuesAsList = True)
 			foreign_key_list.reverse()
 
-			raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))[0][0]
+			raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation))
+
+			if (len(raw_sql) == 0):
+				errorMessage = f"There is no relation {relation} in the database for {self.__repr__()}"
+				raise KeyError(errorMessage)
+			raw_sql = raw_sql[0][0]
+
 			autoIncrement_list = search(raw_sql, "AUTOINCREMENT")
 			unsigned_list = search(raw_sql, "UNSIGNED")
 			unique_list = search(raw_sql, "UNIQUE")
@@ -1589,6 +1612,7 @@ class Database():
 
 		Example Input: getValue({"Users": "name"})
 		Example Input: getValue({"Users": "name"}, valuesAsList = True)
+		Example Input: getValue({"Users": "name"}, valuesAsRows = None)
 		Example Input: getValue({"Users": "name"}, filterRelation = False)
 		Example Input: getValue({"Users": ["name", "age"]})
 
@@ -1614,7 +1638,6 @@ class Database():
 
 		Example Input: getValue({"Users": "age"}, {"name": "John"})
 		Example Input: getValue({"Users": "age"}, {"name": ["John", "Jane"]})
-		
 
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
 		"""
@@ -1623,6 +1646,9 @@ class Database():
 			results_catalogue = []
 		else:
 			results_catalogue = {}
+
+		if (nextTo == None):
+			nextTo = {}
 	
 		for i, (relation, attributeList) in enumerate(myTuple.items()):
 			#Account for multiple items
