@@ -269,6 +269,7 @@ class Database():
 
 		Example Input: getRelationNames()
 		Example Input: getRelationNames(["Users", "Names"])
+		Example Input: getRelationNames(include = ["_Job"], includeFunction = lambda relation, myList: any(relation.startswith(item) for item in myList)
 		"""
 
 		if (exclude == None):
@@ -1656,6 +1657,7 @@ class Database():
 		Example Input: getValue({"Users": "age"}, {"name": ["John", "Jane"]})
 
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
+		Example INput: getValue({"Constructor_VariableNames": "table"}, isNotNull = {"inventoryTitle": True}, exclude = ["_Job"])
 		"""
 
 		if (filterRelation and filterAttribute):
@@ -1710,7 +1712,6 @@ class Database():
 				if ((limit != None) and (self.connectionType != "access")):
 					command += " LIMIT {}".format(limit)
 
-				print("@3", command, valueList)
 				result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
 				
 				if ((limit != None) and (self.connectionType == "access")):
