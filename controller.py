@@ -1070,6 +1070,7 @@ class Database():
 		schema (dict)       - The relation schema. {attribute (str): data type (type)}
 			If a dictionary with multiple elements is given, the order will be randomized
 			If a list of one element dictionaries is given, the order will be the order of the list
+			If string is given, will use the full schema from the relation with this name
 		applyChanges (bool) - Determines if the database will be saved after the change is made
 			- If None: The default flag set upon opening the database will be used
 		autoPrimary (bool)   - Determines if a primary key will automatically be added to the new table. If notNull, primary, autoIncrement, or unsigned are given, they will override the defaults for this option
@@ -1093,6 +1094,8 @@ class Database():
 		Example Input: createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
 		Example Input: createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}})
 		Example Input: createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
+		
+		Example Input: createRelation("Users", "Backup Users"})
 		"""
 
 		def formatSchema(schemaFormatted, item, autoPrimary_override):
@@ -1194,7 +1197,7 @@ class Database():
 			autoPrimary = False
 
 		#Ensure correct format
-		if (not isinstance(schema, (list, tuple))):
+		if (not isinstance(schema, (list, tuple, str))):
 			schema = [schema]
 		if (not isinstance(foreign, (list, tuple))):
 			foreign = [foreign]
@@ -1209,6 +1212,18 @@ class Database():
 			self.removeRelation(relation)
 
 		command += "[" + str(relation) + "]"
+
+		if (isinstance(schema, str)):
+			raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(schema))
+
+			if (len(raw_sql) == 0):
+				errorMessage = f"There is no relation {schema} in the database for {self.__repr__()}"
+				raise KeyError(errorMessage)
+			raw_sql = raw_sql[0][0]
+
+			command += re.sub("CREATE TABLE .*?\(", f"(", raw_sql)
+			self.executeCommand(command)
+			return
 
 		#Format schema
 		firstRun = True
@@ -2199,6 +2214,7 @@ def test_sqlite():
 	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
 	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
 	database_API.createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
+	database_API.createRelation("Users Copy", "Users")
 	database_API.saveDatabase()
 
 	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
