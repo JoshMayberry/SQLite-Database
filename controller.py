@@ -523,20 +523,23 @@ class Database():
 	def insertForeign(self, relation, attribute, value, valueList, foreignNone = False):
 		"""Adds a foreign key to the table if needed."""
 
-		foreign_results = self.findForeign(relation, attribute)
-		if (len(foreign_results) != 0):
-			foreign_relation, foreign_attribute = foreign_results
+		if ((value != None) and (not isinstance(value, NULL))):
+			foreign_results = self.findForeign(relation, attribute)
+			if (len(foreign_results) != 0):
+				foreign_relation, foreign_attribute = foreign_results
 
-			if (value == None):
-				value = NULL()
-			if ((isinstance(value, NULL)) and ((isinstance(foreignNone, dict) and (attribute not in foreignNone) and foreignNone[attribute]) or (not foreignNone))):
+				if (value == None):
+					value = NULL()
+				if ((isinstance(value, NULL)) and ((isinstance(foreignNone, dict) and (attribute not in foreignNone) and foreignNone[attribute]) or (not foreignNone))):
+					valueList.append(value)
+					return valueList
+
+				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
+
+				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+				valueList.append(foreign_id[0])
+			else:
 				valueList.append(value)
-				return valueList
-
-			self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-
-			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-			valueList.append(foreign_id[0])
 		else:
 			valueList.append(value)
 
@@ -551,65 +554,68 @@ class Database():
 			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
 		"""
 
-		#Determine if a foreign link exists
-		foreign_results = self.findForeign(relation, attribute)
-		if (len(foreign_results) != 0):
-			foreign_relation, foreign_attribute = foreign_results
+		if ((value != None) and (not isinstance(value, NULL))):
+			#Determine if a foreign link exists
+			foreign_results = self.findForeign(relation, attribute)
+			if (len(foreign_results) != 0):
+				foreign_relation, foreign_attribute = foreign_results
 
-			#Determine if foreign key already exists
-			foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-			if (len(foreign_id) == 0):
-				if (not forceMatch):
-					errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for changeForeign()"
-					raise KeyError(errorMessage)
-
-				#Determine if current value already exists as a foreign key instead
-				checkValue = self.getValue({relation: attribute}, nextTo = nextTo, returnNull = False)[attribute]#, returnForeign = False)[attribute]
-				if (len(checkValue) == 0):
+				#Determine if foreign key already exists
+				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+				if (len(foreign_id) == 0):
 					if (not forceMatch):
-						errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation} for changeForeign()"
+						errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for changeForeign()"
 						raise KeyError(errorMessage)
-					
-					#Add a new foreign key
-					updateForeign = False
-				else:
-					checkValue = checkValue[0]
-					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: checkValue}, filterRelation = True, returnNull = False)["id"]
-					
-					if (len(foreign_id) == 0):
-						#Add a new foreign key
-						updateForeign = False
-			else:
-				checkValue = value
 
-			#Determine how to modify the foreign relation
-			if (updateForeign == None):
-				#Determine if the foreign key is used in other places
-				command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
-				results = self.executeCommand(command, checkValue, valuesAsList = True)
-				
-				if (len(results) > 1):
-					#Add a new foreign key
-					updateForeign = False
-				else:
-					#Determine if the foreign key is used in other tables
-					usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
-					if (len(usedKeys) != 0):
+					#Determine if current value already exists as a foreign key instead
+					checkValue = self.getValue({relation: attribute}, nextTo = nextTo, returnNull = False)[attribute]#, returnForeign = False)[attribute]
+					if (len(checkValue) == 0):
+						if (not forceMatch):
+							errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation} for changeForeign()"
+							raise KeyError(errorMessage)
+						
 						#Add a new foreign key
 						updateForeign = False
 					else:
-						#Update the existing foreign key
-						updateForeign = True
+						checkValue = checkValue[0]
+						foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: checkValue}, filterRelation = True, returnNull = False)["id"]
+						
+						if (len(foreign_id) == 0):
+							#Add a new foreign key
+							updateForeign = False
+				else:
+					checkValue = value
 
-			#Modify the foreign relation
-			if (updateForeign):
-				self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
+				#Determine how to modify the foreign relation
+				if (updateForeign == None):
+					#Determine if the foreign key is used in other places
+					command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
+					results = self.executeCommand(command, checkValue, valuesAsList = True)
+					
+					if (len(results) > 1):
+						#Add a new foreign key
+						updateForeign = False
+					else:
+						#Determine if the foreign key is used in other tables
+						usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
+						if (len(usedKeys) != 0):
+							#Add a new foreign key
+							updateForeign = False
+						else:
+							#Update the existing foreign key
+							updateForeign = True
+
+				#Modify the foreign relation
+				if (updateForeign):
+					self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
+				else:
+					self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
+					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
+
+				#Apply foreign id in place of value
+				valueList.append(foreign_id[0])
 			else:
-				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-
-			#Apply foreign id in place of value
-			valueList.append(foreign_id[0])
+				valueList.append(value)
 		else:
 			valueList.append(value)
 
@@ -690,7 +696,7 @@ class Database():
 					else:
 						locationInfo += " OR "
 
-				if (checkForeigen):
+				if (checkForeigen and (criteriaValue != None) and (not isinstance(criteriaValue, NULL))):
 					foreign_results = self.findForeign(relation, criteriaAttribute)
 					if (len(foreign_results) != 0):
 						foreign_relation, foreign_attribute = foreign_results
@@ -1757,7 +1763,7 @@ class Database():
 						pathway = results_catalogue[relation][attribute]
 
 				if (isinstance(result, dict)):
-					print("@1", result)
+					print(result)
 					ujhjkhk
 					pathway.append(result)
 				else:
