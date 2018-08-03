@@ -385,9 +385,9 @@ class Database():
 			Example Input: search(raw_sql, "UNIQUE")
 			"""
 
-			return re.findall(f"""(?:, |\()\[?((?#
-				)(?<=\[)(?:[^,\[\]]+)|(?#      variable with brackets
-				)(?<!\[)(?:[^,\[\]\s]+))\]?(?# variable without brackets
+			return re.findall(f"""(?:,|\()\s*?`?\[?((?#
+				)(?<=\[)(?:[^,`\[\]]+)|(?#      variable with brackets
+				)(?<!\[)(?:[^,`\[\]\s]+))\]?(?# variable without brackets
 				)[^,\[\]]*?{state}""", raw_sql)
 
 		################################################################
