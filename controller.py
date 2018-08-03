@@ -274,12 +274,12 @@ class Database():
 
 		if (exclude == None):
 			exclude = []
-		elif (not isinstance(exclude, (list, tuple, range, types.GeneratorType))):
+		elif (not isinstance(exclude, (list, tuple, range, set, types.GeneratorType))):
 			exclude = [exclude]
 
 		if (include == None):
 			include = []
-		elif (not isinstance(include, (list, tuple, range, types.GeneratorType))):
+		elif (not isinstance(include, (list, tuple, range, set, types.GeneratorType))):
 			include = [include]
 
 		if (excludeFunction == None):
@@ -579,9 +579,9 @@ class Database():
 		Special Thanks to Davoud Taghawi-Nejad for how to get a list of table names on https://stackoverflow.com/questions/305378/list-of-tables-db-schema-dump-etc-using-the-python-sqlite3-api
 		"""
 
+		self.foreignKeys_catalogue = {}
 		if (self.connectionType == "access"):
 			#ODBC Driver does not support Foreign Keys for MS Access
-			self.foreignKeys_catalogue = {}
 			return 
 
 		#Get the table names
@@ -1115,8 +1115,8 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def setSchema(self, relation, schema = {}, notNull = {}, primary = {}, autoIncrement = {},
-		unsigned = {}, unique = {}, default = {}, foreign = {}, applyChanges = None):
+	def setSchema(self, relation, schema = {}, notNull = {}, primary = {}, autoIncrement = {}, unsigned = {},
+		 unique = {}, default = {}, foreign = {}, remove = [], applyChanges = None, updateSchema = True):
 		"""Renames a relation (table) to the given name the user provides.
 
 		relation (str)      - What the relation is called in the .db
@@ -1127,22 +1127,29 @@ class Database():
 		Example Input: setSchema("Users", schema = {"counter": int})
 		"""
 
+		if (not isinstance(remove, (list, tuple, set))):
+			remove = [remove]
+		elif (isinstance(remove, (range, types.GeneratorType))):
+			remove = list(remove)
+
 		def applyChanges(old_thing, mod_thing):
 			"""Applies user modifications to the table settings."""
+			nonlocal remove
 
 			for new_key, new_value in mod_thing.items():
 				old_thing[new_key] = new_value
+
+			for item in remove:
+				if (item in old_thing):
+					del old_thing[item]
 
 			return old_thing
 
 		#Get current data
 		data = self.getSchema(relation)
-		table_contents = self.getAllValues(relation, orderBy = "id", filterRelation = False, valuesAsList = True, valuesAsRows = None, checkForeigen = False)
+		table_contents = self.getAllValues(relation, orderBy = "id", exclude = remove, filterRelation = False, valuesAsList = True, valuesAsRows = None, checkForeigen = False)
 
-		#Rename old table
-		self.renameRelation(relation, "tempCopy_{}".format(relation))
-
-		#Apply changes
+		#Determine changes
 		new_schema = applyChanges(data["schema"], schema)
 		new_foreign = applyChanges(data["foreign"], foreign)
 		new_notNull = applyChanges(data["notNull"], notNull)
@@ -1151,6 +1158,9 @@ class Database():
 		new_unsigned = applyChanges(data["unsigned"], unsigned)
 		new_unique = applyChanges(data["unique"], unique)
 		new_default = applyChanges(data["default"], default)
+
+		#Rename old table
+		self.renameRelation(relation, "tempCopy_{}".format(relation))
 
 		#Create new table
 		self.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
@@ -1163,6 +1173,9 @@ class Database():
 		
 		#Remove renamed table
 		self.removeRelation("tempCopy_{}".format(relation), applyChanges = applyChanges)
+
+		if (updateSchema):
+			self.updateInternalforeignSchemas()
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1279,6 +1292,17 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
+	def removeAttribute(self, relation, attribute):
+		"""Removes an attribute (column) from a relation (table).
+
+		Example Input: removeAttribute("Users", "date created")
+		Example Input: removeAttribute("Users", ["date created", "extra_data"])
+		"""
+
+		self.setSchema(relation, remove = attribute)
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
 	def addAttribute(self, relation, attribute, dataType = str, default = None, notNull = None, 
 		primary = None, autoIncrement = None, unsigned = None, unique = None, foreign = None, applyChanges = None):
 		"""Adds an attribute (column) to a relation (table).
@@ -1314,7 +1338,6 @@ class Database():
 			default = {attribute: default}, foreign = {attribute: foreign}, applyChanges = False, autoPrimary = False)
 
 		#Execute SQL
-		print("@1", command, "\n")
 		try:
 			self.executeCommand(command, printError_command = False)
 		except Exception as error:
@@ -1442,16 +1465,17 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def changeTuple(self, myTuple, nextTo, value, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
+	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
 		updateForeign = None, exclude = [], nextToCondition = True, like = {}, notLike = {}, isNull = {}, isNotNull = {}):
 		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 
-		myTuple (dict)   - What will be written to the tuple. {relation: attribute to change}
+		myTuple (dict)   - What will be written to the tuple. {relation: attribute to change} or {relation: {attribute to change: value}}
 		nextTo (dict)    - An attribute-value pair that is in the same tuple. {attribute next to one to change: value of this attribute}
 			- If more than one attribute is given, it will look for all cases
 		value (any)      - What will be written to the tuple
+			- If a value for 'myTuple' is a dict, this will be ignored
 		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
 			- If None: Do nothing
 			- If not None: Create a new row that contains the default values
@@ -1471,30 +1495,40 @@ class Database():
 		exclude (list)       - A list of tables to exclude from the 'updateForeign' check
 
 		Example Input: changeTuple({"Users": "name"}, {"age": 26}, "Amet")
+		Example Input: changeTuple({"Users": {"name": "Amet"}}, {"age": 26})
+		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
-
-		if (value == None):
-			value = NULL()
-		elif (not isinstance(value, NULL)):
-			value = f"{value}"
-
+		
 		#Account for multiple tuples to change
-		for relation, attribute in myTuple.items():
-			valueList = []
-			if (checkForeigen):
-				valueList = self.changeForeign(relation, attribute, nextTo, value, valueList, forceMatch, updateForeign)
+		for relation, attributeDict in myTuple.items():
+			#Account for multiple attributes to change
+			if (not isinstance(attributeDict, dict)):
+				if (isinstance(attributeDict, (list, tuple, range, set, types.GeneratorType))):
+					attributeDict = {item: value for item in attributeDict}
+				else:
+					attributeDict = {attributeDict: value}
+			for attribute, _value in attributeDict.items():
+				if (_value == None):
+					_value = NULL()
+				elif (not isinstance(_value, NULL)):
+					_value = f"{_value}"
 
-			currentValue = self.getValue({relation: attribute}, nextTo, filterRelation = True)[attribute]
-			if (len(currentValue) == 0):
-				if (not forceMatch):
-					errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation}"
-					raise KeyError(errorMessage)
-				self.addTuple(relation, myTuple = {**nextTo, **{attribute: value}}, unique = None)
-			else:
-				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
+				valueList = []
+				if (checkForeigen):
+					valueList = self.changeForeign(relation, attribute, nextTo, _value, valueList, forceMatch, updateForeign)
 
-				command = "UPDATE [{}] SET [{}] = ? WHERE ({})".format(relation, attribute, locationInfo)
-				self.executeCommand(command, valueList)
+				currentValue = self.getValue({relation: attribute}, nextTo, filterRelation = True)[attribute]
+				if (len(currentValue) == 0):
+					if (not forceMatch):
+						errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation}"
+						raise KeyError(errorMessage)
+					self.addTuple(relation, myTuple = {**nextTo, **{attribute: _value}}, unique = None)
+				else:
+					locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
+
+					command = "UPDATE [{}] SET [{}] = ? WHERE ({})".format(relation, attribute, locationInfo)
+					
+					self.executeCommand(command, valueList)
 			
 			if (applyChanges == None):
 				applyChanges = self.defaultCommit
