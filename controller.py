@@ -474,6 +474,106 @@ class Database():
 			
 		return data
 
+	def getDefinition(self, attribute, dataType = str, default = None, notNull = None, primary = None, autoIncrement = None, unsigned = None, unique = None, autoPrimary = False):
+		"""Returns the formatted column definition."""
+
+		command = "[{}] {}".format(attribute, self.getType(dataType))
+
+		if (default != None):
+			command += " DEFAULT ({})".format(default)
+
+		if ((notNull) or (autoPrimary)):
+				command += " NOT NULL"
+
+		if ((primary) or (autoPrimary)):
+				command += " PRIMARY KEY"
+
+		if (((autoIncrement) or (autoPrimary)) and (self.connectionType == "sqlite3")):
+				command += " AUTOINCREMENT"
+
+		# if ((unsigned) or (autoPrimary)):
+		# 		command += " UNSIGNED"
+
+		if ((unique) or (autoPrimary)):
+				command += " UNIQUE"
+
+		return command
+
+	def formatForigen(self, foreign = {}, schema = {}, notNull = {}, 
+		primary = {}, autoIncrement = {}, unsigned = {}, unique = {}, default = {}):
+		"""Formats a forigen key
+		More information at: http://www.sqlitetutorial.net/sqlite-foreign-key/
+		"""
+
+		command = ""
+
+		#Parse foreign keys
+		for attribute, foreign_dict in foreign.items():
+			#Skip items that will be added in as foreign keys
+			for schema_item in schema:
+				if ((schema_item != None) and (attribute in schema_item)):
+					break
+			else:
+				if (type(foreign_dict) == dict):
+					foreign_dataType = int
+				else:
+					foreign_dataType = foreign_dict
+
+				command += self.getDefinition(attribute, dataType = foreign_dataType, default = default.get(attribute, None),
+					notNull = notNull.get(attribute, None), primary = primary.get(attribute, None), autoIncrement = autoIncrement.get(attribute, None),
+					unsigned = unsigned.get(attribute, None), unique = unique.get(attribute, None), autoPrimary = False)
+
+				if (command != ""):
+					command += ", "
+
+		#Link foreign keys
+		for attribute, foreign_dict in foreign.items():
+			#Account for non-foreign keys
+			if (type(foreign_dict) == dict):
+				foreign_relation, foreign_attribute = list(foreign_dict.items())[0]
+				command += "FOREIGN KEY ([{}]) REFERENCES [{}]([{}])".format(attribute, foreign_relation, foreign_attribute)
+
+				#Account for multiple attributes
+				if (command != ""):
+					command += ", "
+
+		#Remove trailing comma
+		command = command[:-2]
+
+		return command
+
+	def formatSchema(self, schema = {}, applyChanges = None, autoPrimary = False, notNull = {}, 
+		primary = {}, autoIncrement = {}, unsigned = {}, unique = {}, default = {},	foreign = None):
+		"""A sub-function that adds adds a column definition and foreign keys.
+		Use: http://www.sqlitetutorial.net/sqlite-foreign-key/
+		"""
+
+		#Ensure correct format
+		if (not isinstance(schema, (list, tuple))):
+			schema = [schema]
+		if (not isinstance(foreign, (list, tuple))):
+			foreign = [foreign]
+
+		schemaFormatted = ""
+
+		#Add given attributes
+		definitionList = []
+		for schema_item in schema:
+			definitionList.append(", ".join(self.getDefinition(attribute, dataType = dataType, default = default.get(attribute, None),
+					notNull = notNull.get(attribute, None), primary = primary.get(attribute, None), autoIncrement = autoIncrement.get(attribute, None),
+					unsigned = unsigned.get(attribute, None), unique = unique.get(attribute, None), autoPrimary = autoPrimary)
+					for attribute, dataType in schema_item.items()))
+		schemaFormatted += ", ".join(item for item in definitionList if item)
+
+		#Add foreign keys
+		foreignList = []
+		for foreign_item in foreign:
+			if (foreign_item != None):
+				foreignList.append(self.formatForigen(foreign_item, schema = schema, notNull = notNull, primary = primary, 
+					autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, default = default))
+		schemaFormatted = ", ".join(item for item in [schemaFormatted] + foreignList if item)
+		return schemaFormatted
+
 	def updateInternalforeignSchemas(self):
 		"""Only remembers data from schema (1) is wanted and (2) that is tied to a foreign key.
 		Special Thanks to Davoud Taghawi-Nejad for how to get a list of table names on https://stackoverflow.com/questions/305378/list-of-tables-db-schema-dump-etc-using-the-python-sqlite3-api
@@ -1104,95 +1204,6 @@ class Database():
 		Example Input: createRelation("Users", "Backup Users"})
 		"""
 
-		def formatSchema(schemaFormatted, item, autoPrimary_override):
-			"""A sub-function that formats the schema for the user."""
-
-			if ((len(default) != 0) and (item in default)):
-				if (default[item] != None):
-					schemaFormatted += " DEFAULT ({})".format(default[item])
-
-			if ((len(notNull) != 0) or (autoPrimary_override)):
-				if (item in notNull):
-					if (notNull[item]):
-						schemaFormatted += " NOT NULL"
-				elif(autoPrimary_override):
-					schemaFormatted += " NOT NULL"
-
-			if ((len(primary) != 0) or (autoPrimary_override)):
-				if (item in primary):
-					if (primary[item]):
-						schemaFormatted += " PRIMARY KEY"
-				elif(autoPrimary_override):
-					schemaFormatted += " PRIMARY KEY"
-				
-			if (self.connectionType == "sqlite3"):
-				if ((len(autoIncrement) != 0) or (autoPrimary_override)):
-					if (item in autoIncrement):
-						if (autoIncrement[item]):
-							schemaFormatted += " AUTOINCREMENT"
-					elif(autoPrimary_override):
-						schemaFormatted += " AUTOINCREMENT"
-				
-				# if (len(unsigned) != 0):
-					# if (item in unsigned):
-					# 	if (unsigned[item]):
-					# 		schemaFormatted += " UNSIGNED"
-					# elif(autoPrimary_override):
-					# 	schemaFormatted += " UNSIGNED"
-				
-			if ((len(unique) != 0) or (autoPrimary_override)):
-				if (item in unique):
-					if (unique[item]):
-						schemaFormatted += " UNIQUE"
-				elif(autoPrimary_override):
-					schemaFormatted += " UNIQUE"
-
-			return schemaFormatted
-
-		def addforeign(schemaFormatted, foreignList, schema):
-			"""A sub-function that adds a foreign key for the user.
-			More information at: http://www.sqlitetutorial.net/sqlite-foreign-key/
-			"""
-
-			#Parse foreign keys
-			# schema_foreign = {} #
-			for foreign in foreignList:
-				for attribute, foreign_dict in foreign.items():
-					#Skip items that will be added in as foreign keys
-					for schema_item in schema:
-						if ((schema_item != None) and (attribute in schema_item)):
-							break
-					else:
-
-						if (type(foreign_dict) == dict):
-							schemaFormatted += "[{}] INTEGER".format(attribute)
-						else:
-							schemaFormatted += "[{}] {}".format(attribute, self.getType(foreign_dict))
-
-						schemaFormatted = formatSchema(schemaFormatted, attribute, False)
-
-						if (schemaFormatted != ""):
-							schemaFormatted += ", "
-
-			#Link foreign keys
-			for i, foreign in enumerate(foreignList):
-				for attribute, foreign_dict in foreign.items():
-					#Account for non-foreign keys
-					if (type(foreign_dict) == dict):
-						foreign_relation, foreign_attribute = list(foreign_dict.items())[0]
-						schemaFormatted += "FOREIGN KEY ([{}]) REFERENCES [{}]([{}])".format(attribute, foreign_relation, foreign_attribute)
-
-						#Account for multiple attributes
-						if (schemaFormatted != ""):
-							schemaFormatted += ", "
-
-			#Remove trailing comma
-			schemaFormatted = schemaFormatted[:-2]
-
-			return schemaFormatted
-
-		################################
-
 		if (self.connectionType == "access"):
 			if ((foreign != None) and (len(foreign) != 0)):
 				errorMessage = "The ODBC driver for MS Access does not support foreign keys"
@@ -1202,18 +1213,11 @@ class Database():
 				raise KeyError(errorMessage)
 			autoPrimary = False
 
-		#Ensure correct format
-		if (not isinstance(schema, (list, tuple, str))):
-			schema = [schema]
-		if (not isinstance(foreign, (list, tuple))):
-			foreign = [foreign]
-
 		#Build SQL command
 		command = "CREATE TABLE "
 
 		if ((noReplication != None) and (self.connectionType == "sqlite3")):
 			command += "IF NOT EXISTS "
-
 		else:
 			self.removeRelation(relation)
 
@@ -1232,30 +1236,12 @@ class Database():
 			return
 
 		#Format schema
-		firstRun = True
-		schemaFormatted = ""
-
-		#Add primary key
+		commandList = []
 		if (autoPrimary):
-			schemaFormatted += "id INTEGER"
-			schemaFormatted = formatSchema(schemaFormatted, "id", autoPrimary)
-
-		#Add given attributes
-		for schema_item in schema:
-			for i, (attribute, dataType) in enumerate(schema_item.items()):
-				if (schemaFormatted != ""):
-					schemaFormatted += ", "
-				schemaFormatted += "[{}] {}".format(attribute, self.getType(dataType))
-				schemaFormatted = formatSchema(schemaFormatted, attribute, False)
-
-		#Add foreign keys
-		for foreign_item in foreign:
-			if (foreign_item != None):
-				#Account for primary key
-				if (schemaFormatted != ""):
-					schemaFormatted += ", "
-
-				schemaFormatted = addforeign(schemaFormatted, [foreign_item], schema)
+			commandList.append(self.getDefinition("id", dataType = int, autoPrimary = True))
+		commandList.append(self.formatSchema(schema = schema, applyChanges = applyChanges, autoPrimary = False, notNull = notNull, 
+			primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, default = default, foreign = foreign))
+		schemaFormatted = ", ".join(commandList)
 
 		#Execute SQL
 		self.executeCommand(command + "({})".format(schemaFormatted))
@@ -1270,9 +1256,31 @@ class Database():
 		#Update internal foreign schema catalogue
 		self.updateInternalforeignSchemas()
 
+	def copyAttribute(self, source_relation, source_attribute, destination_relation, destination_attribute = None):
+		"""Copies an attribute from an existing table to another.
+
+		Example Input: copyAttribute("Names", "extra_data", "Users"):
+		"""
+
+		if (destination_attribute == None):
+			destination_attribute = source_attribute
+
+		data = self.getSchema(source_relation)
+		self.addAttribute(destination_relation, destination_attribute, 
+			dataType = data["schema"].get(source_attribute, str),
+			default = data["default"].get(source_attribute, None),
+			notNull = data["notNull"].get(source_attribute, None),
+			primary = data["primary"].get(source_attribute, None),
+			autoIncrement = data["autoIncrement"].get(source_attribute, None),
+			unsigned = data["unsigned"].get(source_attribute, None),
+			unique = data["unique"].get(source_attribute, None),
+			foreign = data["foreign"].get(source_attribute, None),
+			)
+
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def addAttribute(self, relation, attribute, dataType = str, default = None, applyChanges = None):
+	def addAttribute(self, relation, attribute, dataType = str, default = None, notNull = None, 
+		primary = None, autoIncrement = None, unsigned = None, unique = None, foreign = None, applyChanges = None):
 		"""Adds an attribute (column) to a relation (table).
 
 		relation (str)      - What the relation is called in the .db
@@ -1284,20 +1292,36 @@ class Database():
 		Example Input: addAttribute("Users", "date created", dataType = int)
 		"""
 
-		#Build SQL command
-		command = "ALTER TABLE [{}] ADD COLUMN [{}] {} ".format(relation, attribute, self.getType(dataType))
+		if (attribute in self.getAttributeNames(relation)):
+			errorMessage = f"{attribute} already exists in {relation}"
+			raise KeyError(errorMessage)
 
-		if (default != None):
-			# command += "DEFAULT [{}]".format(default)
-			command += "DEFAULT ({})".format(default)
-			# command += "DEFAULT {}".format(default)
+		if (primary and (True in self.getSchema(relation)["primary"].values())):
+			errorMessage = f"{relation} already has a primary key"
+			raise ValueError(errorMessage)
+
+		if (foreign or unique or (notNull and (default == None)) or primary):
+			#The desired behavior is not supported by "ALTER TABLE" in sqlite
+			return self.setSchema(relation, schema = {attribute: dataType}, notNull = {attribute: notNull}, primary = {attribute: primary}, 
+			autoIncrement = {attribute: autoIncrement}, unsigned = {attribute: unsigned}, unique = {attribute: unique}, 
+			default = {attribute: default}, foreign = {attribute: foreign}, applyChanges = applyChanges)
+
+		#Build SQL command
+		command = "ALTER TABLE [{}] ADD COLUMN ".format(relation)
+
+		command += self.formatSchema(schema = {attribute: dataType}, notNull = {attribute: notNull}, primary = {attribute: primary}, 
+			autoIncrement = {attribute: autoIncrement}, unsigned = {attribute: unsigned}, unique = {attribute: unique}, 
+			default = {attribute: default}, foreign = {attribute: foreign}, applyChanges = False, autoPrimary = False)
 
 		#Execute SQL
+		print("@1", command, "\n")
 		try:
 			self.executeCommand(command, printError_command = False)
 		except Exception as error:
 			if (error.__str__() == "Cannot add a column with non-constant default"):
-				self.setSchema(relation, schema = {attribute: self.getType(dataType)}, default = {attribute: default})
+				return self.setSchema(relation, schema = {attribute: dataType}, notNull = {attribute: notNull}, primary = {attribute: primary}, 
+			autoIncrement = {attribute: autoIncrement}, unsigned = {attribute: unsigned}, unique = {attribute: unique}, 
+			default = {attribute: default}, foreign = {attribute: foreign}, applyChanges = applyChanges)
 			else:
 				print(f"-- {command}, []")
 				raise error
