@@ -1477,8 +1477,9 @@ class Database():
 		value (any)      - What will be written to the tuple
 			- If a value for 'myTuple' is a dict, this will be ignored
 		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
+			- If True: Create a new row that contains the default values
+			- If False: Do nothing
 			- If None: Do nothing
-			- If not None: Create a new row that contains the default values
 
 		nextToCondition (bool) - Determines how to handle multiple nextTo criteria
 			- If True: All of the criteria given must match
@@ -1636,7 +1637,7 @@ class Database():
 	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False, returnForeign = True,
 		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False, exclude = [],
 		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, 
-		like = {}, notLike = {}, isNull = {}, isNotNull = {}):
+		like = {}, notLike = {}, isNull = {}, isNotNull = {}, forceMatch = None):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -1661,6 +1662,10 @@ class Database():
 			- If False: Descending order
 			- If None: No action taken
 		exclude (list) - What values to not return
+		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
+			- If True: Create a new row that contains the default values
+			- If False: Do nothing
+			- If None: Do nothing
 
 		nextToCondition (bool) - Determines how to handle multiple nextTo criteria
 			- If True: All of the criteria given must match
@@ -1825,6 +1830,13 @@ class Database():
 					ujhjkhk
 					pathway.append(result)
 				else:
+					if (forceMatch and (not result)):
+						self.addTuple(relation, myTuple = nextTo, unique = None)
+						result = self.getValue({relation: attribute}, nextTo, nextToCondition = nextToCondition, 
+							returnNull = returnNull, returnForeign = returnForeign, checkForeigen = checkForeigen, 
+							greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, 
+							lessThanOrEqualTo = lessThanOrEqualTo, like = like, notLike = notLike, isNull = isNull, 
+							isNotNull = isNotNull, forceMatch = False)[attribute]
 					for item in result:
 						if (item not in exclude):
 							pathway.append(item)
