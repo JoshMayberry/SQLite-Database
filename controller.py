@@ -70,11 +70,13 @@ def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 			Example Usage: @wrap_connectionCheck()
 			"""
 
-			if (self.connection != None):
-				answer = function(self, *args, **kwargs)
-			else:
-				warnings.warn("No database is open", Warning, stacklevel = 2)
-				answer = None
+			return function(self, *args, **kwargs)
+
+			# if (self.connection != None):
+			# 	answer = function(self, *args, **kwargs)
+			# else:
+			# 	warnings.warn("No database is open", Warning, stacklevel = 2)
+			# 	answer = None
 
 			return answer
 		return wrapper
@@ -147,30 +149,36 @@ class Database():
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 	"""
 
-	def __init__(self, fileName = None, *args, **kwargs):
+	def __init__(self, fileName = None, keepOpen = True, *args, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
 		fileName (str) - If not None: Opens the provided database automatically
+		keepOpen (bool) - Determines if the database is kept open or not
+			- If True: The database will remain open until closed by the user or the program terminates
+			- If False: The database will be opened only when it needs to be accessed, and closed afterwards
 
 		Example Input: Database()
 		Example Input: Database("emaildb")
 		"""
 
 		#Internal variables
-		self.defaultFileExtension = ".db"
-		self.connectionType = None
-		self.connection = None
 		self.cursor = None
-		self.defaultCommit = None
 		self.fileName = None
+		self.connection = None
+		self.connectionSetup = []
+		self.keepOpen = keepOpen
+		self.defaultCommit = None
+		self.connectionType = None
+		self.defaultFileExtension = ".db"
 		self.previousCommand = (None, None, None) #(command (str), valueList (tuple), result (any))
 		self.resultError_replacement = None
 
-		self.foreignKeys_catalogue = {} #A dictionary of already found foreign keys. {relation: {attribute: [foreign_relation, foreign_attribute]}}
+		self.foreignKeys_catalogue = {} #{relation (str): {attribute (str): [foreign_relation (str), foreign_attribute (str)]}}
+		self.forigenKeys_used = {} #{foreign_relation (str): {foreign_attribute (str): {index (int): {relation (str): count (int)}}}}
 
 		#Initialization functions
-		if (fileName != None):
+		if ((self.keepOpen) and (fileName != None)):
 			self.openDatabase(fileName = fileName, *args, **kwargs)
 
 	def __repr__(self):
@@ -239,6 +247,39 @@ class Database():
 
 		return sqlType
 
+	def yieldKey(self, subject, catalogue = {}, exclude = set()):
+		"""A convenience function for iterating over subject.
+
+		subject (any) - Determines what is yielded
+			- If None: Yields each key in 'catalogue'
+			- If list: Yields a key in 'catalogue' for each item in 'subject'
+			- If other: Yields 'subject' if it is a key in 'catalogue'
+
+		exclude (set) - A list of keys to not yield from catalogue
+
+		Example Input: yieldKey(relation, self.forigenKeys_used, exclude = exclude)
+		Example Input: yieldKey(attribute, self.forigenKeys_used[_relation])
+		"""
+
+		if (subject == None):
+			for key in catalogue:
+				if (key in exclude):
+					continue
+				yield key
+			return
+
+		if (isinstance(subject, (list, tuple, set, range, types.GeneratorType))):
+			for key in subject:
+				if (key in exclude):
+					continue
+				if (key not in catalogue):
+					continue
+				yield key
+			return
+
+		if ((subject not in exclude) and (subject in catalogue)):
+			yield subject
+
 	def getDriverList(self, key = None):
 		"""Returns a list of all drivers that can be accessed.
 
@@ -250,7 +291,6 @@ class Database():
 		return list(pyodbc.drivers())
 
 	@wrap_errorCheck()
-	@wrap_connectionCheck()
 	def getFileName(self, includePath = True):
 		"""Returns the name of the database.
 
@@ -288,7 +328,10 @@ class Database():
 			includeFunction = lambda relation, myList: relation in myList
 
 		if (isinstance(self.cursor, sqlite3.Cursor)):
-			exclude.append("sqlite_sequence")
+			if (isinstance(exclude, set)):
+				exclude.add("sqlite_sequence")
+			else:
+				exclude.append("sqlite_sequence")
 			relationList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'table'")
 			relationList = [relation[0] for relation in relationList if (((len(exclude) == 0) or excludeFunction(relation[0], exclude)) and ((len(include) == 0) or includeFunction(relation[0], include)))]
 		else:
@@ -635,14 +678,12 @@ class Database():
 					return valueList
 
 				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-
 				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
 				valueList.append(foreign_id[0])
 			else:
 				valueList.append(value)
 		else:
 			valueList.append(value)
-
 		return valueList
 
 	def changeForeign(self, relation, attribute, nextTo, value, valueList, forceMatch, updateForeign):
@@ -697,8 +738,8 @@ class Database():
 						updateForeign = False
 					else:
 						#Determine if the foreign key is used in other tables
-						usedKeys = self.getForeignUses(attributeList = attribute, keepDuplicates = True, exclude = relation, updateSchema = False)
-						if (len(usedKeys) != 0):
+						usedKeys = self.getForeignUses(foreign_relation, foreign_attribute, foreign_id[0], exclude = relation, updateSchema = False)
+						if (usedKeys):
 							#Add a new foreign key
 							updateForeign = False
 						else:
@@ -828,7 +869,8 @@ class Database():
 
 		return locationInfo, valueList
 
-	def executeCommand(self, command, valueList = (), hackCheck = True, valuesAsList = None, filterTuple = False, printError_command = True):
+	def executeCommand(self, command, valueList = (), hackCheck = True, filterNone = False,
+		valuesAsList = None, valuesAsSet = False, filterTuple = False, printError_command = True):
 		"""Executes an SQL command. Allows for multi-threading.
 		Special thanks to Joaquin Sargiotto for how to lock threads on https://stackoverflow.com/questions/26629080/python-and-sqlite3-programmingerror-recursive-use-of-cursors-not-allowed
 		Use: https://stackoverflow.com/questions/5365451/problem-with-regexp-python-and-sqlite
@@ -893,27 +935,43 @@ class Database():
 				if (printError_command):
 					print(f"-- {command}, {valueList}")
 				raise error
-
+			
+			self.previousCommand = (command, valueList, result)
 		# print("@0.2", result)
 
 		#Configure results
-		if (valuesAsList != None):
-			result = list(result)
-
-			if (filterTuple and (len(result) > 0) and (len(result[0]) == 1)):
-				for i, item in enumerate(result):
-					result[i] = item[0]
-
-			if (not valuesAsList):
-				result = tuple(result)
-
-		self.previousCommand = (command, valueList, result)
+		if (filterNone):
+			result = ((item for item in subList if item != None) for subList in result)
+			# result = [tuple(item for item in subList if item != None) for subList in result]
+		if (filterTuple):
+			result = [item for subList in result for item in subList]
+			if (valuesAsList):
+				return result
+			elif (not valuesAsSet):
+				return tuple(result)
+		elif (valuesAsList):
+			return list(result)
+		if (valuesAsSet):
+			return set(result)
 		return result
 
 	#Interaction Functions
+	def quickOpen(self):
+		assert self.connection != None
+
+		self.cursor = self.connection.cursor()
+	
+	def quickClose(self):
+		assert self.connection != None
+
+		self.cursor.close()
+
+	def setDefaultCommit(self, state):
+		self.defaultCommit = state
+
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = "myDatabase", *args, applyChanges = True, multiThread = False, connectionType = None, 
-		password = None, readOnly = False, resultError_replacement = None):
+		password = None, readOnly = False, resultError_replacement = None, keepOpen = None):
 
 		"""Opens a database.If it does not exist, then one is created.
 		Note: If a database is already opened, then that database will first be closed.
@@ -934,6 +992,14 @@ class Database():
 		Example Input: openDatabase("emaildb", applyChanges = False)
 		Example Input: openDatabase("emaildb", multiThread = True)
 		"""
+
+		if (not fileName):
+			fileName = self.fileName
+		if (keepOpen == None):
+			keepOpen = self.keepOpen
+		if (not keepOpen):
+			self.fileName = fileName
+			return
 
 		#Check for another open database
 		if (self.connection != None):
@@ -990,13 +1056,15 @@ class Database():
 			errorMessage = f"Unknown connection type {connectionType}"
 			raise KeyError(errorMessage)
 
-		self.cursor = self.connection.cursor()
+		if (keepOpen):
+			self.quickOpen()
 
 		#Update internal values
 		self.fileName = fileName
 
 		#Update internal foreign schema catalogue
 		self.updateInternalforeignSchemas()
+		self.updateForeignUses(updateSchema = False)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1006,7 +1074,7 @@ class Database():
 		Example Input: closeDatabase()
 		"""
 
-		self.cursor.close()
+		self.quickClose()
 
 		self.connection = None
 		self.cursor = None
@@ -1314,6 +1382,7 @@ class Database():
 			- If None: The default flag set upon opening the database will be used
 
 		Example Input: addAttribute("Users", "date created", dataType = int)
+		Example Input: addAttribute("_Job_1, "customer", dataType = str, foreign = {"Choices_Customer": "label"})
 		"""
 
 		if (attribute in self.getAttributeNames(relation)):
@@ -1401,13 +1470,13 @@ class Database():
 					if (len(existsCheck) != 0):
 						return
 
-		command = "INSERT "
+		command = "INSERT"
 		if (self.connectionType != "access"):
 			if (unique != None):
 				if (unique):
-					command += "OR REPLACE "
+					command += " OR REPLACE"
 			else:
-				command += "OR IGNORE "
+				command += " OR IGNORE"
 		else:
 			if (unique in [True, None]):
 				removeCatalogue = {} 
@@ -1425,36 +1494,32 @@ class Database():
 				if (len(myTuple) == 0):
 					return
 
-		command += "INTO [{}] (".format(relation)
-
 		#Build attribute side
-		itemList = myTuple.items()
 		valueList = []
-		for i, (attribute, value) in enumerate(itemList):
+		attributeList = []
+		for i, (attribute, value) in enumerate(myTuple.items()):
 			#Remember the associated value for the attribute
 			if (checkForeigen):
 				valueList = self.insertForeign(relation, attribute, value, valueList, foreignNone = foreignNone)
 			else:
 				valueList.append(value)
-			command += "[{}]".format(attribute)
+			attributeList.append(f"[{attribute}]")
+		command += f" INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for value in valueList)})"
 
-			#Account for multiple items
-			if (i != len(itemList) - 1):
-				command += ", "
+		if (relation not in self.foreignKeys_catalogue):
+			increment = False
+		else:
+			select_command = f"""SELECT id FROM [{relation}] WHERE ({" AND ".join(f"{attribute} = '{valueList[i]}'" for i, attribute in enumerate(attributeList))})"""
+			result = self.executeCommand(select_command)
+			increment = not result
 
-		#Build value side
-		command += ") VALUES ("
-		for i, value in enumerate(valueList):
-			command += "?"
-
-			#Account for multiple items
-			if (i != len(itemList) - 1):
-				command += ", "
-
-		command += ")"
-
-		##Run SQL command
+		#Run SQL command
 		self.executeCommand(command, valueList)
+
+		if (increment):
+			for index in self.executeCommand(select_command, valuesAsList = True, filterTuple = True, filterNone = True):
+				for _attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
+					self.addForeignUse(relation, index, foreign_relation, foreign_attribute)
 
 		#Save Changes
 		if (applyChanges == None):
@@ -1499,7 +1564,7 @@ class Database():
 		Example Input: changeTuple({"Users": {"name": "Amet"}}, {"age": 26})
 		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
-		
+				
 		#Account for multiple tuples to change
 		for relation, attributeDict in myTuple.items():
 			#Account for multiple attributes to change
@@ -1517,7 +1582,7 @@ class Database():
 				valueList = []
 				if (checkForeigen):
 					valueList = self.changeForeign(relation, attribute, nextTo, _value, valueList, forceMatch, updateForeign)
-
+				
 				currentValue = self.getValue({relation: attribute}, nextTo, filterRelation = True)[attribute]
 				if (len(currentValue) == 0):
 					if (not forceMatch):
@@ -1572,8 +1637,18 @@ class Database():
 		for relation, nextTo in myTuple.items():
 			valueList = []
 			locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
+			
+			if (relation in self.foreignKeys_catalogue):
+				for attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
+					command = "SELECT [{}] FROM [{}] WHERE ({})".format(attribute, relation, locationInfo)
+					result = self.executeCommand(command, valueList, valuesAsList = True, filterTuple = True, filterNone = True)
+					if (not result):
+						continue
+					self.subtractForeignUse(relation, result, foreign_relation, foreign_attribute)
+
 			command = "DELETE FROM [{}] WHERE ({})".format(relation, locationInfo)
 			self.executeCommand(command, valueList)
+
 
 		#Save Changes
 		if (applyChanges == None):
@@ -1584,15 +1659,17 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getAllValues(self, relation, exclude = [], **kwargs):
+	def getAllValues(self, relation = None, exclude = [], filterRelation = None, **kwargs):
 		"""Returns all values in the given relation (table) that match the filter conditions.
 
 		relation (str) - Which relation to look in
-			- If a list is given, it will look in each table. 
+			- If a list is given, it will look in each relation
+			- If None: Will return all values for each relation in the database
 		exclude (list) - A list of which tables to excude from the returned result
 			- If multiple tables are required, provide a dictionary for the tabel elements. {table 1: [attribute 1, attribute 2], table 2: attribute 3}
 			- If a list or single value is given, it will apply to all tables given
 
+		Example Input: getAllValues()
 		Example Input: getAllValues("Users")
 		Example Input: getAllValues("Users", orderBy = ["age"])
 		
@@ -1605,10 +1682,15 @@ class Database():
 		"""
 
 		#Ensure correct format
-		if ((type(relation) != list) and (type(relation) != tuple)):
+		if (relation == None):
+			relationList = self.getRelationNames()
+		elif ((type(relation) != list) and (type(relation) != tuple)):
 			relationList = [relation]
 		else:
 			relationList = relation
+
+		if (filterRelation == None):
+			filterRelation = len(relationList) <= 1
 
 		myTuple = {}
 		for relation in relationList:
@@ -1628,7 +1710,7 @@ class Database():
 			attributeNames = self.getAttributeNames(relation, excludeList)
 			myTuple[relation] = attributeNames
 
-		results_catalogue = self.getValue(myTuple, **kwargs)
+		results_catalogue = self.getValue(myTuple, filterRelation = filterRelation, **kwargs)
 
 		return results_catalogue
 
@@ -1741,7 +1823,7 @@ class Database():
 		Example Input: getValue({"Users": "age"}, {"name": ["John", "Jane"]})
 
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
-		Example INput: getValue({"Constructor_VariableNames": "table"}, isNotNull = {"inventoryTitle": True}, exclude = ["_Job"])
+		Example Input: getValue({"Constructor_VariableNames": "table"}, isNotNull = {"inventoryTitle": True}, exclude = ["_Job"])
 		"""
 
 		if (filterRelation and filterAttribute):
@@ -1856,27 +1938,21 @@ class Database():
 		#Switch rows and columns
 		new_results_catalogue = {}
 		for item_relation, item_catalogue in temp_results_catalogue.items():
+			new_results_catalogue[item_relation] = {}
 			if (valuesAsRows != None):
-				#Setup rows
-				new_results_catalogue[item_relation] = {"attributeNames": []}
-				for i in range(len(list(item_catalogue.values())[0])):
-					new_results_catalogue[item_relation][i] = []
-
-				#Change item order
+				new_results_catalogue[item_relation]["attributeNames"] = []
 				for item_attribute, item_value in item_catalogue.items():
 					new_results_catalogue[item_relation]["attributeNames"].append(item_attribute)
 
 					for i, subItem in enumerate(item_value):
+						if (i not in new_results_catalogue[item_relation]):
+							new_results_catalogue[item_relation][i] = []
 						new_results_catalogue[item_relation][i].append(subItem)
 			else:
-				#Setup rows
-				new_results_catalogue[item_relation] = {}
-				for i in range(len(list(item_catalogue.values())[0])):
-					new_results_catalogue[item_relation][i] = {}
-
-				#Change item order
 				for item_attribute, item_value in item_catalogue.items():
 					for i, subItem in enumerate(item_value):
+						if (i not in new_results_catalogue[item_relation]):
+							new_results_catalogue[item_relation][i] = {}
 						new_results_catalogue[item_relation][i][item_attribute] = subItem
 
 
@@ -1913,85 +1989,115 @@ class Database():
 						links[foreign_relation][foreign_attribute][relation].append(attribute)
 		return links
 
-	def getForeignUses(self, relationList = None, attributeList = None, updateSchema = True, keepDuplicates = False, exclude = []):
-		"""Returns how many places this foreign key is used.
-		{foreign relation: {foreign attribute: list of keys used}}
+	def addForeignUse(self, relation, index, foreign_relation, foreign_attribute):
+		"""Marks a forigen key as used in one place.
 
-		Example Input: getForeignUses("Users")
-		Example Input: getForeignUses("Users", "name")
+		Example Input: addForeignUse(relation, index, foreign_relation, foreign_attribute)
+		"""
+		
+		if (foreign_relation not in self.forigenKeys_used):
+			self.forigenKeys_used[foreign_relation] = {}
+		if (foreign_attribute not in self.forigenKeys_used[foreign_relation]):
+			self.forigenKeys_used[foreign_relation][foreign_attribute] = {}
+		if (index not in self.forigenKeys_used[foreign_relation][foreign_attribute]):
+			self.forigenKeys_used[foreign_relation][foreign_attribute][index] = {}
+		if (relation not in self.forigenKeys_used[foreign_relation][foreign_attribute][index]):
+			self.forigenKeys_used[foreign_relation][foreign_attribute][index][relation] = 0
+		self.forigenKeys_used[foreign_relation][foreign_attribute][index][relation] += 1
+		
+	def subtractForeignUse(self, relation = None, index = None, foreign_relation = None, foreign_attribute = None, exclude = set()):
+		"""Marks a forigen key as not used in one place.
+
+		Example Input: subtractForeignUse(relation, index, foreign_relation, foreign_attribute)
 		"""
 
-		def removeDuplicates(seq, idFunction=None):
-			"""Removes duplicates from a list while preserving order.
-			Created by Alex Martelli. From https://www.peterbe.com/plog/uniqifiers-benchmark
+		for _relation in self.yieldKey(foreign_relation, self.forigenKeys_used, exclude = exclude):
+			for _attribute in self.yieldKey(foreign_attribute, self.forigenKeys_used[_relation]):
+				for _index in self.yieldKey(index, self.forigenKeys_used[_relation][_attribute]):
+					for _user in self.yieldKey(relation, self.forigenKeys_used[_relation][_attribute][_index]):
+						self.forigenKeys_used[_relation][_attribute][_index][_user] -= 1
 
-			Example Input: removeDuplicates()
-			"""
+	def updateForeignUses(self, exclude = set(), updateSchema = True):
+		"""Updates how many places each foreign key is used.
 
-			if idFunction is None:
-				def idFunction(x): 
-					return x
+		Example Input: updateForeignUses()
+		"""
 
-			seen = {}
-			result = []
-			for item in seq:
-				marker = idFunction(item)
-				if marker in seen: 
+		if (not isinstance(exclude, (list, tuple, set))):
+			exclude = [exclude]
+		elif (isinstance(exclude, (range, types.GeneratorType))):
+			exclude = list(exclude)
+
+		def yieldCommand():
+			nonlocal self, exclude
+
+			for relation in self.getRelationNames(exclude):
+				if (relation not in self.foreignKeys_catalogue):
 					continue
-				seen[marker] = 1
-				result.append(item)
-			return result
+				for attribute in self.foreignKeys_catalogue[relation]:
+					foreign_relation, foreign_attribute = self.foreignKeys_catalogue[relation][attribute]
+					yield (f"SELECT {f'[{relation}].[{attribute}]'} FROM {f'[{relation}]'}", (relation, foreign_relation, foreign_attribute))
+
+		###############################
 
 		#Setup
 		if (updateSchema):
 			self.updateInternalforeignSchemas()
 
-		if (not isinstance(exclude, (list, tuple, range))):
+		self.forigenKeys_used = {}
+		for command, (relation, foreign_relation, foreign_attribute) in yieldCommand():
+			for index in self.executeCommand(command, filterTuple = True, valuesAsList = True, filterNone = True):
+				self.addForeignUse(relation, index, foreign_relation, foreign_attribute)
+
+	def getForeignUses(self, relation = None, attribute = None, index = None, user = None, 
+		updateForeign = False, updateSchema = False, exclude = set()):
+
+		"""Returns how many times the given forigen key entry is used.
+
+		relation (str) - Which foreign relation to look for
+			- If None: Will look for all foreign relations
+
+		attribute (str) - Which foreign attribute to look for
+			- If None: Will look for all foreign attributes
+
+		index (int) - Which row id to look for
+			- If None: Will return a sum of all uses per index
+
+		user (str) - Which relation to look for
+			- If None: Will return a sum of all uses per user
+
+		Example Input: getForeignUses()
+		Example Input: getForeignUses("Names")
+		Example Input: getForeignUses("Names", "first_name")
+		Example Input: getForeignUses("Names", "first_name", 3)
+		Example Input: getForeignUses("Names", "first_name", 3, "Users")
+		
+		Example Input: getForeignUses(attribute = "first_name")
+		"""
+
+		if (isinstance(exclude, (range, types.GeneratorType))):
+			exclude = list(exclude)
+		elif (not isinstance(exclude, (list, tuple, set))):
 			exclude = [exclude]
 
-		if (relationList == None):
-			relationList = self.getRelationNames(exclude)
-		elif (not isinstance(relationList, (list, tuple, range))):
-			relationList = [relationList] if (item not in exclude) else []
-		else:
-			relationList = [item for item in relationList if (item not in exclude)]
+		def yieldUses():
+			nonlocal self
 
-		if ((attributeList != None) and (not isinstance(attributeList, (list, tuple, range)))):
-			attributeList = [attributeList]
+			for _relation in self.yieldKey(relation, self.forigenKeys_used, exclude = exclude):
+				for _attribute in self.yieldKey(attribute, self.forigenKeys_used[_relation]):
+					for _index in self.yieldKey(index, self.forigenKeys_used[_relation][_attribute]):
+						for _user in self.yieldKey(user, self.forigenKeys_used[_relation][_attribute][_index]):
+							yield self.forigenKeys_used[_relation][_attribute][_index][_user]
 
-		#Look for relations in the list that are a foreign relation
-		links = self.getForeignLinks(relationList, updateSchema = False)
-				
-		#Get all usages of the foreign keys
-		existing = {} #{foreign relation: {foreign attribute: list of keys used}}
-		for foreign_relation, item in links.items():
-			if (foreign_relation not in existing):
-				existing[foreign_relation] = {}
-			
-			for foreign_attribute, myTuple in item.items():
-				if (foreign_attribute not in existing[foreign_relation]):
-					existing[foreign_relation][foreign_attribute] = []
+		###############################################
 
-				#Catalogue useage
-				results = self.getValue(myTuple, checkForeigen = False)
-				for attribute, valueList in results.items():
-					if ((attributeList == None) or (attribute in attributeList)):
-						existing[foreign_relation][foreign_attribute].extend(valueList)
+		if (updateSchema):
+			self.updateInternalforeignSchemas()
 
-				#Clear out duplicates
-				if (not keepDuplicates):
-					existing[foreign_relation][foreign_attribute] = removeDuplicates(existing[foreign_relation][foreign_attribute])
+		if (updateForeign):
+			self.updateForeignUses(updateSchema = False)
 
-		#Remove blank items
-		used = {}
-		for foreign_relation, item in existing.items():
-			for foreign_attribute, myTuple in item.items():
-				if (len(myTuple) != 0):
-					if (foreign_relation not in used):
-						used[foreign_relation] = {}
-					used[foreign_relation][foreign_attribute] = myTuple
-
-		return used
+		return sum(yieldUses())
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -2024,7 +2130,8 @@ class Database():
 		else:
 			cleanList = [item for item in cleanList if (item not in exclude)]
 
-		usedKeys = self.getForeignUses(cleanList, updateSchema = False)
+		jhkhkj
+		usedKeys = self.getForeignUses(myTuple = {item: None for item in cleanList}, updateSchema = False, filterRelation = False, filterAttribute = False)
 
 		#Determine which keys to remove
 		removeKeys = {}
@@ -2300,6 +2407,8 @@ def test_sqlite():
 	database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
 	database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
 	database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+	database_API.removeTuple({"Users": {"name": "Sit"}})
+	database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
 
 	#Simple Actions
 	print("Simple Actions")
@@ -2338,10 +2447,16 @@ def test_sqlite():
 	print()
 
 	#Triggers
+	print("Triggers")
 	database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
 	print(database_API.getTrigger())
 	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
 	print(database_API.getValue({"Users": ["name", "lastModified"]}))
+	print()
+
+	#Etc
+	print("Etc")
+	print(database_API.getForeignUses("Names", "first_name"))#, updateForeign = True))
 
 	database_API.saveDatabase()
 
@@ -2394,7 +2509,7 @@ def main():
 	"""The main program controller."""
 
 	test_sqlite()
-	test_access()
+	# test_access()
 
 if __name__ == '__main__':
 	main()
