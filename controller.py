@@ -531,7 +531,7 @@ class Database():
 		if ((primary) or (autoPrimary)):
 				command += " PRIMARY KEY"
 
-		if (((autoIncrement) or (autoPrimary)) and (self.connectionType == "sqlite3")):
+		if (autoIncrement and (self.connectionType == "sqlite3")):
 				command += " AUTOINCREMENT"
 
 		# if ((unsigned) or (autoPrimary)):
@@ -1184,7 +1184,7 @@ class Database():
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def setSchema(self, relation, schema = {}, notNull = {}, primary = {}, autoIncrement = {}, unsigned = {},
-		 unique = {}, default = {}, foreign = {}, remove = [], applyChanges = None, updateSchema = True):
+		 unique = {}, default = {}, foreign = {}, remove = [], applyChanges = None, updateSchema = True, database = None):
 		"""Renames a relation (table) to the given name the user provides.
 
 		relation (str)      - What the relation is called in the .db
@@ -1193,6 +1193,7 @@ class Database():
 
 		Example Input: setSchema("Users", foreign = {"name": {"Names": "first_name"}})
 		Example Input: setSchema("Users", schema = {"counter": int})
+		Example Input: setSchema("Users", database = Database.build("data.db"))
 		"""
 
 		if (not isinstance(remove, (list, tuple, set))):
@@ -1200,7 +1201,7 @@ class Database():
 		elif (isinstance(remove, (range, types.GeneratorType))):
 			remove = list(remove)
 
-		def applyChanges(old_thing, mod_thing):
+		def modify(old_thing, mod_thing):
 			"""Applies user modifications to the table settings."""
 			nonlocal remove
 
@@ -1218,38 +1219,51 @@ class Database():
 		table_contents = self.getAllValues(relation, orderBy = "id", exclude = remove, filterRelation = False, valuesAsList = True, valuesAsRows = None, checkForeigen = False)
 
 		#Determine changes
-		new_schema = applyChanges(data["schema"], schema)
-		new_foreign = applyChanges(data["foreign"], foreign)
-		new_notNull = applyChanges(data["notNull"], notNull)
-		new_primary = applyChanges(data["primary"], primary)
-		new_autoIncrement = applyChanges(data["autoIncrement"], autoIncrement)
-		new_unsigned = applyChanges(data["unsigned"], unsigned)
-		new_unique = applyChanges(data["unique"], unique)
-		new_default = applyChanges(data["default"], default)
+		new_schema = modify(data["schema"], schema)
+		new_foreign = modify(data["foreign"], foreign)
+		new_notNull = modify(data["notNull"], notNull)
+		new_primary = modify(data["primary"], primary)
+		new_autoIncrement = modify(data["autoIncrement"], autoIncrement)
+		new_unsigned = modify(data["unsigned"], unsigned)
+		new_unique = modify(data["unique"], unique)
+		new_default = modify(data["default"], default)
 
-		#Rename old table
-		self.renameRelation(relation, "tempCopy_{}".format(relation))
+		if (database == None):
+			#Rename old table
+			self.renameRelation(relation, "tempCopy_{}".format(relation))
 
-		#Create new table
-		self.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
+			#Create new table
+			self.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
+				autoIncrement = new_autoIncrement, unsigned = new_unsigned, unique = new_unique, foreign = new_foreign, 
+				applyChanges = applyChanges, default = new_default, autoPrimary = False)
+
+			#Populate new table with old values
+			for i in range(len(table_contents[relation])):
+				self.addTuple(relation, table_contents[relation][i], applyChanges = applyChanges, checkForeigen = False)
+			
+			#Remove renamed table
+			self.removeRelation("tempCopy_{}".format(relation), applyChanges = applyChanges)
+
+			if (updateSchema):
+				self.updateInternalforeignSchemas()
+			return
+
+		if (not isinstance(database, Database)):
+			database = Database(database)
+
+		database.removeRelation(relation, applyChanges = applyChanges)
+		database.createRelation(relation, schema = new_schema, notNull = new_notNull, primary = new_primary, 
 			autoIncrement = new_autoIncrement, unsigned = new_unsigned, unique = new_unique, foreign = new_foreign, 
 			applyChanges = applyChanges, default = new_default, autoPrimary = False)
 
-		#Populate new table with old values
-		for i in range(len(table_contents[relation])):
-			self.addTuple(relation, table_contents[relation][i], applyChanges = applyChanges, checkForeigen = False)
-		
-		#Remove renamed table
-		self.removeRelation("tempCopy_{}".format(relation), applyChanges = applyChanges)
-
 		if (updateSchema):
-			self.updateInternalforeignSchemas()
+				database.updateInternalforeignSchemas()
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def createRelation(self, relation, schema = {}, applyChanges = None, autoPrimary = True, 
 		notNull = {}, primary = {}, autoIncrement = {}, unsigned = {}, unique = {}, default = {},
-		foreign = None, noReplication = True):
+		foreign = None, noReplication = True, index = None):
 		"""Adds a relation (table) to the database.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 		
@@ -1326,6 +1340,9 @@ class Database():
 
 		#Execute SQL
 		self.executeCommand(command + "({})".format(schemaFormatted))
+
+		if (index):
+			self.createIndex(relation, index)
 
 		#Save Changes
 		if (applyChanges == None):
@@ -1509,7 +1526,7 @@ class Database():
 		if (relation not in self.foreignKeys_catalogue):
 			increment = False
 		else:
-			select_command = f"""SELECT id FROM [{relation}] WHERE ({" AND ".join(f"{attribute} = '{valueList[i]}'" for i, attribute in enumerate(attributeList))})"""
+			select_command = f"""SELECT id FROM [{relation}] WHERE ({' AND '.join(f'{attribute} = "{valueList[i]}"' for i, attribute in enumerate(attributeList))})"""
 			result = self.executeCommand(select_command)
 			increment = not result
 
@@ -1878,8 +1895,12 @@ class Database():
 				if ((limit != None) and (self.connectionType != "access")):
 					command += " LIMIT {}".format(limit)
 
-				result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
-				
+				try:
+					result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
+				except sqlite3.IntegrityError as error:
+					# if ("UNIQUE" in error.args[0]):
+					raise error
+
 				if ((limit != None) and (self.connectionType == "access")):
 					result = result[:limit]
 
@@ -2383,6 +2404,28 @@ class Database():
 			if (applyChanges):
 				self.saveDatabase()
 
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def createIndex(self, relation, attribute, noReplication = None):
+		"""Creates an index for the given attribute."""
+
+		if (not isinstance(attribute, (list, tuple, set, range, types.GeneratorType))):
+			attribute = [attribute]
+
+		command = f"CREATE INDEX{['', ' IF NOT EXISTS'][noReplication]} {relation}_{attribute} ON [{relation}] ({', '.join(attribute)})"
+		print(command)
+		self.executeCommand(command)
+
+	@wrap_errorCheck()
+	@wrap_connectionCheck()
+	def removeIndex(self, relation, attribute, noReplication = None):
+		"""Removes an index for the given attribute."""
+
+		if (not isinstance(attribute, (list, tuple, set, range, types.GeneratorType))):
+			attribute = [attribute]
+
+		command = f"DROP INDEX{['', ' IF EXISTS'][noReplication]} [{relation}].{relation}_{attribute}"
+
 def test_sqlite():
 	print("sqlite3")
 	#Create the database
@@ -2400,63 +2443,65 @@ def test_sqlite():
 	database_API.createRelation("Users Copy", "Users")
 	database_API.saveDatabase()
 
+	database_API.createIndex("Users", "age")
+
 	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
 	
 	database_API.addTuple("Users", {"name": "Ipsum", "age": 26, "height": 5}, unique = None)
-	database_API.addTuple("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
-	database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
-	database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
-	database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
-	database_API.removeTuple({"Users": {"name": "Sit"}})
-	database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+	# database_API.addTuple("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
+	# database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
+	# database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
+	# database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+	# database_API.removeTuple({"Users": {"name": "Sit"}})
+	# database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
 
-	#Simple Actions
-	print("Simple Actions")
-	print(database_API.getValue({"Users": "name"}))
-	print(database_API.getValue({"Users": "name"}, filterRelation = False))
-	print(database_API.getValue({"Users": ["name", "age"]}))
-	print()
+	# #Simple Actions
+	# print("Simple Actions")
+	# print(database_API.getValue({"Users": "name"}))
+	# print(database_API.getValue({"Users": "name"}, filterRelation = False))
+	# print(database_API.getValue({"Users": ["name", "age"]}))
+	# print()
 
-	#Ordering Data
-	print("Ordering Data")
-	print(database_API.getValue({"Users": "name"}, orderBy = "age"))
-	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
-	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True))
+	# #Ordering Data
+	# print("Ordering Data")
+	# print(database_API.getValue({"Users": "name"}, orderBy = "age"))
+	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
+	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True))
 
-	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
-	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False]))
-	print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
+	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
+	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False]))
+	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
 
-	print(database_API.getValue({"Users": "name", "Names": "first_name"}))
-	print(database_API.getValue({"Users": "name", "Names": "first_name"}, filterRelation = False))
-	print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
-	print()
+	# print(database_API.getValue({"Users": "name", "Names": "first_name"}))
+	# print(database_API.getValue({"Users": "name", "Names": "first_name"}, filterRelation = False))
+	# print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
+	# print()
 
-	#Changing Attributes
-	print("Changing Attributes")
-	print(database_API.getValue({"Users": "name"}))
-	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
-	print(database_API.getValue({"Users": "name"}))
-	print(database_API.getValue({"Users": "name"}, filterForeign = True))
+	# #Changing Attributes
+	# print("Changing Attributes")
+	# print(database_API.getValue({"Users": "name"}))
+	# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
+	# print(database_API.getValue({"Users": "name"}))
+	# print(database_API.getValue({"Users": "name"}, filterForeign = True))
 
-	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
-	print(database_API.getValue({"Users": "name"}))
-	print(database_API.getValue({"Users": "name"}, filterForeign = None))
-	print(database_API.getValue({"Users": "name"}, filterForeign = False))
-	print(database_API.getValue({"Users": "name"}, checkForeigen = False))
-	print()
+	# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
+	# print(database_API.getValue({"Users": "name"}))
+	# print(database_API.getValue({"Users": "name"}, filterForeign = None))
+	# print(database_API.getValue({"Users": "name"}, filterForeign = False))
+	# print(database_API.getValue({"Users": "name"}, checkForeigen = False))
+	# print()
 
-	#Triggers
-	print("Triggers")
-	database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
-	print(database_API.getTrigger())
-	database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
-	print(database_API.getValue({"Users": ["name", "lastModified"]}))
-	print()
+	# #Triggers
+	# print("Triggers")
+	# database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
+	# print(database_API.getTrigger())
+	# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
+	# print(database_API.getValue({"Users": ["name", "lastModified"]}))
+	# print()
 
-	#Etc
-	print("Etc")
-	print(database_API.getForeignUses("Names", "first_name"))#, updateForeign = True))
+	# #Etc
+	# print("Etc")
+	# print(database_API.getForeignUses("Names", "first_name"))#, updateForeign = True))
 
 	database_API.saveDatabase()
 
