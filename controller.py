@@ -36,9 +36,9 @@ class Iterator(object):
 			self.order = list(self.data.keys())
 
 			if (filterNone):
-				self.order = [key for key in self.data.keys() if key != None]
+				self.order = [key for key in self.data.keys() if key is not None]
 			else:
-				self.order = [key if key != None else "" for key in self.data.keys()]
+				self.order = [key if key is not None else "" for key in self.data.keys()]
 
 			self.order.sort()
 
@@ -72,7 +72,7 @@ def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 
 			return function(self, *args, **kwargs)
 
-			# if (self.connection != None):
+			# if (self.connection is not None):
 			# 	answer = function(self, *args, **kwargs)
 			# else:
 			# 	warnings.warn("No database is open", Warning, stacklevel = 2)
@@ -178,7 +178,7 @@ class Database():
 		self.forigenKeys_used = {} #{foreign_relation (str): {foreign_attribute (str): {index (int): {relation (str): count (int)}}}}
 
 		#Initialization functions
-		if ((self.keepOpen) and (fileName != None)):
+		if ((self.keepOpen) and (fileName is not None)):
 			self.openDatabase(fileName = fileName, *args, **kwargs)
 
 	def __repr__(self):
@@ -187,7 +187,7 @@ class Database():
 
 	def __str__(self):
 		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		if (self.fileName != None):
+		if (self.fileName is not None):
 			output += f"-- File Name: {self.fileName}\n"
 		return output
 
@@ -213,7 +213,7 @@ class Database():
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback != None):
+		if (traceback is not None):
 			print(exc_type, exc_value)
 			return False
 
@@ -261,7 +261,7 @@ class Database():
 		Example Input: yieldKey(attribute, self.forigenKeys_used[_relation])
 		"""
 
-		if (subject == None):
+		if (subject is None):
 			for key in catalogue:
 				if (key in exclude):
 					continue
@@ -286,7 +286,7 @@ class Database():
 		Example Input: getDriverList()
 		"""
 
-		if (key != None):
+		if (key is not None):
 			return [item for item in pyodbc.drivers() if (key in item)]
 		return list(pyodbc.drivers())
 
@@ -312,19 +312,19 @@ class Database():
 		Example Input: getRelationNames(include = ["_Job"], includeFunction = lambda relation, myList: any(relation.startswith(item) for item in myList)
 		"""
 
-		if (exclude == None):
+		if (exclude is None):
 			exclude = []
 		elif (not isinstance(exclude, (list, tuple, range, set, types.GeneratorType))):
 			exclude = [exclude]
 
-		if (include == None):
+		if (include is None):
 			include = []
 		elif (not isinstance(include, (list, tuple, range, set, types.GeneratorType))):
 			include = [include]
 
-		if (excludeFunction == None):
+		if (excludeFunction is None):
 			excludeFunction = lambda relation, myList: relation not in myList
-		if (includeFunction == None):
+		if (includeFunction is None):
 			includeFunction = lambda relation, myList: relation in myList
 
 		if (isinstance(self.cursor, sqlite3.Cursor)):
@@ -382,14 +382,14 @@ class Database():
 			exclude = [exclude]
 		exclude = [str(item) for item in exclude]
 
-		if (attribute != None):
+		if (attribute is not None):
 			if (not isinstance(attribute, (list, tuple, range, ))):
 				attribute = [attribute]
 			attribute = [str(item) for item in attribute]
 
 		defaults = self.getSchema(relation)["default"]
 
-		if (attribute != None):
+		if (attribute is not None):
 			for item in defaults:
 				if (item not in attribute):
 					exclude.append(item)
@@ -522,7 +522,7 @@ class Database():
 
 		command = "[{}] {}".format(attribute, self.getType(dataType))
 
-		if (default != None):
+		if (default is not None):
 			command += " DEFAULT ({})".format(default)
 
 		if ((notNull) or (autoPrimary)):
@@ -554,7 +554,7 @@ class Database():
 		for attribute, foreign_dict in foreign.items():
 			#Skip items that will be added in as foreign keys
 			for schema_item in schema:
-				if ((schema_item != None) and (attribute in schema_item)):
+				if ((schema_item is not None) and (attribute in schema_item)):
 					break
 			else:
 				if (type(foreign_dict) == dict):
@@ -611,7 +611,7 @@ class Database():
 		#Add foreign keys
 		foreignList = []
 		for foreign_item in foreign:
-			if (foreign_item != None):
+			if (foreign_item is not None):
 				foreignList.append(self.formatForigen(foreign_item, schema = schema, notNull = notNull, primary = primary, 
 					autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, default = default))
 		schemaFormatted = ", ".join(item for item in [schemaFormatted] + foreignList if item)
@@ -666,12 +666,12 @@ class Database():
 	def insertForeign(self, relation, attribute, value, valueList, foreignNone = False):
 		"""Adds a foreign key to the table if needed."""
 
-		if ((value != None) and (not isinstance(value, NULL))):
+		if ((value is not None) and (not isinstance(value, NULL))):
 			foreign_results = self.findForeign(relation, attribute)
 			if (len(foreign_results) != 0):
 				foreign_relation, foreign_attribute = foreign_results
 
-				if (value == None):
+				if (value is None):
 					value = NULL()
 				if ((isinstance(value, NULL)) and ((isinstance(foreignNone, dict) and (attribute not in foreignNone) and foreignNone[attribute]) or (not foreignNone))):
 					valueList.append(value)
@@ -695,7 +695,7 @@ class Database():
 			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
 		"""
 
-		if ((value != None) and (not isinstance(value, NULL))):
+		if ((value is not None) and (not isinstance(value, NULL))):
 			#Determine if a foreign link exists
 			foreign_results = self.findForeign(relation, attribute)
 			if (len(foreign_results) != 0):
@@ -728,7 +728,7 @@ class Database():
 					checkValue = value
 
 				#Determine how to modify the foreign relation
-				if (updateForeign == None):
+				if (updateForeign is None):
 					#Determine if the foreign key is used in other places
 					command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
 					results = self.executeCommand(command, checkValue, valuesAsList = True)
@@ -776,7 +776,7 @@ class Database():
 
 			valueList = []
 			for value in results:
-				if (value == None):
+				if (value is None):
 					if (returnNull):
 						value = NULL()
 					else:
@@ -837,7 +837,7 @@ class Database():
 					else:
 						locationInfo += " OR "
 
-				if (checkForeigen and (criteriaValue != None) and (not isinstance(criteriaValue, NULL))):
+				if (checkForeigen and (criteriaValue is not None) and (not isinstance(criteriaValue, NULL))):
 					foreign_results = self.findForeign(relation, criteriaAttribute)
 					if (len(foreign_results) != 0):
 						foreign_relation, foreign_attribute = foreign_results
@@ -852,7 +852,7 @@ class Database():
 
 						criteriaValue = result[0]
 
-				if ((criteriaValue == None) or (isinstance(criteriaValue, NULL))):
+				if ((criteriaValue is None) or (isinstance(criteriaValue, NULL))):
 					locationInfo += "[{}].[{}] is null or [{}].[{}] = ''".format(relation, criteriaAttribute, relation, criteriaAttribute)
 				else:
 					locationInfo += "[{}].[{}] ".format(relation, criteriaAttribute)
@@ -923,7 +923,7 @@ class Database():
 					while True:
 						try:
 							item = resultCursor.fetchone()
-							if (item == None):
+							if (item is None):
 								break
 						except:
 							item = (self.resultError_replacement,)
@@ -941,8 +941,8 @@ class Database():
 
 		#Configure results
 		if (filterNone):
-			result = ((item for item in subList if item != None) for subList in result)
-			# result = [tuple(item for item in subList if item != None) for subList in result]
+			result = ((item for item in subList if item is not None) for subList in result)
+			# result = [tuple(item for item in subList if item is not None) for subList in result]
 		if (filterTuple):
 			result = [item for subList in result for item in subList]
 			if (valuesAsList):
@@ -957,12 +957,12 @@ class Database():
 
 	#Interaction Functions
 	def quickOpen(self):
-		assert self.connection != None
+		assert self.connection is not None
 
 		self.cursor = self.connection.cursor()
 	
 	def quickClose(self):
-		assert self.connection != None
+		assert self.connection is not None
 
 		self.cursor.close()
 
@@ -995,21 +995,21 @@ class Database():
 
 		if (not fileName):
 			fileName = self.fileName
-		if (keepOpen == None):
+		if (keepOpen is None):
 			keepOpen = self.keepOpen
 		if (not keepOpen):
 			self.fileName = fileName
 			return
 
 		#Check for another open database
-		if (self.connection != None):
+		if (self.connection is not None):
 			self.closeDatabase()
 
 		#Check for file extension
 		if ("." not in fileName):
 			fileName += self.defaultFileExtension
 
-		if (connectionType == None):
+		if (connectionType is None):
 			if (fileName.endswith(("mdb", "accdb"))):
 				connectionType = "access"
 			else:
@@ -1020,7 +1020,7 @@ class Database():
 		self.connectionType = connectionType
 		self.resultError_replacement = resultError_replacement
 
-		if (self.resultError_replacement == None):
+		if (self.resultError_replacement is None):
 			self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		#Establish connection
@@ -1106,7 +1106,7 @@ class Database():
 		Example Input: removeRelation("Users")
 		"""
 
-		if (relation != None):
+		if (relation is not None):
 			#Ensure correct spaces format
 			if (self.connectionType == "sqlite3"):
 				command = "DROP TABLE IF EXISTS [{}]".format(relation)
@@ -1118,7 +1118,7 @@ class Database():
 			self.executeCommand(command)
 
 			#Save Changes
-			if (applyChanges == None):
+			if (applyChanges is None):
 				applyChanges = self.defaultCommit
 
 			if (applyChanges):
@@ -1144,7 +1144,7 @@ class Database():
 		self.updateInternalforeignSchemas()
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -1172,7 +1172,7 @@ class Database():
 			self.executeCommand(command)
 
 			#Save Changes
-			if (applyChanges == None):
+			if (applyChanges is None):
 				applyChanges = self.defaultCommit
 
 			if (applyChanges):
@@ -1228,7 +1228,7 @@ class Database():
 		new_unique = modify(data["unique"], unique)
 		new_default = modify(data["default"], default)
 
-		if (database == None):
+		if (database is None):
 			#Rename old table
 			self.renameRelation(relation, "tempCopy_{}".format(relation))
 
@@ -1257,7 +1257,7 @@ class Database():
 			applyChanges = applyChanges, default = new_default, autoPrimary = False)
 
 		if (updateSchema):
-				database.updateInternalforeignSchemas()
+			database.updateInternalforeignSchemas()
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1300,10 +1300,10 @@ class Database():
 		"""
 
 		if (self.connectionType == "access"):
-			if ((foreign != None) and (len(foreign) != 0)):
+			if ((foreign is not None) and (len(foreign) != 0)):
 				errorMessage = "The ODBC driver for MS Access does not support foreign keys"
 				raise KeyError(errorMessage)
-			if ((primary != None) and (len(primary) != 0)):
+			if ((primary is not None) and (len(primary) != 0)):
 				errorMessage = "The ODBC driver for MS Access does not support primary keys"
 				raise KeyError(errorMessage)
 			autoPrimary = False
@@ -1311,7 +1311,7 @@ class Database():
 		#Build SQL command
 		command = "CREATE TABLE "
 
-		if ((noReplication != None) and (self.connectionType == "sqlite3")):
+		if ((noReplication is not None) and (self.connectionType == "sqlite3")):
 			command += "IF NOT EXISTS "
 		else:
 			self.removeRelation(relation)
@@ -1345,7 +1345,7 @@ class Database():
 			self.createIndex(relation, index)
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -1360,7 +1360,7 @@ class Database():
 		Example Input: copyAttribute("Names", "extra_data", "Users"):
 		"""
 
-		if (destination_attribute == None):
+		if (destination_attribute is None):
 			destination_attribute = source_attribute
 
 		data = self.getSchema(source_relation)
@@ -1410,7 +1410,7 @@ class Database():
 			errorMessage = f"{relation} already has a primary key"
 			raise ValueError(errorMessage)
 
-		if (foreign or unique or (notNull and (default == None)) or primary):
+		if (foreign or unique or (notNull and (default is None)) or primary):
 			#The desired behavior is not supported by "ALTER TABLE" in sqlite
 			return self.setSchema(relation, schema = {attribute: dataType}, notNull = {attribute: notNull}, primary = {attribute: primary}, 
 			autoIncrement = {attribute: autoIncrement}, unsigned = {attribute: unsigned}, unique = {attribute: unique}, 
@@ -1436,7 +1436,7 @@ class Database():
 				raise error
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -1478,7 +1478,7 @@ class Database():
 		Example Input: addTuple("Lorem", {"Ipsum": "Dolor", "Sit": 5}, unique = None)
 		"""
 
-		if (unique == None):
+		if (unique is None):
 			#For the case of None, multiple items can be inserted even if the attribuite is 'unique' in the table's schema
 			uniqueState = self.getSchema(relation)["unique"]
 			for attribute, value in myTuple.items():
@@ -1489,7 +1489,7 @@ class Database():
 
 		command = "INSERT"
 		if (self.connectionType != "access"):
-			if (unique != None):
+			if (unique is not None):
 				if (unique):
 					command += " OR REPLACE"
 			else:
@@ -1539,7 +1539,7 @@ class Database():
 					self.addForeignUse(relation, index, foreign_relation, foreign_attribute)
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -1591,7 +1591,7 @@ class Database():
 				else:
 					attributeDict = {attributeDict: value}
 			for attribute, _value in attributeDict.items():
-				if (_value == None):
+				if (_value is None):
 					_value = NULL()
 				elif (not isinstance(_value, NULL)):
 					_value = f"{_value}"
@@ -1613,7 +1613,7 @@ class Database():
 					
 					self.executeCommand(command, valueList)
 			
-			if (applyChanges == None):
+			if (applyChanges is None):
 				applyChanges = self.defaultCommit
 			if (applyChanges):
 				self.saveDatabase()
@@ -1668,7 +1668,7 @@ class Database():
 
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -1699,14 +1699,14 @@ class Database():
 		"""
 
 		#Ensure correct format
-		if (relation == None):
+		if (relation is None):
 			relationList = self.getRelationNames()
 		elif ((type(relation) != list) and (type(relation) != tuple)):
 			relationList = [relation]
 		else:
 			relationList = relation
 
-		if (filterRelation == None):
+		if (filterRelation is None):
 			filterRelation = len(relationList) <= 1
 
 		myTuple = {}
@@ -1843,20 +1843,25 @@ class Database():
 		Example Input: getValue({"Constructor_VariableNames": "table"}, isNotNull = {"inventoryTitle": True}, exclude = ["_Job"])
 		"""
 
+		orderBy = orderBy or "id"
+
 		if (filterRelation and filterAttribute):
 			results_catalogue = []
 		else:
 			results_catalogue = {}
 
-		if (nextTo == None):
+		if (nextTo is None):
 			nextTo = {}
+		if (valuesAsList is None):
+			valuesAsList = False
 	
 		for i, (relation, attributeList) in enumerate(myTuple.items()):
 			#Account for multiple items
-			if (not isinstance(attributeList, (list, tuple))):
+			if (attributeList is None):
+				attributeList = self.getAttributeNames(relation)
+			elif (not isinstance(attributeList, (list, tuple))):
 				attributeList = [attributeList]
-			if (valuesAsList == None):
-				valuesAsList = False
+
 			for attribute in attributeList:
 				valueList = []
 				command = "SELECT [{}].[{}] FROM [{}]".format(relation, attribute, relation)
@@ -1868,7 +1873,7 @@ class Database():
 				if (len(locationInfo) != 0):
 					command += " WHERE ({})".format(locationInfo)
 
-				if (orderBy != None):
+				if (orderBy is not None):
 					command += " ORDER BY "
 
 					if (not isinstance(orderBy, (list, tuple))):
@@ -1889,10 +1894,10 @@ class Database():
 							condition = direction.get(item, None)
 						else:
 							condition = direction[0] if len(direction) == 1 else direction[i]
-						if (condition != None):
+						if (condition is not None):
 							command += " ASC" if condition else " DESC"
 
-				if ((limit != None) and (self.connectionType != "access")):
+				if ((limit is not None) and (self.connectionType != "access")):
 					command += " LIMIT {}".format(limit)
 
 				try:
@@ -1901,7 +1906,7 @@ class Database():
 					# if ("UNIQUE" in error.args[0]):
 					raise error
 
-				if ((limit != None) and (self.connectionType == "access")):
+				if ((limit is not None) and (self.connectionType == "access")):
 					result = result[:limit]
 
 				#Check Foreign
@@ -1946,7 +1951,7 @@ class Database():
 
 
 		#Determine output orientation
-		if (valuesAsRows != None):
+		if (valuesAsRows is not None):
 			if (valuesAsRows):
 				return results_catalogue
 
@@ -1960,7 +1965,7 @@ class Database():
 		new_results_catalogue = {}
 		for item_relation, item_catalogue in temp_results_catalogue.items():
 			new_results_catalogue[item_relation] = {}
-			if (valuesAsRows != None):
+			if (valuesAsRows is not None):
 				new_results_catalogue[item_relation]["attributeNames"] = []
 				for item_attribute, item_value in item_catalogue.items():
 					new_results_catalogue[item_relation]["attributeNames"].append(item_attribute)
@@ -2146,7 +2151,7 @@ class Database():
 		if (not isinstance(exclude, (list, tuple, range))):
 			exclude = [exclude]
 		
-		if (cleanList == None):
+		if (cleanList is None):
 			cleanList = self.getRelationNames(exclude)
 		else:
 			cleanList = [item for item in cleanList if (item not in exclude)]
@@ -2184,7 +2189,7 @@ class Database():
 				n += len(valueList)
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -2255,7 +2260,7 @@ class Database():
 		#Setup
 		valueList = []
 		command = "CREATE TRIGGER "
-		if (noReplication != None):
+		if (noReplication is not None):
 			command += "IF NOT EXISTS "
 		else:
 			self.removeTrigger(label)
@@ -2294,25 +2299,25 @@ class Database():
 		else:
 			command += "DELETE "
 
-		if (event_attribute != None):
+		if (event_attribute is not None):
 			command += "OF [{}] ".format(event_attribute)
 		
-		if (event_relation == None):
+		if (event_relation is None):
 			event_relation = relation
 		command += "ON [{}] FOR EACH ROW ".format(event_relation)
 
-		# if (reaction_when != None):
+		# if (reaction_when is not None):
 		# 	condition = "WHEN "
 
 		# 	#Apply Condition
 		# 	command += condition
 
 		#Create Reation
-		if (reaction_relation == None):
+		if (reaction_relation is None):
 			reaction_relation = relation
 		
 		if (reaction[0] == "l"):
-			if (reaction_attribute == None):
+			if (reaction_attribute is None):
 				if ("lastModified" not in self.getAttributeNames(reaction_relation)):
 					self.addAttribute(reaction_relation, "lastModified", dataType = str, default = "strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime')")
 				reaction_attribute = "lastModified"
@@ -2320,7 +2325,7 @@ class Database():
 			reaction = "UPDATE [{}] SET [{}] = strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime') WHERE (rowid = new.rowid);".format(reaction_relation, reaction_attribute)
 		
 		elif (reaction[0] == "c"):
-			if (reaction_attribute == None):
+			if (reaction_attribute is None):
 				if ("createdOn" not in self.getAttributeNames(reaction_relation)):
 					self.addAttribute(reaction_relation, "createdOn", dataType = str, default = "strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime')")
 				reaction_attribute = "createdOn"
@@ -2338,7 +2343,7 @@ class Database():
 		self.executeCommand(command)
 
 		#Save Changes
-		if (applyChanges == None):
+		if (applyChanges is None):
 			applyChanges = self.defaultCommit
 
 		if (applyChanges):
@@ -2364,7 +2369,7 @@ class Database():
 		triggerList = self.executeCommand("SELECT name FROM sqlite_master WHERE type = 'trigger'")
 		triggerList = [trigger[0] for trigger in triggerList if trigger[0] not in exclude]
 
-		if (label != None):
+		if (label is not None):
 			if (label not in triggerList):
 				return
 			else:
@@ -2389,7 +2394,7 @@ class Database():
 			raise KeyError(errorMessage)
 
 		triggerList = self.getTrigger(label)
-		if (triggerList != None):
+		if (triggerList is not None):
 			if (not isinstance(triggerList, (list, tuple, range))):
 				triggerList = [triggerList]
 
@@ -2398,7 +2403,7 @@ class Database():
 				self.executeCommand("DROP TRIGGER IF EXISTS [{}]".format(trigger))
 
 			#Save Changes
-			if (applyChanges == None):
+			if (applyChanges is None):
 				applyChanges = self.defaultCommit
 
 			if (applyChanges):
