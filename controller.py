@@ -15,6 +15,7 @@ import functools
 #For multi-threading
 # import sqlalchemy
 import threading
+from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
 #Required Modules
 ##py -m pip install
@@ -82,7 +83,6 @@ def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 		return wrapper
 	return decorator
 
-#Decorators
 def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = True):
 	def decorator(function):
 		@functools.wraps(function)
@@ -164,6 +164,7 @@ class Database():
 
 		#Internal variables
 		self.cursor = None
+		self.waiting = False
 		self.fileName = None
 		self.connection = None
 		self.connectionSetup = []
@@ -216,6 +217,17 @@ class Database():
 		if (traceback is not None):
 			print(exc_type, exc_value)
 			return False
+
+	#Event Functions
+	def setFunction_cmd_startWaiting(self, function):
+		"""Will trigger the given function when waiting for a database to unlock begins.
+
+		function (function) - What function to run
+
+		Example Input: setFunction_cmd_startWaiting(myFunction)
+		"""
+
+		pubsub_pub.subscribe(function, "event_cmd_startWaiting")
 
 	#Utility Functions
 	def getType(self, pythonType):
@@ -764,7 +776,7 @@ class Database():
 
 	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False, returnForeign = True):
 		"""Allows the user to use foreign keys.
-		-		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
+		Use: https://www.techonthenet.com/sqlite/joins.php
 		"""
 
 		if (not returnForeign):
@@ -917,25 +929,51 @@ class Database():
 		# print("@0.1", command, valueList)
 		with threadLock:
 			result = []
+			attempts = 0
+			self.waiting = False
 			try:
-				resultCursor = self.cursor.execute(command, valueList)
-				try:
-					while True:
+				while True:
+					try:
+						resultCursor = self.cursor.execute(command, valueList)
 						try:
-							item = resultCursor.fetchone()
-							if (item is None):
-								break
-						except:
-							item = (self.resultError_replacement,)
-						result.append(item)
-				except pyodbc.ProgrammingError:
-					pass
+							while True:
+								try:
+									item = resultCursor.fetchone()
+									if (item is None):
+										break
+								except:
+									item = (self.resultError_replacement,)
+								result.append(item)
+						except pyodbc.ProgrammingError:
+							pass
+
+					except sqlite3.OperationalError as error:
+						print("@executeCommand", error)
+						if (not attempts):
+							self.waiting = True
+							pubsub_pub.sendMessage("event_cmd_startWaiting")
+						if (self.multiProcess is -1):
+							time.sleep(self.multiProcess_delay / 1000)
+							continue
+						if ((self.multiProcess in [0, None]) or (attempts > self.multiProcess)):
+							raise error
+						time.sleep(self.multiProcess_delay / 1000)
+						attempts += 1
+						continue
+
+					except Exception as error:
+						if (printError_command):
+							print(f"-- {command}, {valueList}")
+						raise error
+				
+					break
 
 			except Exception as error:
-				if (printError_command):
-					print(f"-- {command}, {valueList}")
 				raise error
-			
+
+			finally:
+				self.waiting = False
+
 			self.previousCommand = (command, valueList, result)
 		# print("@0.2", result)
 
@@ -969,9 +1007,15 @@ class Database():
 	def setDefaultCommit(self, state):
 		self.defaultCommit = state
 
+	def setMultiProcess(self, value):
+		self.multiProcess = value
+
+	def setMultiProcessDelay(self, value):
+		self.multiProcess_delay = value
+
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = "myDatabase", *args, applyChanges = True, multiThread = False, connectionType = None, 
-		password = None, readOnly = False, resultError_replacement = None, keepOpen = None):
+		password = None, readOnly = False, resultError_replacement = None, keepOpen = None, multiProcess = -1, multiProcess_delay = 100):
 
 		"""Opens a database.If it does not exist, then one is created.
 		Note: If a database is already opened, then that database will first be closed.
@@ -987,10 +1031,16 @@ class Database():
 			If False - Save when the user tells the API to using saveDatabase() or the applyChanges parameter in an individual function. Faster, but data rentention is not ensured upon crashing
 		multiThread (bool)  - If True: Will allow mnultiple threads to use the same database
 
+		multiProcess (int) - Determines how many times to try executing a command if another process is using the database
+			- If 0 or None: Do not retry
+			- If -1: Retry forever
+		multiProcess_delay (int) - How many milli-seconds to wait before trying to to execute a command again
+
 		Example Input: openDatabase("emaildb")
 		Example Input: openDatabase("emaildb.sqllite")
 		Example Input: openDatabase("emaildb", applyChanges = False)
 		Example Input: openDatabase("emaildb", multiThread = True)
+		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
 		"""
 
 		if (not fileName):
@@ -1016,8 +1066,10 @@ class Database():
 				connectionType = "sqlite3"
 
 		#Configure Options
+		self.multiProcess = multiProcess
 		self.defaultCommit = applyChanges
 		self.connectionType = connectionType
+		self.multiProcess_delay = multiProcess_delay
 		self.resultError_replacement = resultError_replacement
 
 		if (self.resultError_replacement is None):
