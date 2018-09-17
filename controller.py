@@ -818,7 +818,7 @@ class Database():
 
 		return ', '.join(orderList)
 
-	def configureLocation(self, relation, nextToCondition = True, checkForeigen = True, forceMatch = True, 
+	def configureLocation(self, relation, nextToCondition = True, nextToCondition_None = None, checkForeigen = True, forceMatch = True, 
 		nextTo = None, notNextTo = None, like = None, notLike = None, isNull = None, isNotNull = None, 
 		isIn = None, isNotIn = None, isAny = None, isNotAny = None, isAll = None, isNotAll = None, 
 		isBetween = None, isNotBetween = None, exists = None, notExists = None, exclude = None,
@@ -853,24 +853,39 @@ class Database():
 		greaterThanOrEqualTo = greaterThanOrEqualTo or {}
 		lessThanOrEqualTo = lessThanOrEqualTo or {}
 
+		if (nextToCondition_None is None):
+			nextToCondition_None = nextToCondition
+
 		if (exclude):
 			notNextTo = {**notNextTo, **{key: True for key in exclude}}
 
 		valueList = []
 		locationList = []
 
-		def yieldValue(catalogue, attribute, returnList = False):
+		def yieldValue(catalogue, attribute, returnList = False, onlyNone = False):
 			nonlocal relation, checkForeigen, forceMatch
 
-			if (attribute not in catalogue):
-				return
-
-			if (isinstance(catalogue[attribute], (list, tuple, set, range, types.GeneratorType))):
-				valueList = catalogue[attribute]
+			if (onlyNone):
+				if (None not in catalogue):
+					return
+				if (isinstance(catalogue[None], (list, tuple, set, range, types.GeneratorType))):
+					valueList = catalogue[None]
+				else:
+					valueList = [catalogue[None]]
 			else:
-				valueList = [catalogue[attribute]]
+				if (attribute not in catalogue):
+					return
+
+				if (isinstance(catalogue[attribute], (list, tuple, set, range, types.GeneratorType))):
+					valueList = catalogue[attribute]
+				else:
+					valueList = [catalogue[attribute]]
 
 			if (not checkForeigen):
+				if (returnList):
+					yield valueList
+					return
+
 				for value in valueList:
 					yield value
 				return
@@ -887,10 +902,11 @@ class Database():
 				
 			foreign_relation, foreign_attribute = foreign_results
 			for value in valueList:
-				result = self.getValue({foreign_relation: "id"}, {foreign_attribute: value})
+				command = f"SELECT id FROM [{foreign_relation}] WHERE [{foreign_relation}].[{foreign_attribute}] is ?"
+				result = self.executeCommand(command, (value,), valuesAsList = True, filterTuple = True)
 
 				if (result):
-					yield result
+					yield result[0]
 					continue
 
 				if (not forceMatch):
@@ -898,51 +914,49 @@ class Database():
 					raise KeyError(errorMessage)
 
 				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None, incrementForeign = False)
-				yield self.getValue({foreign_relation: "id"}, {foreign_attribute: value})
+				yield self.executeCommand(command, (value,), valuesAsList = True, filterTuple = True)[0]
 
-		def compileLocations(attribute):
+		def compileLocations(attributeList, onlyNone = False):
 			nonlocal relation, locationList, valueList
-
-			for key, catalogue in {"IS NULL": isNull, "IS NOT NULL": isNotNull}.items():
-				for value in yieldValue(catalogue, attribute):
-					locationList.append(f"[{relation}].[{attribute}] {key}")
-
-			for key, catalogue in {"EXISTS": exists, "NOT EXISTS": notExists}.items():
-				for value in yieldValue(catalogue, attribute):
-					locationList.append(f"[{relation}].[{value}] {key}")
-
-			for key, (catalogue, positive) in {"=": (nextTo, True), "!=": (notNextTo, False), "LIKE": (like, True), "NOT LIKE": (notLike, False), 
-				">": (greaterThan, False), "<": (lessThan, True), ">=": (greaterThanOrEqualTo, True), "<=": (lessThanOrEqualTo, True)}.items():
-
-				for value in yieldValue(catalogue, attribute):
-					if ((value is None) or (isinstance(value, NULL))):
-						locationList.append(f"[{relation}].[{attribute}] IS {['NOT ', ''][positive]}NULL OR [{relation}].[{attribute}] {['!=', '='][positive]} ''")
-					else:
-						locationList.append(f"[{relation}].[{attribute}] {key} ?")
-						valueList.append(value)
-
-		################################################
-
-		for key in {*nextTo.keys(), *notNextTo.keys(), *like.keys(), *notLike.keys(), *isNull.keys(), *isNotNull.keys(), 
-			*isIn.keys(), *isNotIn.keys(), *isAny.keys(), *isNotAny.keys(), *isAll.keys(), *isNotAll.keys(), *isBetween.keys(), *isNotBetween.keys(), 
-			*exists.keys(), *notExists.keys(),*greaterThan.keys(), *lessThan.keys(), *greaterThanOrEqualTo.keys(), *lessThanOrEqualTo.keys()}:
-
-			if (key is None):
-				attributeList = self.getAttributeNames(relation)
-			else:
-				attributeList = [key]
 
 			for attribute in attributeList:
 				for key, catalogue in {"IN": isIn, "NOT IN": isNotIn}.items():
-					for value in yieldValue(catalogue, attribute, returnList = True):
-						if (not isinstance(catalogue[attribute], (str, int, float, dict))):
-							locationList.append(f"[{relation}].[{attribute}] {key} ({','.join('?' for item in catalogue[attribute])})")
-							valueList.extend(catalogue[attribute])
-						else:
-							locationList.append(f"[{relation}].[{attribute}] {key} (?)")
-							valueList.append(catalogue[attribute])
+					for value in yieldValue(catalogue, attribute, returnList = True, onlyNone = onlyNone):
+						locationList.append(f"[{relation}].[{attribute}] {key} ({', '.join('?' for item in value)})")
+						valueList.extend(value)
 
-				compileLocations(attribute)
+				for key, catalogue in {"IS NULL": isNull, "IS NOT NULL": isNotNull}.items():
+					for value in yieldValue(catalogue, attribute, onlyNone = onlyNone):
+						if (value):
+							locationList.append(f"[{relation}].[{attribute}] {key}")
+
+				for key, catalogue in {"EXISTS": exists, "NOT EXISTS": notExists}.items():
+					for value in yieldValue(catalogue, attribute, onlyNone = onlyNone):
+						if (value):
+							locationList.append(f"[{relation}].[{value}] {key}")
+
+				for key, (catalogue, positive) in {"=": (nextTo, True), "!=": (notNextTo, False), "LIKE": (like, True), "NOT LIKE": (notLike, False),
+					">": (greaterThan, False), "<": (lessThan, True), ">=": (greaterThanOrEqualTo, True), "<=": (lessThanOrEqualTo, True)}.items():
+
+					for value in yieldValue(catalogue, attribute, onlyNone = onlyNone):
+						if ((value is None) or (isinstance(value, NULL))):
+							locationList.append(f"[{relation}].[{attribute}] IS {['NOT ', ''][positive]}NULL OR [{relation}].[{attribute}] {['!=', '='][positive]} ''")
+						else:
+							locationList.append(f"[{relation}].[{attribute}] {key} ?")
+							valueList.append(value)
+
+		################################################
+
+		combined = {*nextTo.keys(), *notNextTo.keys(), *like.keys(), *notLike.keys(), *isNull.keys(), *isNotNull.keys(), 
+			*isIn.keys(), *isNotIn.keys(), *isAny.keys(), *isNotAny.keys(), *isAll.keys(), *isNotAll.keys(), *isBetween.keys(), *isNotBetween.keys(), 
+			*exists.keys(), *notExists.keys(),*greaterThan.keys(), *lessThan.keys(), *greaterThanOrEqualTo.keys(), *lessThanOrEqualTo.keys()}
+
+		if (None in combined):
+			combined.discard(None)
+			compileLocations(self.getAttributeNames(relation), onlyNone = True)
+			locationList = [f"""({f" {['OR', 'AND'][nextToCondition_None]} ".join(locationList)})"""]
+
+		compileLocations(combined)
 
 		return f" {['OR', 'AND'][nextToCondition]} ".join(locationList), valueList
 
@@ -1899,13 +1913,13 @@ class Database():
 				if (relation in attribute):
 					myTuple[relation] = attribute[relation]
 					continue
-			myTuple[relation] = self.getAttributeNames(relation, excludeList)
-		results_catalogue = self.getValue(myTuple, **kwargs)
+			myTuple[relation] = None
+		results_catalogue = self.getValue(myTuple, exclude = excludeList, **kwargs)
 		return results_catalogue
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, 
+	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None,   
 		returnNull = False, returnForeign = True, includeDuplicates = True, checkForeigen = True, 
 		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True,
 		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, **locationKwargs):
@@ -2026,13 +2040,19 @@ class Database():
 
 		results_catalogue = {}
 		for relation, attributeList in myTuple.items():
-			if (attributeList is None):
+			selectAll = attributeList is None
+			if (selectAll):
 				attributeList = self.getAttributeNames(relation)
 			elif (not isinstance(attributeList, (list, tuple, set, range, types.GeneratorType))):
 				attributeList = [attributeList]
+			if (exclude):
+				attributeList = [attribute for attribute in attributeList if (attribute not in exclude)]
 
 			#Setup
-			command = f"SELECT{[' DISTINCT', ''][includeDuplicates]} {', '.join(f'[{relation}].[{attribute}]' for attribute in attributeList)} FROM [{relation}]"
+			if (selectAll):
+				command = f"SELECT{[' DISTINCT', ''][includeDuplicates]} * FROM [{relation}]"
+			else:
+				command = f"SELECT{[' DISTINCT', ''][includeDuplicates]} {', '.join(f'[{relation}].[{attribute}]' for attribute in attributeList)} FROM [{relation}]"
 
 			locationInfo, valueList = self.configureLocation(relation, nextTo = nextTo, exclude = exclude, **locationKwargs)
 			if (locationInfo):
