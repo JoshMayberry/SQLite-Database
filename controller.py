@@ -4,6 +4,7 @@ __version__ = "3.2.0"
 # - Add a foreign key cleanup command; removes unused foreign keys in foreign tables
 
 import re
+import sys
 import time
 import types
 import pyodbc
@@ -11,6 +12,7 @@ import sqlite3
 import warnings
 import traceback
 import functools
+import collections
 
 #For multi-threading
 # import sqlalchemy
@@ -23,6 +25,34 @@ from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 	# pyodbc
 
 threadLock = threading.RLock()
+
+#Debugging functions
+def printCurrentTrace(printout = True, quitAfter = False):
+	"""Prints out the stack trace for the current place in the program.
+	Modified Code from codeasone on https://stackoverflow.com/questions/1032813/dump-stacktraces-of-all-active-threads
+
+	Example Input: printCurrentTrace()
+	Example Input: printCurrentTrace(quitAfter = True)
+	"""
+
+	code = []
+	for threadId, stack in sys._current_frames().items():
+		code.append("\n# ThreadID: %s" % threadId)
+		for filename, lineno, name, line in traceback.extract_stack(stack):
+			code.append('File: "%s", line %d, in %s' % (filename,
+														lineno, name))
+			if line:
+				code.append("  %s" % (line.strip()))
+
+	try:
+		if (printout):
+			for line in code:
+				print (line)
+		else:
+			return code
+	finally:
+		if (quitAfter):
+			sys.exit()
 
 #Iterators
 class Iterator(object):
@@ -272,6 +302,11 @@ class Database():
 		Example Input: yieldKey(relation, self.forigenKeys_used, exclude = exclude)
 		Example Input: yieldKey(attribute, self.forigenKeys_used[_relation])
 		"""
+		
+		if (isinstance(exclude, (range, types.GeneratorType))):
+			exclude = list(exclude)
+		elif (not isinstance(exclude, (list, tuple, set))):
+			exclude = [exclude]
 
 		if (subject is None):
 			for key in catalogue:
@@ -282,11 +317,8 @@ class Database():
 
 		if (isinstance(subject, (list, tuple, set, range, types.GeneratorType))):
 			for key in subject:
-				if (key in exclude):
-					continue
-				if (key not in catalogue):
-					continue
-				yield key
+				for item in self.yieldKey(key, catalogue = catalogue, exclude = exclude):
+					yield item
 			return
 
 		if ((subject not in exclude) and (subject in catalogue)):
@@ -675,30 +707,23 @@ class Database():
 				foreignKey = (self.foreignKeys_catalogue[relation][attribute])
 		return foreignKey
 
-	def insertForeign(self, relation, attribute, value, valueList, foreignNone = False):
+	def insertForeign(self, relation, attribute, value, foreignNone = False):
 		"""Adds a foreign key to the table if needed."""
 
-		if ((value is not None) and (not isinstance(value, NULL))):
-			foreign_results = self.findForeign(relation, attribute)
-			if (len(foreign_results) != 0):
-				foreign_relation, foreign_attribute = foreign_results
+		if ((value is None) or (isinstance(value, NULL))):
+			if ((not foreignNone) or (isinstance(foreignNone, dict) and foreignNone.get(attribute, False))):
+				return value
 
-				if (value is None):
-					value = NULL()
-				if ((isinstance(value, NULL)) and ((isinstance(foreignNone, dict) and (attribute not in foreignNone) and foreignNone[attribute]) or (not foreignNone))):
-					valueList.append(value)
-					return valueList
+		foreign_results = self.findForeign(relation, attribute)
+		if (not foreign_results):
+			return value
+		foreign_relation, foreign_attribute = foreign_results
 
-				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-				valueList.append(foreign_id[0])
-			else:
-				valueList.append(value)
-		else:
-			valueList.append(value)
-		return valueList
+		self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None, incrementForeign = False)
+		foreign_id = self.getValue({foreign_relation: ["id"]}, {foreign_attribute: value}, returnNull = False)
+		return foreign_id
 
-	def changeForeign(self, relation, attribute, nextTo, value, valueList, forceMatch, updateForeign):
+	def changeForeign(self, relation, attribute, newValue, currentValues, updateForeign = None):
 		"""Adds a foreign key to the table if needed.
 
 		updateForeign (bool) - Determines what happens to existing foreign keys
@@ -707,74 +732,42 @@ class Database():
 			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
 		"""
 
-		if ((value is not None) and (not isinstance(value, NULL))):
-			#Determine if a foreign link exists
-			foreign_results = self.findForeign(relation, attribute)
-			if (len(foreign_results) != 0):
-				foreign_relation, foreign_attribute = foreign_results
+		if (relation not in self.foreignKeys_catalogue):
+			#The attribute has no foreign link
+			return [newValue for value in currentValues]
+		if ((newValue is None) or (isinstance(newValue, NULL))):
+			#The value is not pointing to anything
+			return [newValue for value in currentValues]
 
-				#Determine if foreign key already exists
-				foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-				if (len(foreign_id) == 0):
-					if (not forceMatch):
-						errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for changeForeign()"
-						raise KeyError(errorMessage)
+		foreign_relation, foreign_attribute = self.findForeign(relation, attribute)
+		command = f"SELECT id FROM [{foreign_relation}] WHERE ({foreign_attribute} = ?)"
+		targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)
+		if (targetId):
+			#Use existing key
+			return [targetId[0] for value in currentValues]
 
-					#Determine if current value already exists as a foreign key instead
-					checkValue = self.getValue({relation: attribute}, nextTo = nextTo, returnNull = False)[attribute]#, returnForeign = False)[attribute]
-					if (len(checkValue) == 0):
-						if (not forceMatch):
-							errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation} for changeForeign()"
-							raise KeyError(errorMessage)
-						
-						#Add a new foreign key
-						updateForeign = False
-					else:
-						checkValue = checkValue[0]
-						foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: checkValue}, filterRelation = True, returnNull = False)["id"]
-						
-						if (len(foreign_id) == 0):
-							#Add a new foreign key
-							updateForeign = False
-				else:
-					checkValue = value
+		#Should I create a new key or modify the current one?
+		if (updateForeign is None):
+			usedKeys = self.getForeignUses(foreign_relation, foreign_attribute, currentValues, excludeUser = relation, 
+				filterIndex = False, updateSchema = False)
 
-				#Determine how to modify the foreign relation
-				if (updateForeign is None):
-					#Determine if the foreign key is used in other places
-					command = "SELECT [{}] FROM [{}] WHERE [{}] = ?".format(attribute, relation, attribute)
-					results = self.executeCommand(command, checkValue, valuesAsList = True)
-					
-					if (len(results) > 1):
-						#Add a new foreign key
-						updateForeign = False
-					else:
-						#Determine if the foreign key is used in other tables
-						usedKeys = self.getForeignUses(foreign_relation, foreign_attribute, foreign_id[0], exclude = relation, updateSchema = False)
-						if (usedKeys):
-							#Add a new foreign key
-							updateForeign = False
-						else:
-							#Update the existing foreign key
-							updateForeign = True
+		changed = set()
+		valueList = [*currentValues]
+		for i, index in enumerate(currentValues):
+			if (updateForeign):
+				#I will change the attribute of that index, and it will apply to every table that refrences it
+				self.changeTuple({foreign_relation: foreign_attribute}, {"id": index}, newValue)
+				continue
 
-				#Modify the foreign relation
-				if (updateForeign):
-					self.changeTuple({foreign_relation: foreign_attribute}, {"id": foreign_id[0]}, value)
-				else:
-					self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None)
-					foreign_id = self.getValue({foreign_relation: "id"}, {foreign_attribute: value}, filterRelation = True, returnNull = False)["id"]
-
-				#Apply foreign id in place of value
-				valueList.append(foreign_id[0])
-			else:
-				valueList.append(value)
-		else:
-			valueList.append(value)
-
+			if ((updateForeign is None) and (index not in changed) and (not usedKeys.get(index))):
+				#I am the only one using that index, so I can change it
+				self.changeTuple({foreign_relation: foreign_attribute}, {"id": index}, newValue)
+				changed.add(index)
+				continue
+			
 		return valueList
 
-	def configureForeign(self, results, relation, attribute, filterTuple = True, filterForeign = False, valuesAsList = True, returnNull = False, returnForeign = True):
+	def configureForeign(self, results, relation, attributeList, filterForeign = False, returnNull = False, returnForeign = True):
 		"""Allows the user to use foreign keys.
 		Use: https://www.techonthenet.com/sqlite/joins.php
 		"""
@@ -782,104 +775,220 @@ class Database():
 		if (not returnForeign):
 			return results
 
-		foreign_results = self.findForeign(relation, attribute)
-		if (len(foreign_results) != 0):
+		transposed = [list(row) for row in zip(*results)]
+		for i, column in enumerate(transposed):
+			foreign_results = self.findForeign(relation, attributeList[i])
+			if (not foreign_results):
+				continue
 			foreign_relation, foreign_attribute = foreign_results
 
-			valueList = []
-			for value in results:
+			for j, value in enumerate(column):
 				if (value is None):
 					if (returnNull):
-						value = NULL()
+						column[j] = NULL()
 					else:
-						valueList.append(value)
-						continue
+						column[j] = value
+					continue
 
-				subResults = self.getValue({foreign_relation: foreign_attribute}, {"id": value}, nextToCondition = False, filterRelation = filterForeign, filterAttribute = True, returnNull = True)
+				command = f"SELECT [{foreign_attribute}] from [{foreign_relation}] WHERE (id = ?)"
+				subResults = self.executeCommand(command, (value,), filterTuple = True)
+				if (not subResults):
+					column[j] = value
+					continue
 
-				if (isinstance(subResults, dict) and len(subResults[foreign_relation]) != 0):
-					subList = subResults[foreign_relation]
-				elif(isinstance(subResults, (list, tuple)) and len(subResults) != 0):
-					subList = subResults[0]
-				else:
-					subList = value
+				assert len(subResults) is 1
+				column[j] = subResults[0]
+		return [tuple(row) for row in zip(*transposed)]
 
-				if (returnNull):
-					valueList.append(subList)
-				else:
-					if (isinstance(subList, (list, tuple))):
-						valueList.append([item if not isinstance(item, NULL) else None for item in subList])
-					else:
-						valueList.append(subList if not isinstance(subList, NULL) else None)
+	def configureOrder(self, relation, orderBy = None, direction = None):
+		"""Sets up the ORDER BY portion of the SQL message.
 
-			return valueList
-		return results
+		Example Input: configureOrder("Users", orderBy = "name")
+		"""
 
-	def configureLocation(self, relation, nextTo, valueList, nextToCondition = True, checkForeigen = True, like = {}, notLike = {}, isNull = {}, isNotNull = {},
-		greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, forceMatch = True):
-		"""Sets up the location portion of the SQL message."""
+		orderBy	= orderBy or []
+		if (isinstance(orderBy, (list, tuple, set, range, types.GeneratorType))):
+			orderBy = orderBy
+		else:
+			orderBy = [orderBy]
 
-		locationInfo = ""
-		def check(attribute, value, command, catalogue):
-			nonlocal locationInfo, valueList
+		if (not isinstance(direction, dict)):
+			direction = {item: direction for item in orderBy}
+
+		orderList = []
+		for item in orderBy:
+			condition = direction.get(item, None)
+			orderList.append(f"[{relation}].[{item}]{ {None: '', True: ' ASC', False: ' DESC'}[direction.get(item, None)] }")
+
+		return ', '.join(orderList)
+
+	def configureLocation(self, relation, nextToCondition = True, checkForeigen = True, forceMatch = True, 
+		nextTo = None, notNextTo = None, like = None, notLike = None, isNull = None, isNotNull = None, 
+		isIn = None, isNotIn = None, isAny = None, isNotAny = None, isAll = None, isNotAll = None, 
+		isBetween = None, isNotBetween = None, exists = None, notExists = None, exclude = None,
+		greaterThan = None, lessThan = None, greaterThanOrEqualTo = None, lessThanOrEqualTo = None):
+		"""Sets up the location portion of the SQL message.
+
+		Example Input: configureLocation("Users", like = {"name": "or"})
+		Example Input: configureLocation("Users", like = {"name": ["or", "em"]})
+
+		Example Input: configureLocation("Users", isIn = {"name": "Lorem"})
+		Example Input: configureLocation("Users", isIn = {"name": ["Lorem", "Ipsum"]})
+		"""
+
+		nextTo = nextTo or {}
+		notNextTo = notNextTo or {}
+		like = like or {}
+		notLike = notLike or {}
+		isNull = isNull or {}
+		isNotNull = isNotNull or {}
+		isIn = isIn or {}
+		isNotIn = isNotIn or {}
+		isAny = isAny or {}
+		isNotAny = isNotAny or {}
+		isAll = isAll or {}
+		isNotAll = isNotAll or {}
+		isBetween = isBetween or {}
+		isNotBetween = isNotBetween or {}
+		exists = exists or {}
+		notExists = notExists or {}
+		greaterThan = greaterThan or {}
+		lessThan = lessThan or {}
+		greaterThanOrEqualTo = greaterThanOrEqualTo or {}
+		lessThanOrEqualTo = lessThanOrEqualTo or {}
+
+		if (exclude):
+			notNextTo = {**notNextTo, **{key: True for key in exclude}}
+
+		valueList = []
+		locationList = []
+
+		def yieldValue(catalogue, attribute, returnList = False):
+			nonlocal relation, checkForeigen, forceMatch
 
 			if (attribute not in catalogue):
-				return True
+				return
 
-			if (not catalogue[attribute]):
-				return False
-
-			if (command in ["IS NULL", "IS NOT NULL"]):
-				locationInfo += f"{command}"
+			if (isinstance(catalogue[attribute], (list, tuple, set, range, types.GeneratorType))):
+				valueList = catalogue[attribute]
 			else:
-				locationInfo += f"{command} ?"
-				valueList.append(criteriaValue)
+				valueList = [catalogue[attribute]]
+
+			if (not checkForeigen):
+				for value in valueList:
+					yield value
+				return
+
+			foreign_results = self.findForeign(relation, attribute)
+			if (not foreign_results):
+				if (returnList):
+					yield valueList
+					return
+
+				for value in valueList:
+					yield value
+				return
+				
+			foreign_relation, foreign_attribute = foreign_results
+			for value in valueList:
+				result = self.getValue({foreign_relation: "id"}, {foreign_attribute: value})
+
+				if (result):
+					yield result
+					continue
+
+				if (not forceMatch):
+					errorMessage = f"There is no foreign key {foreign_attribute} with the value {value} in the relation {foreign_relation} for configureLocation()"
+					raise KeyError(errorMessage)
+
+				self.addTuple(foreign_relation, myTuple = {foreign_attribute: value}, unique = None, incrementForeign = False)
+				yield self.getValue({foreign_relation: "id"}, {foreign_attribute: value})
+
+		def compileLocations(attribute):
+			nonlocal relation, locationList, valueList
+
+			for key, catalogue in {"IS NULL": isNull, "IS NOT NULL": isNotNull}.items():
+				for value in yieldValue(catalogue, attribute):
+					locationList.append(f"[{relation}].[{attribute}] {key}")
+
+			for key, catalogue in {"EXISTS": exists, "NOT EXISTS": notExists}.items():
+				for value in yieldValue(catalogue, attribute):
+					locationList.append(f"[{relation}].[{value}] {key}")
+
+			for key, (catalogue, positive) in {"=": (nextTo, True), "!=": (notNextTo, False), "LIKE": (like, True), "NOT LIKE": (notLike, False), 
+				">": (greaterThan, False), "<": (lessThan, True), ">=": (greaterThanOrEqualTo, True), "<=": (lessThanOrEqualTo, True)}.items():
+
+				for value in yieldValue(catalogue, attribute):
+					if ((value is None) or (isinstance(value, NULL))):
+						locationList.append(f"[{relation}].[{attribute}] IS {['NOT ', ''][positive]}NULL OR [{relation}].[{attribute}] {['!=', '='][positive]} ''")
+					else:
+						locationList.append(f"[{relation}].[{attribute}] {key} ?")
+						valueList.append(value)
 
 		################################################
 
-		extendedCatalogue = {**nextTo, **like, **notLike, **isNull, **isNotNull, **greaterThan, **lessThan, **greaterThanOrEqualTo, **lessThanOrEqualTo}
-		for i, (criteriaAttribute, item) in enumerate(extendedCatalogue.items()):
-			if (not isinstance(item, (list, tuple))):
-				item = [item]
-			for j, criteriaValue in enumerate(item):
-				#Account for multiple references
-				if ((i != 0) or (j != 0)):
-					if (nextToCondition):
-						locationInfo += " AND "
-					else:
-						locationInfo += " OR "
+		for key in {*nextTo.keys(), *notNextTo.keys(), *like.keys(), *notLike.keys(), *isNull.keys(), *isNotNull.keys(), 
+			*isIn.keys(), *isNotIn.keys(), *isAny.keys(), *isNotAny.keys(), *isAll.keys(), *isNotAll.keys(), *isBetween.keys(), *isNotBetween.keys(), 
+			*exists.keys(), *notExists.keys(),*greaterThan.keys(), *lessThan.keys(), *greaterThanOrEqualTo.keys(), *lessThanOrEqualTo.keys()}:
 
-				if (checkForeigen and (criteriaValue is not None) and (not isinstance(criteriaValue, NULL))):
-					foreign_results = self.findForeign(relation, criteriaAttribute)
-					if (len(foreign_results) != 0):
-						foreign_relation, foreign_attribute = foreign_results
-						result = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"]
+			if (key is None):
+				attributeList = self.getAttributeNames(relation)
+			else:
+				attributeList = [key]
 
-						if (len(result) == 0):
-							if (not forceMatch):
-								errorMessage = f"There is no foreign key {foreign_attribute} with the value {criteriaValue} in the relation {foreign_relation} for configureLocation()"
-								raise KeyError(errorMessage)
-							self.addTuple(foreign_relation, myTuple = {foreign_attribute: criteriaValue}, unique = None)
-							result = self.getValue({foreign_relation: "id"}, {foreign_attribute: criteriaValue})["id"]
+			for attribute in attributeList:
+				for key, catalogue in {"IN": isIn, "NOT IN": isNotIn}.items():
+					for value in yieldValue(catalogue, attribute, returnList = True):
+						if (not isinstance(catalogue[attribute], (str, int, float, dict))):
+							locationList.append(f"[{relation}].[{attribute}] {key} ({','.join('?' for item in catalogue[attribute])})")
+							valueList.extend(catalogue[attribute])
+						else:
+							locationList.append(f"[{relation}].[{attribute}] {key} (?)")
+							valueList.append(catalogue[attribute])
 
-						criteriaValue = result[0]
+				compileLocations(attribute)
 
-				if ((criteriaValue is None) or (isinstance(criteriaValue, NULL))):
-					locationInfo += "[{}].[{}] is null or [{}].[{}] = ''".format(relation, criteriaAttribute, relation, criteriaAttribute)
-				else:
-					locationInfo += "[{}].[{}] ".format(relation, criteriaAttribute)
+		return f" {['OR', 'AND'][nextToCondition]} ".join(locationList), valueList
 
-					for command, catalogue in {"LIKE": like, "NOT LIKE": notLike, "IS NULL": isNull, "IS NOT NULL": isNotNull, 
-					">": greaterThan, "<": lessThan, ">=": greaterThanOrEqualTo, "<=": lessThanOrEqualTo}.items():
+	def executeCommand_add(self, relation, *args, **kwargs):
+		"""Handles incrementing foreign key counts if needed."""
 
-						answer = check(criteriaAttribute, criteriaValue, command, catalogue)
-						if (not answer):
-							break
-					else:
-						locationInfo += "= ?"
-						valueList.append(criteriaValue)
+		if (relation not in self.foreignKeys_catalogue):
+			return self.executeCommand(*args, **kwargs)
 
-		return locationInfo, valueList
+		foreignList = self.foreignKeys_catalogue[relation].keys()
+		command = f"SELECT id, {', '.join(foreignList)} FROM [{relation}]"
+		rows = self.executeCommand(command, valuesAsSet = True)
+
+		answer = self.executeCommand(*args, **kwargs)
+
+		for _index, *args in rows ^ self.executeCommand(command, valuesAsSet = True):
+			for i, _attribute in enumerate(foreignList):
+				if (args[i] is None):
+					continue
+				self.addForeignUse(relation, args[i], *self.foreignKeys_catalogue[relation][_attribute])
+
+		return answer
+
+	def executeCommand_subtract(self, relation, *args, **kwargs):
+		"""Handles decrementing foreign key counts if needed."""
+
+		if (relation not in self.foreignKeys_catalogue):
+			return self.executeCommand(*args, **kwargs)
+
+		foreignList = self.foreignKeys_catalogue[relation].keys()
+		command = f"SELECT id, {', '.join(foreignList)} FROM [{relation}]"
+		rows = self.executeCommand(command, valuesAsSet = True)
+
+		answer = self.executeCommand(*args, **kwargs)
+
+		for _index, *args in rows ^ self.executeCommand(command, valuesAsSet = True):
+			for i, _attribute in enumerate(foreignList):
+				if (args[i] is None):
+					continue
+				self.subtractForeignUse(relation, args[i], *self.foreignKeys_catalogue[relation][_attribute])
+
+		return answer
 
 	def executeCommand(self, command, valueList = (), hackCheck = True, filterNone = False,
 		valuesAsList = None, valuesAsSet = False, filterTuple = False, printError_command = True):
@@ -916,7 +1025,7 @@ class Database():
 
 		#Ensure correct format
 		if (not isinstance(valueList, tuple)):
-			if (isinstance(valueList, list)):
+			if (isinstance(valueList, (list, set, range, types.GeneratorType))):
 				valueList = tuple(valueList)
 			else:
 				valueList = (valueList,)
@@ -948,6 +1057,10 @@ class Database():
 							pass
 
 					except sqlite3.OperationalError as error:
+						if ("database is locked" not in error.args):
+							if (printError_command):
+								print(f"-- {command}, {valueList}")
+							raise error
 						print("@executeCommand", error)
 						if (not attempts):
 							self.waiting = True
@@ -1158,26 +1271,31 @@ class Database():
 		Example Input: removeRelation("Users")
 		"""
 
-		if (relation is not None):
-			#Ensure correct spaces format
+		if (relation is None):
+			relation = self.getRelationNames()
+		elif (isinstance(relation, (str, int, float))):
+			relation = [relation]
+
+		for _relation in relation:
 			if (self.connectionType == "sqlite3"):
-				command = "DROP TABLE IF EXISTS [{}]".format(relation)
+				command = "DROP TABLE IF EXISTS [{}]".format(_relation)
 			else:
-				if (relation not in self.getRelationNames()):
+				if (_relation not in self.getRelationNames()):
 					return
 
-				command = "DROP TABLE [{}]".format(relation)
+				command = "DROP TABLE [{}]".format(_relation)
 			self.executeCommand(command)
+			self.subtractForeignUse(relation = _relation, n = None)
 
-			#Save Changes
-			if (applyChanges is None):
-				applyChanges = self.defaultCommit
+		#Save Changes
+		if (applyChanges is None):
+			applyChanges = self.defaultCommit
 
-			if (applyChanges):
-				self.saveDatabase()
+		if (applyChanges):
+			self.saveDatabase()
 
-			#Update internal foreign schema catalogue
-			self.updateInternalforeignSchemas()
+		#Update internal foreign schema catalogue
+		self.updateInternalforeignSchemas()
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1268,7 +1386,8 @@ class Database():
 
 		#Get current data
 		data = self.getSchema(relation)
-		table_contents = self.getAllValues(relation, orderBy = "id", exclude = remove, filterRelation = False, valuesAsList = True, valuesAsRows = None, checkForeigen = False)
+		table_contents = self.getAllValues(relation, orderBy = "id", exclude = remove, checkForeigen = False, 
+			forceAttribute = True, forceTuple = True, attributeFirst = False)
 
 		#Determine changes
 		new_schema = modify(data["schema"], schema)
@@ -1290,8 +1409,8 @@ class Database():
 				applyChanges = applyChanges, default = new_default, autoPrimary = False)
 
 			#Populate new table with old values
-			for i in range(len(table_contents[relation])):
-				self.addTuple(relation, table_contents[relation][i], applyChanges = applyChanges, checkForeigen = False)
+			for catalogue in table_contents.values():
+				self.addTuple(relation, catalogue, applyChanges = applyChanges, checkForeigen = False)
 			
 			#Remove renamed table
 			self.removeRelation("tempCopy_{}".format(relation), applyChanges = applyChanges)
@@ -1380,18 +1499,17 @@ class Database():
 
 			command += re.sub("CREATE TABLE .*?\(", f"(", raw_sql)
 			self.executeCommand(command)
-			return
+		else:
+			#Format schema
+			commandList = []
+			if (autoPrimary):
+				commandList.append(self.getDefinition("id", dataType = int, autoPrimary = True))
+			commandList.append(self.formatSchema(schema = schema, applyChanges = applyChanges, autoPrimary = False, notNull = notNull, 
+				primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, default = default, foreign = foreign))
+			schemaFormatted = ", ".join(commandList)
 
-		#Format schema
-		commandList = []
-		if (autoPrimary):
-			commandList.append(self.getDefinition("id", dataType = int, autoPrimary = True))
-		commandList.append(self.formatSchema(schema = schema, applyChanges = applyChanges, autoPrimary = False, notNull = notNull, 
-			primary = primary, autoIncrement = autoIncrement, unsigned = unsigned, unique = unique, default = default, foreign = foreign))
-		schemaFormatted = ", ".join(commandList)
-
-		#Execute SQL
-		self.executeCommand(command + "({})".format(schemaFormatted))
+			#Execute SQL
+			self.executeCommand(command + "({})".format(schemaFormatted))
 
 		if (index):
 			self.createIndex(relation, index)
@@ -1478,7 +1596,7 @@ class Database():
 		#Execute SQL
 		try:
 			self.executeCommand(command, printError_command = False)
-		except Exception as error:
+		except sqlite3.OperationalError as error:
 			if (error.__str__() == "Cannot add a column with non-constant default"):
 				return self.setSchema(relation, schema = {attribute: dataType}, notNull = {attribute: notNull}, primary = {attribute: primary}, 
 			autoIncrement = {attribute: autoIncrement}, unsigned = {attribute: unsigned}, unique = {attribute: unique}, 
@@ -1500,7 +1618,7 @@ class Database():
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def addTuple(self, relation, myTuple = {}, applyChanges = None, autoPrimary = False, notNull = False, foreignNone = False,
-		primary = False, autoIncrement = False, unsigned = True, unique = False, checkForeigen = True):
+		primary = False, autoIncrement = False, unsigned = True, unique = False, checkForeigen = True, incrementForeign = True):
 		"""Adds a tuple (row) to the given relation (table).
 		Special thanks to DSM for how to check if a key exists in a list of dictionaries on http://stackoverflow.com/questions/14790980/how-can-i-check-if-key-exists-in-list-of-dicts-in-python
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
@@ -1530,65 +1648,52 @@ class Database():
 		Example Input: addTuple("Lorem", {"Ipsum": "Dolor", "Sit": 5}, unique = None)
 		"""
 
-		if (unique is None):
-			#For the case of None, multiple items can be inserted even if the attribuite is 'unique' in the table's schema
-			uniqueState = self.getSchema(relation)["unique"]
+		# if (unique is None):
+		# 	#For the case of None, multiple items can be inserted even if the attribuite is 'unique' in the table's schema
+		# 	uniqueState = self.getSchema(relation)["unique"]
+		# 	for attribute, value in myTuple.items():
+		# 		if ((attribute in uniqueState) and (uniqueState[attribute]) and (isinstance(value, NULL))):
+		# 			existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
+		# 			if (len(existsCheck) != 0):
+		# 				return
+
+		if ((self.connectionType == "access") and (unique in [True, None])):
+			removeCatalogue = {} 
 			for attribute, value in myTuple.items():
-				if ((attribute in uniqueState) and (uniqueState[attribute]) and (isinstance(value, NULL))):
-					existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
-					if (len(existsCheck) != 0):
-						return
+				existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
+				if (len(existsCheck) != 0):
+					removeCatalogue["attribute"] = existsCheck[0]
 
-		command = "INSERT"
-		if (self.connectionType != "access"):
-			if (unique is not None):
+			for attribute, oldValue in removeCatalogue.items():
 				if (unique):
-					command += " OR REPLACE"
-			else:
-				command += " OR IGNORE"
-		else:
-			if (unique in [True, None]):
-				removeCatalogue = {} 
-				for attribute, value in myTuple.items():
-					existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
-					if (len(existsCheck) != 0):
-						removeCatalogue["attribute"] = existsCheck[0]
-
-				for attribute, oldValue in removeCatalogue.items():
-					if (unique):
-						jkjhjkhjhk #There are no row ids, so find a way to ensure only the one row is changed?
-						self.changeTuple({relation: attribute}, {attribute: oldValue}, myTuple[attribute], checkForeigen = checkForeigen)
-					del myTuple[attribute]
-				
-				if (len(myTuple) == 0):
-					return
+					jkjhjkhjhk #There are no row ids, so find a way to ensure only the one row is changed?
+					self.changeTuple({relation: attribute}, {attribute: oldValue}, myTuple[attribute], checkForeigen = checkForeigen)
+				del myTuple[attribute]
+			
+			if (len(myTuple) == 0):
+				return
 
 		#Build attribute side
-		valueList = []
-		attributeList = []
-		for i, (attribute, value) in enumerate(myTuple.items()):
-			#Remember the associated value for the attribute
-			if (checkForeigen):
-				valueList = self.insertForeign(relation, attribute, value, valueList, foreignNone = foreignNone)
-			else:
-				valueList.append(value)
-			attributeList.append(f"[{attribute}]")
-		command += f" INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for value in valueList)})"
-
-		if (relation not in self.foreignKeys_catalogue):
-			increment = False
+		if (not checkForeigen):
+			attributeList, valueList = zip(*myTuple.items())
 		else:
-			select_command = f"""SELECT id FROM [{relation}] WHERE ({' AND '.join(f'{attribute} = "{valueList[i]}"' for i, attribute in enumerate(attributeList))})"""
-			result = self.executeCommand(select_command)
-			increment = not result
+			valueList = []
+			attributeList = []
+			for attribute, value in myTuple.items():
+				#Remember the associated value for the attribute
+				valueList.append(self.insertForeign(relation, attribute, value, foreignNone = foreignNone))
+				attributeList.append(attribute)
 
-		#Run SQL command
-		self.executeCommand(command, valueList)
-
-		if (increment):
-			for index in self.executeCommand(select_command, valuesAsList = True, filterTuple = True, filterNone = True):
-				for _attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
-					self.addForeignUse(relation, index, foreign_relation, foreign_attribute)
+		if (self.connectionType == "access"):
+			command = f"INSERT INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for i in valueList)})"
+		else:
+			command = f"INSERT { {True: 'OR REPLACE ', False: '', None: 'OR IGNORE '}[unique] }INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for i in valueList)})"
+		
+		assert len(attributeList) is len(valueList)
+		if (incrementForeign):
+			self.executeCommand_add(relation, command, valueList)
+		else:
+			self.executeCommand(command, valueList)
 
 		#Save Changes
 		if (applyChanges is None):
@@ -1599,8 +1704,8 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, defaultValues = {}, applyChanges = None, checkForeigen = True, 
-		updateForeign = None, exclude = [], nextToCondition = True, like = {}, notLike = {}, isNull = {}, isNotNull = {}):
+	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, defaultValues = {}, 
+		applyChanges = None, checkForeigen = True, updateForeign = None, exclude = [], **locationKwargs):
 		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
@@ -1638,33 +1743,58 @@ class Database():
 		for relation, attributeDict in myTuple.items():
 			#Account for multiple attributes to change
 			if (not isinstance(attributeDict, dict)):
-				if (isinstance(attributeDict, (list, tuple, range, set, types.GeneratorType))):
+				if (isinstance(attributeDict, (list, tuple, set, range, types.GeneratorType))):
 					attributeDict = {item: value for item in attributeDict}
 				else:
 					attributeDict = {attributeDict: value}
-			for attribute, _value in attributeDict.items():
-				if (_value is None):
-					_value = NULL()
-				elif (not isinstance(_value, NULL)):
-					_value = f"{_value}"
 
-				valueList = []
-				if (checkForeigen):
-					valueList = self.changeForeign(relation, attribute, nextTo, _value, valueList, forceMatch, updateForeign)
-				
-				currentValue = self.getValue({relation: attribute}, nextTo, filterRelation = True)[attribute]
-				if (len(currentValue) == 0):
+			if (checkForeigen and (relation in self.foreignKeys_catalogue)):
+				foreignList = self.foreignKeys_catalogue[relation].keys()
+				selectCommand = f"SELECT id, {', '.join(foreignList)} FROM [{relation}]"
+				oldRows = self.executeCommand(selectCommand, valuesAsSet = True)
+				# oldRows = {item[0]: item[1:] for item in self.executeCommand(selectCommand, valuesAsList = True)}
+			else:
+				oldRows = None
+
+			locationInfo, locationValues = self.configureLocation(relation, nextTo = nextTo, **locationKwargs)
+			for attribute, newValue in attributeDict.items():
+				if (newValue is None):
+					newValue = NULL()
+				elif (not isinstance(newValue, NULL)):
+					newValue = f"{newValue}"
+
+				command = f"SELECT {attribute} FROM [{relation}] WHERE ({locationInfo})"
+				currentValues = self.executeCommand(command, locationValues, valuesAsList = True, filterTuple = True)
+				if (not currentValues):
 					if (not forceMatch):
 						errorMessage = f"There is no key {attribute} with the nextTo {nextTo} in the relation {relation}"
 						raise KeyError(errorMessage)
-					self.addTuple(relation, myTuple = {**nextTo, **{attribute: _value}}, unique = None)
-				else:
-					locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
+					self.addTuple(relation, myTuple = {**nextTo, **locationKwargs, **{attribute: newValue}}, unique = None, incrementForeign = False)
+					continue
 
-					command = "UPDATE [{}] SET [{}] = ? WHERE ({})".format(relation, attribute, locationInfo)
-					
-					self.executeCommand(command, valueList)
+				if (not checkForeigen):
+					valueList = currentValues
+				else:
+					valueList = self.changeForeign(relation, attribute, newValue, currentValues, updateForeign = updateForeign)
+
+				for i, _value in enumerate(currentValues):
+					command = f"UPDATE [{relation}] SET [{attribute}] = ? WHERE ({locationInfo} AND [{attribute}] = ?)"
+					self.executeCommand(command, (valueList[i], *locationValues, _value))
 			
+			if (oldRows is not None):
+				newRows = self.executeCommand(selectCommand, valuesAsSet = True)
+				for _index, *args in oldRows - newRows:
+					for i, _attribute in enumerate(foreignList):
+						if (args[i] is None):
+							continue
+						self.subtractForeignUse(relation, args[i], *self.foreignKeys_catalogue[relation][_attribute])
+
+				for _index, *args in newRows - oldRows:
+					for i, _attribute in enumerate(foreignList):
+						if (args[i] is None):
+							continue
+						self.addForeignUse(relation, args[i], *self.foreignKeys_catalogue[relation][_attribute])
+
 			if (applyChanges is None):
 				applyChanges = self.defaultCommit
 			if (applyChanges):
@@ -1672,8 +1802,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def removeTuple(self, myTuple, like = {}, notLike = {}, isNull = {}, isNotNull = {}, applyChanges = None,
-		checkForeigen = True, updateForeign = True, exclude = [], nextToCondition = True):
+	def removeTuple(self, myTuple, applyChanges = None,	checkForeigen = True, updateForeign = True, incrementForeign = True, **locationKwargs):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
 		WARNING: Does not currently look for forigen keys.
@@ -1704,20 +1833,14 @@ class Database():
 
 		#Account for multiple tuples to remove
 		for relation, nextTo in myTuple.items():
-			valueList = []
-			locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition, checkForeigen, like, notLike, isNull, isNotNull)
-			
-			if (relation in self.foreignKeys_catalogue):
-				for attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
-					command = "SELECT [{}] FROM [{}] WHERE ({})".format(attribute, relation, locationInfo)
-					result = self.executeCommand(command, valueList, valuesAsList = True, filterTuple = True, filterNone = True)
-					if (not result):
-						continue
-					self.subtractForeignUse(relation, result, foreign_relation, foreign_attribute)
+			locationInfo, valueList = self.configureLocation(relation, nextTo = nextTo, **locationKwargs)
 
 			command = "DELETE FROM [{}] WHERE ({})".format(relation, locationInfo)
-			self.executeCommand(command, valueList)
 
+			if (incrementForeign):
+				self.executeCommand_subtract(relation, command, valueList)
+			else:
+				self.executeCommand(command, valueList)
 
 		#Save Changes
 		if (applyChanges is None):
@@ -1728,7 +1851,7 @@ class Database():
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getAllValues(self, relation = None, exclude = [], filterRelation = None, **kwargs):
+	def getAllValues(self, relation = None, attribute = None, exclude = [], **kwargs):
 		"""Returns all values in the given relation (table) that match the filter conditions.
 
 		relation (str) - Which relation to look in
@@ -1758,9 +1881,6 @@ class Database():
 		else:
 			relationList = relation
 
-		if (filterRelation is None):
-			filterRelation = len(relationList) <= 1
-
 		myTuple = {}
 		for relation in relationList:
 			#Ensure correct format
@@ -1776,19 +1896,23 @@ class Database():
 				excludeList = exclude[:]
 
 			#Build getValue query
-			attributeNames = self.getAttributeNames(relation, excludeList)
-			myTuple[relation] = attributeNames
-
-		results_catalogue = self.getValue(myTuple, filterRelation = filterRelation, **kwargs)
-
+			if (attribute):
+				if (not isinstance(attribute, dict)):
+					myTuple[relation] = attribute
+					continue
+				if (relation in attribute):
+					myTuple[relation] = attribute[relation]
+					continue
+			myTuple[relation] = self.getAttributeNames(relation, excludeList)
+		results_catalogue = self.getValue(myTuple, **kwargs)
 		return results_catalogue
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
-	def getValue(self, myTuple, nextTo = {}, orderBy = None, limit = None, direction = None, nextToCondition = True, returnNull = False, returnForeign = True,
-		checkForeigen = True, filterTuple = True, filterRelation = True, filterForeign = True, filterAttribute = False, filterNone = False, exclude = [],
-		valuesAsList = False, valuesAsRows = True, greaterThan = {}, lessThan = {}, greaterThanOrEqualTo = {}, lessThanOrEqualTo = {}, 
-		like = {}, notLike = {}, isNull = {}, isNotNull = {}, forceMatch = None):
+	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, 
+		returnNull = False, returnForeign = True, includeDuplicates = True, checkForeigen = True, 
+		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True,
+		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -1797,9 +1921,10 @@ class Database():
 		myTuple (dict)   - What to return. {relation: attribute}. A list of attributes can be returned. {relation: [attribute 1, attribute 2]}
 			- If an attribute is a foreign key: {relation: {foreign relation: foreign attribute}}
 		nextTo (dict)    - An attribute-value pair that is in the same tuple. {attribute: value}
-			- If multiple keys are given, one will be 'chosen at random'
+			- If multiple keys are given, all will be used according to 'nextToCondition'
 			- If an attribute is a foreign key: {value: {foreign relation: foreign attribute}}
 			- If None: The whole column will be returned
+			- If str: Will return for all columns where that value is present
 		orderBy (any)    - Determines whether to order the returned values or not. A list can be given to establish priority for multiple things
 			- If None: Do not order
 			- If not None: Order the values by the given attribute
@@ -1845,9 +1970,8 @@ class Database():
 			- If True: Returned values will be in a list
 			- If False: Returned values will be in a tuple
 		valuesAsRows (bool)    - Determines if the values returned should be returned as rows or columns
-			- If True: Returned values will be all the row values for that column {relation: {attribute 1: [row 1 value, row 2 value, row 3 value]}
-			- If False: Returned values will be all the column values for that row with the attribute names as a separate key {relation: {row 1: [attribute 1 value, attribute 2 value, attribute 3 value], "attributeNames": [name for attribute 1, name for attribute 2, name for attribute 3]}
-			- If None: Returned values will be all the column values for that row with the attribute names with each value {relation: {row 1: {attribute 1: value, attribute 2: value, attribute 3: value}}}
+			- If True: Returned values will be all the row values for that column {relation: {attribute 1: {row 1: value, row 2: value, row 3: value}}}
+			- If False: Returned values will be all the column values for that row with the attribute names with each value {relation: {row 1: {attribute 1: value, attribute 2: value, attribute 3: value}}}
 
 		greaterThan (int)          - Determines if returned values must be '>' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
 			- If not None: Returned values will be '>' the given number
@@ -1880,7 +2004,6 @@ class Database():
 		Example Input: getValue({"Users": "name", "Names": "first_name"}, filterRelation = False)
 		Example Input: getValue({"Users": "name", "Names": ["first_name", "extra_data"]})
 
-		Example Input: getValue({"Users": "name"}, filterTuple = False)
 		Example Input: getValue({"Users": "name"}, filterForeign = None)
 		Example Input: getValue({"Users": "name"}, filterForeign = False)
 
@@ -1894,152 +2017,104 @@ class Database():
 		Example Input: getValue({"Users": "name"}, greaterThan = {"age": 20})
 		Example Input: getValue({"Constructor_VariableNames": "table"}, isNotNull = {"inventoryTitle": True}, exclude = ["_Job"])
 		"""
+		assert "filterTuple" not in locationKwargs
+		assert "valuesAsRows" not in locationKwargs
+		assert "valuesAsList" not in locationKwargs
+		assert "filterRelation" not in locationKwargs
+		assert "filterAttribute" not in locationKwargs
 
+		nextTo = nextTo or {}
 		orderBy = orderBy or "id"
+		exclude = exclude or set()
+		forceRelation = forceRelation or (len(myTuple) > 1)
 
-		if (filterRelation and filterAttribute):
-			results_catalogue = []
-		else:
-			results_catalogue = {}
-
-		if (nextTo is None):
-			nextTo = {}
-		if (valuesAsList is None):
-			valuesAsList = False
-	
-		for i, (relation, attributeList) in enumerate(myTuple.items()):
-			#Account for multiple items
+		results_catalogue = {}
+		for relation, attributeList in myTuple.items():
 			if (attributeList is None):
 				attributeList = self.getAttributeNames(relation)
-			elif (not isinstance(attributeList, (list, tuple))):
+			elif (not isinstance(attributeList, (list, tuple, set, range, types.GeneratorType))):
 				attributeList = [attributeList]
 
-			for attribute in attributeList:
-				valueList = []
-				command = "SELECT [{}].[{}] FROM [{}]".format(relation, attribute, relation)
+			#Setup
+			command = f"SELECT{[' DISTINCT', ''][includeDuplicates]} {', '.join(f'[{relation}].[{attribute}]' for attribute in attributeList)} FROM [{relation}]"
 
-				locationInfo, valueList = self.configureLocation(relation, nextTo, valueList, nextToCondition = nextToCondition, checkForeigen = checkForeigen, 
-					like = like, notLike = notLike, isNull = isNull, isNotNull = isNotNull, 
-					greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, lessThanOrEqualTo = lessThanOrEqualTo)
-				# if (len(valueList) != 0):
-				if (len(locationInfo) != 0):
-					command += " WHERE ({})".format(locationInfo)
+			locationInfo, valueList = self.configureLocation(relation, nextTo = nextTo, exclude = exclude, **locationKwargs)
+			if (locationInfo):
+				command += f" WHERE ({locationInfo})"
 
-				if (orderBy is not None):
-					command += " ORDER BY "
+			orderInfo = self.configureOrder(relation, orderBy = orderBy, direction = direction)
+			if (orderInfo):
+				command += f" ORDER BY {orderInfo}"
 
-					if (not isinstance(orderBy, (list, tuple))):
-						orderBy = [orderBy]
-					if (not isinstance(direction, (list, tuple, dict))):
-						direction = [direction]
-					if ((not isinstance(direction, dict)) and (len(direction) != 1) and (len(direction) != len(orderBy))):
-						errorMessage = "'orderBy' and 'direction' size do not match"
-						raise KeyError(errorMessage)
+			if (self.connectionType == "access"):
+				result = self.executeCommand(command, valueList, valuesAsList = True)
 
-					for i, item in enumerate(orderBy):
-						if (i != 0):
-							command += ", "
-
-						command += "[{}].[{}]".format(relation, item)
-
-						if (type(direction) == dict):
-							condition = direction.get(item, None)
-						else:
-							condition = direction[0] if len(direction) == 1 else direction[i]
-						if (condition is not None):
-							command += " ASC" if condition else " DESC"
-
-				if ((limit is not None) and (self.connectionType != "access")):
+				if (limit is not None):
+					result = result[:limit]
+			else:
+				if (limit is not None):
 					command += " LIMIT {}".format(limit)
 
-				try:
-					result = self.executeCommand(command, valueList, filterTuple = filterTuple, valuesAsList = valuesAsList)
-				except sqlite3.IntegrityError as error:
-					# if ("UNIQUE" in error.args[0]):
-					raise error
+				result = self.executeCommand(command, valueList, valuesAsList = True)
 
-				if ((limit is not None) and (self.connectionType == "access")):
-					result = result[:limit]
+				if (checkForeigen and result):
+					result = self.configureForeign(result, relation, attributeList, 
+						filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign)
 
-				#Check Foreign
-				if (checkForeigen):
-					result = self.configureForeign(result, relation, attribute, filterTuple = filterTuple, filterForeign = filterForeign, valuesAsList = valuesAsList, returnNull = returnNull, returnForeign = returnForeign)
+			if (forceMatch and (not result)):
+				result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
+					filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
+				print(result)
+				jkhhjkj
 
-				#Add result to catalogue
-				if (filterRelation):
-					if (filterAttribute):
-						pathway = results_catalogue
+			if (forceRelation):
+				if (attributeFirst):
+					if (forceAttribute or (len(attributeList) > 1)):
+						if (forceTuple or (len(result) > 1)):
+							results_catalogue[relation] = {attribute: {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
+						else:
+							results_catalogue[relation] = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
 					else:
-						if (attribute not in results_catalogue):
-							results_catalogue[attribute] = []
-						pathway = results_catalogue[attribute]
+						if (forceTuple or (len(result) > 1)):
+							results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
+						else:
+							results_catalogue[relation] = result[0][0]
 				else:
-					if (filterAttribute):
-						if (relation not in results_catalogue):
-							results_catalogue[relation] = []
-						pathway = results_catalogue[relation]
+					if (forceTuple or (len(result) > 1)):
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue[relation] = {i: {attribute: row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
+						else:
+							results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
 					else:
-						if (relation not in results_catalogue):
-							results_catalogue[relation] = {}
-						if (attribute not in results_catalogue[relation]):
-							results_catalogue[relation][attribute] = []
-						pathway = results_catalogue[relation][attribute]
-
-				if (isinstance(result, dict)):
-					print(result)
-					ujhjkhk
-					pathway.append(result)
-				else:
-					if (forceMatch and (not result)):
-						self.addTuple(relation, myTuple = nextTo, unique = None)
-						result = self.getValue({relation: attribute}, nextTo, nextToCondition = nextToCondition, 
-							returnNull = returnNull, returnForeign = returnForeign, checkForeigen = checkForeigen, 
-							greaterThan = greaterThan, lessThan = lessThan, greaterThanOrEqualTo = greaterThanOrEqualTo, 
-							lessThanOrEqualTo = lessThanOrEqualTo, like = like, notLike = notLike, isNull = isNull, 
-							isNotNull = isNotNull, forceMatch = False)[attribute]
-					for item in result:
-						if (item not in exclude):
-							pathway.append(item)
-
-
-		#Determine output orientation
-		if (valuesAsRows is not None):
-			if (valuesAsRows):
-				return results_catalogue
-
-		#Account for different formats
-		if (filterRelation):
-			temp_results_catalogue = {relation: results_catalogue}
-		else:
-			temp_results_catalogue = results_catalogue
-
-		#Switch rows and columns
-		new_results_catalogue = {}
-		for item_relation, item_catalogue in temp_results_catalogue.items():
-			new_results_catalogue[item_relation] = {}
-			if (valuesAsRows is not None):
-				new_results_catalogue[item_relation]["attributeNames"] = []
-				for item_attribute, item_value in item_catalogue.items():
-					new_results_catalogue[item_relation]["attributeNames"].append(item_attribute)
-
-					for i, subItem in enumerate(item_value):
-						if (i not in new_results_catalogue[item_relation]):
-							new_results_catalogue[item_relation][i] = []
-						new_results_catalogue[item_relation][i].append(subItem)
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue[relation] = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
+						else:
+							results_catalogue[relation] = result[0][0]
 			else:
-				for item_attribute, item_value in item_catalogue.items():
-					for i, subItem in enumerate(item_value):
-						if (i not in new_results_catalogue[item_relation]):
-							new_results_catalogue[item_relation][i] = {}
-						new_results_catalogue[item_relation][i][item_attribute] = subItem
-
-
-		#Account for different formats
-		if (filterRelation):
-			new_results_catalogue = new_results_catalogue[relation]
-
-		return new_results_catalogue
-
+				if (attributeFirst):
+					if (forceAttribute or (len(attributeList) > 1)):
+						if (forceTuple or (len(result) > 1)):
+							results_catalogue = {attribute: {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
+						else:
+							results_catalogue = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
+					else:
+						if (forceTuple or (len(result) > 1)):
+							results_catalogue = {i: row[0] for i, row in enumerate(result)}
+						else:
+							results_catalogue = result[0][0]
+				else:
+					if (forceTuple or (len(result) > 1)):
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue = {i: {attribute: row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
+						else:
+							results_catalogue = {i: row[0] for i, row in enumerate(result)}
+					else:
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
+						else:
+							results_catalogue = result[0][0]
+		return results_catalogue
+		
 	def getForeignLinks(self, relationList, updateSchema = True):
 		"""Returns foreign keys that are linked attributes in the given relation.
 		{foreign relation: {foreign attribute: {relation that links to it: [attributes that link to it]}}}
@@ -2067,12 +2142,12 @@ class Database():
 						links[foreign_relation][foreign_attribute][relation].append(attribute)
 		return links
 
-	def addForeignUse(self, relation, index, foreign_relation, foreign_attribute):
+	def addForeignUse(self, relation, index, foreign_relation, foreign_attribute, n = 1):
 		"""Marks a forigen key as used in one place.
 
 		Example Input: addForeignUse(relation, index, foreign_relation, foreign_attribute)
 		"""
-		
+
 		if (foreign_relation not in self.forigenKeys_used):
 			self.forigenKeys_used[foreign_relation] = {}
 		if (foreign_attribute not in self.forigenKeys_used[foreign_relation]):
@@ -2081,19 +2156,35 @@ class Database():
 			self.forigenKeys_used[foreign_relation][foreign_attribute][index] = {}
 		if (relation not in self.forigenKeys_used[foreign_relation][foreign_attribute][index]):
 			self.forigenKeys_used[foreign_relation][foreign_attribute][index][relation] = 0
-		self.forigenKeys_used[foreign_relation][foreign_attribute][index][relation] += 1
-		
-	def subtractForeignUse(self, relation = None, index = None, foreign_relation = None, foreign_attribute = None, exclude = set()):
+		self.forigenKeys_used[foreign_relation][foreign_attribute][index][relation] += n
+
+	def subtractForeignUse(self, relation = None, index = None, foreign_relation = None, foreign_attribute = None, 
+		exclude = set(), n = 1, filterEmpty = True):
 		"""Marks a forigen key as not used in one place.
 
 		Example Input: subtractForeignUse(relation, index, foreign_relation, foreign_attribute)
 		"""
 
+		removeList = []
 		for _relation in self.yieldKey(foreign_relation, self.forigenKeys_used, exclude = exclude):
 			for _attribute in self.yieldKey(foreign_attribute, self.forigenKeys_used[_relation]):
 				for _index in self.yieldKey(index, self.forigenKeys_used[_relation][_attribute]):
 					for _user in self.yieldKey(relation, self.forigenKeys_used[_relation][_attribute][_index]):
-						self.forigenKeys_used[_relation][_attribute][_index][_user] -= 1
+						if (n is None):
+							removeList.append((_relation, _attribute, _index, _user))
+						else:
+							self.forigenKeys_used[_relation][_attribute][_index][_user] -= n
+							if (filterEmpty and (self.forigenKeys_used[_relation][_attribute][_index][_user] <= 0)):
+								removeList.append((_relation, _attribute, _index, _user))
+
+		for _relation, _attribute, _index, _user in removeList:
+			del self.forigenKeys_used[_relation][_attribute][_index][_user]
+			if (not self.forigenKeys_used[_relation][_attribute][_index]):
+				del self.forigenKeys_used[_relation][_attribute][_index]
+				if (not self.forigenKeys_used[_relation][_attribute]):
+					del self.forigenKeys_used[_relation][_attribute]
+					if (not self.forigenKeys_used[_relation]):
+						del self.forigenKeys_used[_relation]
 
 	def updateForeignUses(self, exclude = set(), updateSchema = True):
 		"""Updates how many places each foreign key is used.
@@ -2126,10 +2217,11 @@ class Database():
 		for command, (relation, foreign_relation, foreign_attribute) in yieldCommand():
 			for index in self.executeCommand(command, filterTuple = True, valuesAsList = True, filterNone = True):
 				self.addForeignUse(relation, index, foreign_relation, foreign_attribute)
-
+		
 	def getForeignUses(self, relation = None, attribute = None, index = None, user = None, 
-		updateForeign = False, updateSchema = False, exclude = set()):
-
+		updateForeign = False, updateSchema = False, showVariable = False, filterEmpty = True,
+		filterRelation = True, filterAttribute = True, filterIndex = True, filterUser = True,
+		excludeRelation = set(), excludeAttribute = set(), excludeIndex = set(), excludeUser = set()):
 		"""Returns how many times the given forigen key entry is used.
 
 		relation (str) - Which foreign relation to look for
@@ -2153,19 +2245,101 @@ class Database():
 		Example Input: getForeignUses(attribute = "first_name")
 		"""
 
-		if (isinstance(exclude, (range, types.GeneratorType))):
-			exclude = list(exclude)
-		elif (not isinstance(exclude, (list, tuple, set))):
-			exclude = [exclude]
+		if (showVariable and filterIndex):
+			showVariable = False
 
-		def yieldUses():
-			nonlocal self
+		if (isinstance(index, (int))):
+			def yieldIndex(*args):
+				nonlocal index
+				yield index
 
-			for _relation in self.yieldKey(relation, self.forigenKeys_used, exclude = exclude):
-				for _attribute in self.yieldKey(attribute, self.forigenKeys_used[_relation]):
-					for _index in self.yieldKey(index, self.forigenKeys_used[_relation][_attribute]):
-						for _user in self.yieldKey(user, self.forigenKeys_used[_relation][_attribute][_index]):
-							yield self.forigenKeys_used[_relation][_attribute][_index][_user]
+		elif (isinstance(index, (str, float))):
+			def yieldIndex(_relation, _attribute):
+				"""Allows the index to be the value instead of the id."""
+				nonlocal self, index
+
+				if (not index):
+					yield index
+					return
+
+				command = f"SELECT id FROM [{_relation}] WHERE ({_attribute} = ?)"
+				result = self.executeCommand(command, index, valuesAsList = True, filterTuple = True)
+				for item in result:
+					yield item
+		else:
+			def yieldIndex(_relation, _attribute):
+				"""Allows the index to be a list of values instead of the id."""
+				nonlocal self, index
+
+				if (not index):
+					yield index
+					return
+
+				for _index in index:
+					if (isinstance(_index, int)):
+						yield _index
+						continue
+
+					command = f"SELECT id FROM [{_relation}] WHERE ({_attribute} = ?)"
+					result = self.executeCommand(command, _index, valuesAsList = True, filterTuple = True)
+					for item in result:
+						yield item
+
+		def yieldUses(sumOnly = False):
+			nonlocal self, showVariable
+
+			if (sumOnly):
+				for _relation in self.yieldKey(relation, self.forigenKeys_used, exclude = excludeRelation):
+					for _attribute in self.yieldKey(attribute, self.forigenKeys_used[_relation], exclude = excludeAttribute):
+						for _index in self.yieldKey(yieldIndex(_relation, _attribute), self.forigenKeys_used[_relation][_attribute], exclude = excludeIndex):
+							for _user in self.yieldKey(user, self.forigenKeys_used[_relation][_attribute][_index], exclude = excludeUser):
+								yield self.forigenKeys_used[_relation][_attribute][_index][_user]
+				return
+
+			if (showVariable):
+				for _relation in self.yieldKey(relation, self.forigenKeys_used, exclude = excludeRelation):
+					for _attribute in self.yieldKey(attribute, self.forigenKeys_used[_relation], exclude = excludeAttribute):
+						for _index in self.yieldKey(yieldIndex(_relation, _attribute), self.forigenKeys_used[_relation][_attribute], exclude = excludeIndex):
+							for _user in self.yieldKey(user, self.forigenKeys_used[_relation][_attribute][_index], exclude = excludeUser):
+								command = f"SELECT [{_relation}].[{_attribute}] FROM [{_relation}] WHERE (id = {_index})"
+								variable = self.executeCommand(command, valuesAsList = True, filterTuple = True)
+								if (variable):
+									yield (_relation, _attribute, variable[0], _user, self.forigenKeys_used[_relation][_attribute][_index][_user])
+				return
+
+			for _relation in self.yieldKey(relation, self.forigenKeys_used, exclude = excludeRelation):
+				for _attribute in self.yieldKey(attribute, self.forigenKeys_used[_relation], exclude = excludeAttribute):
+					for _index in self.yieldKey(yieldIndex(_relation, _attribute), self.forigenKeys_used[_relation][_attribute], exclude = excludeIndex):
+						for _user in self.yieldKey(user, self.forigenKeys_used[_relation][_attribute][_index], exclude = excludeUser):
+							yield (_relation, _attribute, _index, _user, self.forigenKeys_used[_relation][_attribute][_index][_user])
+
+		def nestedFactory():
+			return collections.defaultdict(nestedFactory)
+
+		if (not filterEmpty):
+			def formatDict(catalogue):
+				for key, value in catalogue.items():
+					if (isinstance(value, dict)):
+						value = formatDict(value)
+					catalogue[key] = value
+				return dict(catalogue)
+		else:
+			def formatDict(catalogue):
+				removeList = set()
+				for key, value in catalogue.items():
+					if (isinstance(value, dict)):
+						value = formatDict(value)
+					
+					if (not value):
+						removeList.add(key)
+						continue
+					
+					catalogue[key] = value
+
+				for key in removeList:
+					del catalogue[key]
+
+				return dict(catalogue)
 
 		###############################################
 
@@ -2175,7 +2349,41 @@ class Database():
 		if (updateForeign):
 			self.updateForeignUses(updateSchema = False)
 
-		return sum(yieldUses())
+		if (all((filterRelation, filterAttribute, filterIndex, filterUser))):
+			return sum(yieldUses(sumOnly = True))
+
+		nestList = []
+		if (not filterUser):
+			nestList.append('_user')
+		if (not filterRelation):
+			nestList.append('_relation')
+		if (not filterAttribute):
+			nestList.append('_attribute')
+		if (not filterIndex):
+			nestList.append('_index')
+
+		if (len(nestList) is 1):
+			uses = {}
+			variable = nestList[0]
+			for _relation, _attribute, _index, _user, n in yieldUses():
+				key = locals()[variable]
+				if (key not in uses):
+					uses[key] = 0
+				uses[key] += n
+			return formatDict(uses)
+
+		uses = nestedFactory()
+		for _relation, _attribute, _index, _user, n in yieldUses():
+			catalogue = uses
+			for variable in nestList[:-1]:
+				catalogue = catalogue[locals()[variable]]
+
+			key = locals()[nestList[-1]]
+			if (key not in catalogue):
+				catalogue[key] = 0
+			catalogue[key] += n
+
+		return formatDict(uses)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -2483,129 +2691,184 @@ class Database():
 
 		command = f"DROP INDEX{['', ' IF EXISTS'][noReplication]} [{relation}].{relation}_{attribute}"
 
+def quiet(*args):
+	pass
+
 def test_sqlite():
-	print("sqlite3")
+	quiet("sqlite3")
 	#Create the database
 	database_API = build()
-	database_API.openDatabase("test.db", applyChanges = False)
+	database_API.openDatabase("test.db")#, applyChanges = False)
 
-	database_API.removeRelation("Users")
-	database_API.removeRelation("Names")
-	database_API.removeRelation("Address")
+	try:
+		#Create Tables
+		database_API.removeRelation()
+		database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+		database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+		database_API.createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
+		database_API.createRelation("Other Users", "Users")
 
-	#Create tables from the bottom up
-	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
-	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
-	database_API.createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}, "address": {"Address": "street"}})
-	database_API.createRelation("Users Copy", "Users")
-	database_API.saveDatabase()
+		# database_API.createIndex("Users", "age")
 
-	database_API.createIndex("Users", "age")
 
-	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
+
+
+
+		# database_API.addTuple("Users", {"name": "Lorem"})
+		# database_API.addTuple("Users", {"name": "Lorem", "age": 10})
+		# database_API.addTuple("Users", {"name": "Ipsum"})
+		# database_API.addTuple("Users", {"name": "Dolor", "age": 10})
+		# database_API.addTuple("Other Users", {"name": "Lorem"})
+		# database_API.addTuple("Other Users", {"name": "Dolor"})
+		# database_API.removeTuple({"Users": {"name": "Lorem"}})
+		# database_API.changeTuple({"Users": "name"}, {"name": "Sit"}, "Lorem", forceMatch = True)
+		# database_API.changeTuple({"Users": "name"}, {"name": "Dolor"}, "Amet")
+		# database_API.addTuple("Users", {"name": "Amet"})
+		# database_API.addTuple("Other Users", {"name": "Amet"})
+		# database_API.changeTuple({"Users": "name"}, {"age": 10}, "Amet")
+
+		# print(database_API.getValue({"Users": "name"}))
+		# print(database_API.getValue({"Other Users": "name"}))
+		# print(database_API.getForeignUses("Names", "first_name", filterIndex = False, filterUser = False, showVariable = True))
+
+		# database_API.addTuple("Other Users", {"name": "Lorem"})
+		# print(database_API.getForeignUses("Names", "first_name", filterUser = False, filterIndex = False, showVariable = True))
+
+
+
+
+
+
+
+		#Add Items
+		database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": "Sit"}, unique = None)
+		
+		database_API.addTuple("Users", {"name": "Ipsum", "age": 26, "height": 5}, unique = None)
+		database_API.addTuple("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
+		database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
+		database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
+		database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+		database_API.removeTuple({"Users": {"name": "Sit"}})
+		database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+
+		database_API.addTuple("Other Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+
+		#Simple Actions
+		print("Simple Actions")
+		print(database_API.getValue({"Users": "name"}))
+		print(database_API.getValue({"Users": "name"}, checkForeigen = False))
+		print(database_API.getValue({"Users": ["name", "age"]}))
+		print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False))
+		print(database_API.getValue({"Other Users": "name"}))
 	
-	database_API.addTuple("Users", {"name": "Ipsum", "age": 26, "height": 5}, unique = None)
-	# database_API.addTuple("Users", {"name": "Lorem", "age": 26, "height": 6}, unique = None)
-	# database_API.addTuple("Users", {"name": "Lorem", "age": 24, "height": 3}, unique = None)
-	# database_API.addTuple("Users", {"name": "Dolor", "age": 21, "height": 4}, unique = None)
-	# database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
-	# database_API.removeTuple({"Users": {"name": "Sit"}})
-	# database_API.addTuple("Users", {"name": "Sit", "age": None, "height": 1}, unique = None)
+		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True))
+		print(database_API.getValue({"Users": "name"}, forceRelation = True))
+		print()
 
-	# #Simple Actions
-	# print("Simple Actions")
-	# print(database_API.getValue({"Users": "name"}))
-	# print(database_API.getValue({"Users": "name"}, filterRelation = False))
-	# print(database_API.getValue({"Users": ["name", "age"]}))
-	# print()
+		#Ordering Data
+		print("Ordering Data")
+		print(database_API.getValue({"Users": "name"}, orderBy = "age"))
+		print(database_API.getValue({"Users": "name"}, orderBy = "name"))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = True))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = False))
 
-	# #Ordering Data
-	# print("Ordering Data")
-	# print(database_API.getValue({"Users": "name"}, orderBy = "age"))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
 
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False]))
-	# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
+		print(database_API.getValue({"Users": "name", "Names": "first_name"}))
+		print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
+		print()
 
-	# print(database_API.getValue({"Users": "name", "Names": "first_name"}))
-	# print(database_API.getValue({"Users": "name", "Names": "first_name"}, filterRelation = False))
-	# print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
-	# print()
+		#Changing Attributes
+		print("Changing Attributes")
+		print(database_API.getValue({"Users": ["name", "age"]}))
+		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Lorem")
+		print(database_API.getValue({"Users": ["name", "age"]}))
 
-	# #Changing Attributes
-	# print("Changing Attributes")
-	# print(database_API.getValue({"Users": "name"}))
-	# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
-	# print(database_API.getValue({"Users": "name"}))
-	# print(database_API.getValue({"Users": "name"}, filterForeign = True))
+		print(database_API.getValue({"Users": "name"}))
+		database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
+		print(database_API.getValue({"Users": "name"}))
+		print(database_API.getValue({"Other Users": "name"}))
+		database_API.changeTuple({"Users": "name"}, {"name": "Sit"}, "Amet")
+		print(database_API.getValue({"Users": "name"}))
+		print(database_API.getValue({"Other Users": "name"}))
 
-	# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Consectetur", forceMatch = True)
-	# print(database_API.getValue({"Users": "name"}))
-	# print(database_API.getValue({"Users": "name"}, filterForeign = None))
-	# print(database_API.getValue({"Users": "name"}, filterForeign = False))
-	# print(database_API.getValue({"Users": "name"}, checkForeigen = False))
-	# print()
+		print(database_API.getValue({"Users": "name"}))
+		database_API.changeTuple({"Users": "name"}, {"age": 27}, "Consectetur", forceMatch = True)
+		print(database_API.getValue({"Users": ["name", "age"]}))
+		print()
 
-	# #Triggers
-	# print("Triggers")
-	# database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
-	# print(database_API.getTrigger())
-	# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Amet", forceMatch = True)
-	# print(database_API.getValue({"Users": ["name", "lastModified"]}))
-	# print()
 
-	# #Etc
-	# print("Etc")
-	# print(database_API.getForeignUses("Names", "first_name"))#, updateForeign = True))
+		#Triggers
+		print("Triggers")
+		database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
+		print(database_API.getTrigger())
+		print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
+		time.sleep(1)
+		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Lorem")#, forceMatch = True)
+		print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
+		print()
 
-	database_API.saveDatabase()
-
-def test_access():
-	print("\n\naccess")
-	#Create the database
-	database_API = build()
-	database_API.openDatabase("H:/Python/Material_Tracker/empty.accdb", applyChanges = False)
-
-	database_API.removeRelation("Names")
-	database_API.removeRelation("Address")
-
-	#Create tables from the bottom up
-	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
-	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
-	database_API.saveDatabase()
-
-	database_API.addTuple("Names", {"first_name": "Lorem", "extra_data": 4}, unique = None)
-	database_API.addTuple("Names", {"first_name": "Ipsum", "extra_data": 7}, unique = None)
-	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": 3}, unique = None)
-	database_API.addTuple("Names", {"first_name": "Sit",   "extra_data": 1}, unique = None)
-	database_API.addTuple("Names", {"first_name": "Amet",  "extra_data": 10}, unique = None)
+		#Etc
+		print("Etc")
+		print(database_API.getValue({"Users": "name"}))
+		print(database_API.getValue({"Other Users": "name"}))
+		print(database_API.getForeignUses("Names", "first_name", filterIndex = False, filterUser = False, showVariable = True))
+		print(database_API.getForeignUses("Names", "first_name"))
+		print(database_API.getForeignUses("Names", "first_name", 3, "Users"))
+		print(database_API.getForeignUses("Names", "first_name", "Sit", filterUser = False))
+		print(database_API.getForeignUses("Names", "first_name", filterIndex = False))
+		print(database_API.getForeignUses("Names", "first_name", filterRelation = False, filterAttribute = False))
 	
-	#Simple Actions
-	print("Simple Actions")
-	print(database_API.getValue({"Names": "first_name"}))
-	print(database_API.getValue({"Names": "first_name"}, filterRelation = False))
-	print(database_API.getValue({"Names": ["first_name", "extra_data"]}))
-	print()
+	finally:
+		database_API.saveDatabase()
 
-	#Ordering Data
-	print("Ordering Data")
-	print(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
-	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
-	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
-	print()
+# def test_access():
+# 	print("\n\naccess")
+# 	#Create the database
+# 	database_API = build()
+# 	database_API.openDatabase("H:/Python/Material_Tracker/empty.accdb", applyChanges = False)
 
-	#Changing Attributes
-	print("Changing Attributes")
-	print(database_API.getValue({"Names": "first_name"}))
-	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
-	print(database_API.getValue({"Names": "first_name"}))
-	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
-	print(database_API.getValue({"Names": "first_name"}))
-	print()
+# 	database_API.removeRelation("Names")
+# 	database_API.removeRelation("Address")
 
-	database_API.saveDatabase()
+# 	#Create tables from the bottom up
+# 	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+# 	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+# 	database_API.saveDatabase()
+
+# 	database_API.addTuple("Names", {"first_name": "Lorem", "extra_data": 4}, unique = None)
+# 	database_API.addTuple("Names", {"first_name": "Ipsum", "extra_data": 7}, unique = None)
+# 	database_API.addTuple("Names", {"first_name": "Dolor", "extra_data": 3}, unique = None)
+# 	database_API.addTuple("Names", {"first_name": "Sit",   "extra_data": 1}, unique = None)
+# 	database_API.addTuple("Names", {"first_name": "Amet",  "extra_data": 10}, unique = None)
+	
+# 	#Simple Actions
+# 	print("Simple Actions")
+# 	print(database_API.getValue({"Names": "first_name"}))
+# 	print(database_API.getValue({"Names": "first_name"}, filterRelation = False))
+# 	print(database_API.getValue({"Names": ["first_name", "extra_data"]}))
+# 	print()
+
+# 	#Ordering Data
+# 	print("Ordering Data")
+# 	print(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
+# 	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
+# 	print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
+# 	print()
+
+# 	#Changing Attributes
+# 	print("Changing Attributes")
+# 	print(database_API.getValue({"Names": "first_name"}))
+# 	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
+# 	print(database_API.getValue({"Names": "first_name"}))
+# 	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
+# 	print(database_API.getValue({"Names": "first_name"}))
+# 	print()
+
+# 	database_API.saveDatabase()
 
 def main():
 	"""The main program controller."""
