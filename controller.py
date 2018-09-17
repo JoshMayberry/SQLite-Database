@@ -754,17 +754,13 @@ class Database():
 		changed = set()
 		valueList = [*currentValues]
 		for i, index in enumerate(currentValues):
-			if (updateForeign):
-				#I will change the attribute of that index, and it will apply to every table that refrences it
-				self.changeTuple({foreign_relation: foreign_attribute}, {"id": index}, newValue)
-				continue
-
-			if ((updateForeign is None) and (index not in changed) and (not usedKeys.get(index))):
-				#I am the only one using that index, so I can change it
+			if ((index not in changed) and (updateForeign or ((updateForeign is None) and (not usedKeys.get(index))))):
 				self.changeTuple({foreign_relation: foreign_attribute}, {"id": index}, newValue)
 				changed.add(index)
-				continue
-			
+			else:
+				self.addTuple(foreign_relation, myTuple = {foreign_attribute: newValue}, unique = None)
+				targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)[0]
+				return [targetId for value in currentValues]
 		return valueList
 
 	def configureForeign(self, results, relation, attributeList, filterForeign = False, returnNull = False, returnForeign = True):
@@ -2061,58 +2057,53 @@ class Database():
 					result = self.configureForeign(result, relation, attributeList, 
 						filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign)
 
-			if (forceMatch and (not result)):
+			if (not result):
+				if (not forceMatch):
+					if (forceRelation):
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue[relation] = {attribute: {} for attribute in attributeList}
+						else:
+							results_catalogue[relation] = {}
+					else:
+						if (forceAttribute or (len(attributeList) > 1)):
+							results_catalogue = {attribute: {} for attribute in attributeList}
+						else:
+							results_catalogue = {}
+					continue
+
 				result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
 					filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
 				print(result)
 				jkhhjkj
 
 			if (forceRelation):
-				if (attributeFirst):
+				if (forceTuple or (len(result) > 1)):
 					if (forceAttribute or (len(attributeList) > 1)):
-						if (forceTuple or (len(result) > 1)):
+						if (attributeFirst):
 							results_catalogue[relation] = {attribute: {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
 						else:
-							results_catalogue[relation] = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
-					else:
-						if (forceTuple or (len(result) > 1)):
-							results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
-						else:
-							results_catalogue[relation] = result[0][0]
-				else:
-					if (forceTuple or (len(result) > 1)):
-						if (forceAttribute or (len(attributeList) > 1)):
 							results_catalogue[relation] = {i: {attribute: row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
-						else:
-							results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
 					else:
-						if (forceAttribute or (len(attributeList) > 1)):
-							results_catalogue[relation] = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
-						else:
-							results_catalogue[relation] = result[0][0]
-			else:
-				if (attributeFirst):
+						results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
+				else:
 					if (forceAttribute or (len(attributeList) > 1)):
-						if (forceTuple or (len(result) > 1)):
+						results_catalogue[relation] = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
+					else:
+						results_catalogue[relation] = result[0][0]
+			else:
+				if (forceTuple or (len(result) > 1)):
+					if (forceAttribute or (len(attributeList) > 1)):
+						if (attributeFirst):
 							results_catalogue = {attribute: {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
 						else:
-							results_catalogue = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
-					else:
-						if (forceTuple or (len(result) > 1)):
-							results_catalogue = {i: row[0] for i, row in enumerate(result)}
-						else:
-							results_catalogue = result[0][0]
-				else:
-					if (forceTuple or (len(result) > 1)):
-						if (forceAttribute or (len(attributeList) > 1)):
 							results_catalogue = {i: {attribute: row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
-						else:
-							results_catalogue = {i: row[0] for i, row in enumerate(result)}
 					else:
-						if (forceAttribute or (len(attributeList) > 1)):
-							results_catalogue = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
-						else:
-							results_catalogue = result[0][0]
+						results_catalogue = {i: row[0] for i, row in enumerate(result)}
+				else:
+					if (forceAttribute or (len(attributeList) > 1)):
+						results_catalogue = {attribute: result[0][column] for column, attribute in enumerate(attributeList)}
+					else:
+						results_catalogue = result[0][0]
 		return results_catalogue
 		
 	def getForeignLinks(self, relationList, updateSchema = True):
@@ -2764,6 +2755,10 @@ def test_sqlite():
 		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
 		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True))
 		print(database_API.getValue({"Users": "name"}, forceRelation = True))
+
+		print(database_API.getValue({"Users": "name"}, {"name": "Lorem"}))
+		print(database_API.getValue({"Users": "name"}, {"name": "Ipsum"}))
+		print(database_API.getValue({"Users": "name"}, {"name": "Amet"}))
 		print()
 
 		#Ordering Data
@@ -2784,17 +2779,10 @@ def test_sqlite():
 		#Changing Attributes
 		print("Changing Attributes")
 		print(database_API.getValue({"Users": ["name", "age"]}))
-		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Lorem")
+		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Ipsum")
 		print(database_API.getValue({"Users": ["name", "age"]}))
-
-		print(database_API.getValue({"Users": "name"}))
-		database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Amet")
-		print(database_API.getValue({"Users": "name"}))
-		print(database_API.getValue({"Other Users": "name"}))
 		database_API.changeTuple({"Users": "name"}, {"name": "Sit"}, "Amet")
-		print(database_API.getValue({"Users": "name"}))
 		print(database_API.getValue({"Other Users": "name"}))
-
 		print(database_API.getValue({"Users": "name"}))
 		database_API.changeTuple({"Users": "name"}, {"age": 27}, "Consectetur", forceMatch = True)
 		print(database_API.getValue({"Users": ["name", "age"]}))
