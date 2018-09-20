@@ -12,6 +12,8 @@ import sqlite3
 import warnings
 import traceback
 import functools
+import itertools
+import cachetools
 import collections
 
 #For multi-threading
@@ -25,6 +27,23 @@ from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 	# pyodbc
 
 threadLock = threading.RLock()
+
+#Cache functions
+cacheLock = threading.RLock()
+indexCache = cachetools.LFUCache(maxsize = 10)
+valueCache = cachetools.LFUCache(maxsize = 1000)
+attributeCache = cachetools.LFUCache(maxsize = 100)
+
+def hash_formatAtribute(*args, alias = None, **kwargs):
+	key = cachetools.keys.hashkey(*args, **kwargs)
+	if (isinstance(alias, dict)):
+		key += tuple(sorted(alias.items()))
+	else:
+		key += tuple([alias])
+	return key
+
+def hash_formatValue(self, value, attribute, relation, returnNull = False, returnForeign = True, formatter = None):
+	return cachetools.keys.hashkey(value, attribute, relation, returnForeign)
 
 #Debugging functions
 def printCurrentTrace(printout = True, quitAfter = False):
@@ -250,6 +269,35 @@ class Database():
 			print(exc_type, exc_value)
 			return False
 
+	#Cache Functions
+	def setCacheSize_index(self, size):
+		"""Sets the max size for the index cache.
+
+		Example Input: setCacheSize_index(15)
+		"""
+		global indexCache
+
+		indexCache._Cache__maxsize = size
+
+	def setCacheSize_value(self, size):
+		"""Sets the max size for the value cache.
+
+		Example Input: setCacheSize_value(15)
+		"""
+		global valueCache
+
+		valueCache._Cache__maxsize = size
+
+	def setCacheSize_attribute(self, size):
+		"""Sets the max size for the attribute cache.
+
+		Example Input: setCacheSize_attribute(15)
+		"""
+		global attributeCache
+
+		attributeCache._Cache__maxsize = size
+
+
 	#Event Functions
 	def setFunction_cmd_startWaiting(self, function):
 		"""Will trigger the given function when waiting for a database to unlock begins.
@@ -291,7 +339,7 @@ class Database():
 
 		return sqlType
 
-	@functools.lru_cache(maxsize = 40, typed = True)
+	@cachetools.cached(indexCache)#, lock = cacheLock)
 	def getPrimaryKey(self, relation):
 		"""Returns the primary key to use for the given relation.
 
@@ -777,39 +825,62 @@ class Database():
 				return [targetId for value in currentValues]
 		return valueList
 
-	def configureForeign(self, results, relation, attributeList, filterForeign = False, returnNull = False, returnForeign = True):
+	@cachetools.cached(valueCache, key = hash_formatValue)#, lock = cacheLock)
+	def formatValue(self, value, attribute, relation, returnNull = False, returnForeign = True, formatter = None):
+		"""Returns a formatted value.
+
+		Example Input: formatValue(value, attribute, relation)
+		"""
+
+		def returnValue(_value):
+			if (formatter):
+				if (isinstance(formatter, dict)):
+					if (attribute in formatter):
+						return formatter[attribute](_value, attribute, relation)
+					return _value
+				else:
+					return formatter(_value, attribute, relation)
+			else:
+				return _value
+
+		#################################################
+
+		if (value is None):
+			if (returnNull):
+				return returnValue(NULL())
+			return returnValue(value)
+
+		if ((not returnForeign) or (relation not in self.foreignKeys_catalogue) or (attribute not in self.foreignKeys_catalogue[relation])):
+			return returnValue(value)
+
+		foreign_relation, foreign_attribute = self.foreignKeys_catalogue[relation][attribute]
+		command = f"SELECT [{foreign_attribute}] from [{foreign_relation}] WHERE ({self.getPrimaryKey(foreign_relation)} = ?)"
+		subResults = self.executeCommand(command, (value,), filterTuple = True)
+		if (not subResults):
+			return returnValue(value)
+
+		assert len(subResults) is 1
+		return returnValue(subResults[0])
+
+	@cachetools.cached(attributeCache, key = hash_formatAtribute)#, lock = cacheLock)
+	def formatAtribute(self, attribute, alias = None):
+		"""Returns a formatted attribute.
+
+		Example Input: formatAtribute(attribute)
+		Example Input: formatAtribute(attribute, alias)
+		"""
+
+		alias = alias or {}
+
+		return alias.get(attribute, attribute)
+
+	def configureForeign(self, results, relation, attributeList, filterForeign = False, 
+		returnNull = False, returnForeign = True):
 		"""Allows the user to use foreign keys.
 		Use: https://www.techonthenet.com/sqlite/joins.php
 		"""
 
-		if (not returnForeign):
-			return results
-
-		transposed = [list(row) for row in zip(*results)]
-		for i, column in enumerate(transposed):
-			foreign_results = self.findForeign(relation, attributeList[i])
-			if (not foreign_results):
-				continue
-			foreign_relation, foreign_attribute = foreign_results
-
-			for j, value in enumerate(column):
-				if (value is None):
-					if (returnNull):
-						column[j] = NULL()
-					else:
-						column[j] = value
-					continue
-
-				command = f"SELECT [{foreign_attribute}] from [{foreign_relation}] WHERE ({self.getPrimaryKey(foreign_relation)} = ?)"
-				subResults = self.executeCommand(command, (value,), filterTuple = True)
-				if (not subResults):
-					column[j] = value
-					continue
-
-				assert len(subResults) is 1
-				column[j] = subResults[0]
-		return [tuple(row) for row in zip(*transposed)]
-
+	
 	def configureOrder(self, relation, orderBy = None, direction = None):
 		"""Sets up the ORDER BY portion of the SQL message.
 
@@ -1014,7 +1085,7 @@ class Database():
 
 		return answer
 
-	def executeCommand(self, command, valueList = (), hackCheck = True, filterNone = False, 
+	def executeCommand(self, command, valueList = (), hackCheck = True, filterNone = False, resultKeys = {}, 
 		valuesAsList = None, valuesAsSet = False, filterTuple = False, printError_command = True):
 		"""Executes an SQL command. Allows for multi-threading.
 		Special thanks to Joaquin Sargiotto for how to lock threads on https://stackoverflow.com/questions/26629080/python-and-sqlite3-programmingerror-recursive-use-of-cursors-not-allowed
@@ -1126,6 +1197,22 @@ class Database():
 		if (filterNone):
 			result = ((item for item in subList if item is not None) for subList in result)
 			# result = [tuple(item for item in subList if item is not None) for subList in result]
+
+		if (resultKeys):
+			if (filterTuple):
+				answer = collections.defaultdict(list)
+				for row in result:
+					iterable = itertools.chain(row, itertools.repeat(self.resultError_replacement))
+					for i, key in enumerate(resultKeys):
+						answer[key].append(next(iterable))
+				return dict(answer)
+			else:
+				answer = []
+				for row in result:
+					iterable = itertools.chain(row, itertools.repeat(self.resultError_replacement))
+					answer.append(tuple((key, next(iterable)) for i, key in enumerate(resultKeys)))
+				return answer
+
 		if (filterTuple):
 			result = [item for subList in result for item in subList]
 			if (valuesAsList):
@@ -1286,6 +1373,8 @@ class Database():
 
 		Example Input: saveDatabase()
 		"""
+		if (self.connection is None):
+			return
 
 		#Save changes
 		self.connection.commit()
@@ -1784,18 +1873,18 @@ class Database():
 			locationInfo, locationValues = self.configureLocation(relation, nextTo = nextTo, **locationKwargs)
 			command = f"SELECT {self.getPrimaryKey(relation)} FROM [{relation}] WHERE ({locationInfo})"
 			result = self.executeCommand(command, locationValues, valuesAsList = True, filterTuple = True)
+			if (not isinstance(attributeDict, dict)):
+				if (isinstance(attributeDict, (list, tuple, set, range, types.GeneratorType))):
+					attributeDict = {item: value for item in attributeDict}
+				else:
+					attributeDict = {attributeDict: value}
+
 			if (not result):
 				if (not forceMatch):
 					errorMessage = f"There is no row in the relation {relation} with the criteria: { {'nextTo': nextTo, **locationKwargs} }"
 					raise KeyError(errorMessage)
 				self.addTuple({relation: {**nextTo, **locationKwargs, **attributeDict}}, unique = None, incrementForeign = False)
 				continue
-
-			if (not isinstance(attributeDict, dict)):
-				if (isinstance(attributeDict, (list, tuple, set, range, types.GeneratorType))):
-					attributeDict = {item: value for item in attributeDict}
-				else:
-					attributeDict = {attributeDict: value}
 
 			if (checkForeigen and (relation in self.foreignKeys_catalogue)):
 				foreignList = self.foreignKeys_catalogue[relation].keys()
@@ -1949,7 +2038,7 @@ class Database():
 					myTuple[relation] = attribute[relation]
 					continue
 			myTuple[relation] = None
-		
+
 		results_catalogue = self.getValue(myTuple, exclude = excludeList, **kwargs)
 		return results_catalogue
 
@@ -2068,19 +2157,7 @@ class Database():
 		assert "valuesAsList" not in locationKwargs
 		assert "filterRelation" not in locationKwargs
 		assert "filterAttribute" not in locationKwargs
-
-		if (formatValue):
-			if (isinstance(formatValue, dict)):
-				def applyFormat(value, variable, relation):
-					if (variable not in formatValue):
-						return value
-					return formatValue[variable](value, variable, relation)
-			else:
-				def applyFormat(value, variable, relation):
-					return formatValue(value, variable, relation)
-
-		########################################
-
+		
 		alias = alias or {}
 		nextTo = nextTo or {}
 		exclude = exclude or set()
@@ -2114,149 +2191,85 @@ class Database():
 				command += f" ORDER BY {orderInfo}"
 
 			if (self.connectionType == "access"):
-				result = self.executeCommand(command, valueList, valuesAsList = True)
+				result = self.executeCommand(command, valueList, valuesAsList = True, resultKeys = attributeList, filterTuple = attributeFirst)
 
 				if (limit is not None):
 					result = result[:limit]
+
+				returnForeign = False
+				assert result
 			else:
 				if (limit is not None):
 					command += " LIMIT {}".format(limit)
 
-				result = self.executeCommand(command, valueList, valuesAsList = True)
+				result = self.executeCommand(command, valueList, valuesAsList = True, resultKeys = attributeList, filterTuple = attributeFirst)
 
-				if (checkForeigen and result):
-					result = self.configureForeign(result, relation, attributeList, 
-						filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign)
-
-			if (not result):
-				if (not forceMatch):
-					if (forceRelation):
+				if (not result):
+					if (not forceMatch):
 						if (forceAttribute or (len(attributeList) > 1)):
 							results_catalogue[relation] = {attribute: {} for attribute in attributeList}
 						else:
 							results_catalogue[relation] = {}
-					else:
-						if (forceAttribute or (len(attributeList) > 1)):
-							results_catalogue = {attribute: {} for attribute in attributeList}
-						else:
-							results_catalogue = {}
-					continue
-
-				result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
-					filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
-				print(result)
-				jkhhjkj
-
-			#Account for error during command execution
-			rowLength = range(len(attributeList))
-			def yieldRow(row):
-				broken = False
-				for i in rowLength:
-					if (broken):
-						yield self.resultError_replacement
 						continue
-					try:
-						yield row[i]
-					except Exception as error:
-						broken = True
-						yield self.resultError_replacement
-			result = [tuple(yieldRow(row)) for row in result]
+					result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
+						filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
+					print(result)
+					jkhhjkj
+					return result
 
-			if (forceRelation):
-				if (forceTuple or (len(result) > 1)):
-					if (rowsAsList):
-						if (forceAttribute or (len(attributeList) > 1)):
-							if (attributeFirst):
-								if (formatValue):
-									results_catalogue[relation] = {alias.get(attribute, attribute): [applyFormat(row[column], attribute, relation) for row in result] for column, attribute in enumerate(attributeList)}
-								else:
-									results_catalogue[relation] = {alias.get(attribute, attribute): [row[column] for row in result] for column, attribute in enumerate(attributeList)}
-							else:
-								if (formatValue):
-									results_catalogue[relation] = [{alias.get(attribute, attribute): applyFormat(row[column], attribute, relation) for column, attribute in enumerate(attributeList)} for row in result]
-								else:
-									results_catalogue[relation] = [{alias.get(attribute, attribute): row[column] for column, attribute in enumerate(attributeList)} for row in result]
-						else:
-							if (formatValue):
-								results_catalogue[relation] = [applyFormat(row[0], attributeList[0], relation) for row in result]
-							else:
-								results_catalogue[relation] = [row[0] for row in result]
-					else:
-						if (forceAttribute or (len(attributeList) > 1)):
-							if (attributeFirst):
-								if (formatValue):
-									results_catalogue[relation] = {alias.get(attribute, attribute): {i: applyFormat(row[column], attribute, relation) for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
-								else:
-									results_catalogue[relation] = {alias.get(attribute, attribute): {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
-							else:
-								if (formatValue):
-									results_catalogue[relation] = {i: {alias.get(attribute, attribute): applyFormat(row[column], attribute, relation) for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
-								else:
-									results_catalogue[relation] = {i: {alias.get(attribute, attribute): row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
-						else:
-							if (formatValue):
-								results_catalogue[relation] = {i: applyFormat(row[0], attributeList[0], relation) for i, row in enumerate(result)}
-							else:
-								results_catalogue[relation] = {i: row[0] for i, row in enumerate(result)}
-				else:
-					if (forceAttribute or (len(attributeList) > 1)):
-						if (formatValue):
-							results_catalogue[relation] = {alias.get(attribute, attribute): applyFormat(result[0][column], attribute, relation) for column, attribute in enumerate(attributeList)}
-						else:
-							results_catalogue[relation] = {alias.get(attribute, attribute): result[0][column] for column, attribute in enumerate(attributeList)}
-					else:
-						if (formatValue):
-							results_catalogue[relation] = applyFormat(result[0][0], attributeList[0], relation)
-						else:
-							results_catalogue[relation] = result[0][0]
+			_forceAttribute = forceAttribute or (len(attributeList) > 1)
+			if (attributeFirst):
+				_forceTuple = forceTuple or (len(next(iter(result.values()), [])) > 1)
+				result = {alias.get(attribute, attribute): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
+					returnForeign = returnForeign) for value in row] for attribute, row in result.items()}
+				# result = {alias.get(attribute, attribute): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
+				# 	returnForeign = returnForeign, formatter = formatValue) for value in row] for attribute, row in result.items()}
+				# result = {self.formatAtribute(attribute, alias = alias): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
+				# 	returnForeign = returnForeign, formatter = formatValue) for value in row] for attribute, row in result.items()}
 			else:
-				if (forceTuple or (len(result) > 1)):
-					if (rowsAsList):
-						if (forceAttribute or (len(attributeList) > 1)):
-							if (attributeFirst):
-								if (formatValue):
-									results_catalogue = {alias.get(attribute, attribute): [applyFormat(row[column], attribute, relation) for row in result] for column, attribute in enumerate(attributeList)}
-								else:
-									results_catalogue = {alias.get(attribute, attribute): [row[column] for row in result] for column, attribute in enumerate(attributeList)}
-							else:
-								if (formatValue):
-									results_catalogue = [{alias.get(attribute, attribute): applyFormat(row[column], attribute, relation) for column, attribute in enumerate(attributeList)} for row in result]
-								else:
-									results_catalogue = [{alias.get(attribute, attribute): row[column] for column, attribute in enumerate(attributeList)} for row in result]
+				_forceTuple = forceTuple or (len(result) > 1)
+				result = [[tuple((alias.get(attribute, attribute), self.formatValue(value, attribute, relation, returnNull = returnNull, 
+					returnForeign = returnForeign))) for attribute, value in row] for row in result]
+				# result = [[tuple((alias.get(attribute, attribute), self.formatValue(value, attribute, relation, returnNull = returnNull, 
+				# 	returnForeign = returnForeign, formatter = formatValue))) for attribute, value in row] for row in result]
+				# result = [[tuple((self.formatAtribute(attribute, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, 
+				# 	returnForeign = returnForeign, formatter = formatValue))) for attribute, value in row] for row in result]
+
+			if (attributeFirst):
+				if (_forceTuple):
+					if (_forceAttribute):
+						if (rowsAsList):
+							results_catalogue[relation] = {**result} # results_catalogue[relation] = {attribute: [value for value in row] for attribute, row in result.items()}
 						else:
-							if (formatValue):
-								results_catalogue = [applyFormat(row[0], attributeList[0], relation) for row in result]
-							else:
-								results_catalogue = [row[0] for row in result]
+							results_catalogue[relation] = {attribute: {i: value for i, value in enumerate(row)} for attribute, row in result.items()}
 					else:
-						if (forceAttribute or (len(attributeList) > 1)):
-							if (attributeFirst):
-								if (formatValue):
-									results_catalogue = {alias.get(attribute, attribute): {i: applyFormat(row[column], attribute, relation) for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
-								else:
-									results_catalogue = {alias.get(attribute, attribute): {i: row[column] for i, row in enumerate(result)} for column, attribute in enumerate(attributeList)}
-							else:
-								if (formatValue):
-									results_catalogue = {i: {alias.get(attribute, attribute): applyFormat(row[column], attribute, relation) for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
-								else:
-									results_catalogue = {i: {alias.get(attribute, attribute): row[column] for column, attribute in enumerate(attributeList)} for i, row in enumerate(result)}
+						if (rowsAsList):
+							results_catalogue[relation] = list(result.values())[0]
 						else:
-							if (formatValue):
-								results_catalogue = {i: applyFormat(row[0], attributeList[0], relation) for i, row in enumerate(result)}
-							else:
-								results_catalogue = {i: row[0] for i, row in enumerate(result)}
+							results_catalogue[relation] = {0: list(result.values())[0]}
 				else:
-					if (forceAttribute or (len(attributeList) > 1)):
-						if (formatValue):
-							results_catalogue = {alias.get(attribute, attribute): applyFormat(result[0][column], attribute, relation) for column, attribute in enumerate(attributeList)}
-						else:
-							results_catalogue = {alias.get(attribute, attribute): result[0][column] for column, attribute in enumerate(attributeList)}
+					if (_forceAttribute):
+						results_catalogue[relation] = {attribute: row[0] for attribute, row in result.items()}
 					else:
-						if (formatValue):
-							results_catalogue = applyFormat(result[0][0], attributeList[0], relation)
+						results_catalogue[relation] = next(iter(result.values()))[0]
+			else:
+				if (_forceTuple):
+					if (_forceAttribute):
+						if (rowsAsList):
+							results_catalogue[relation] = [{attribute: value for attribute, value in row} for row in result]
 						else:
-							results_catalogue = result[0][0]
-		return results_catalogue
+							results_catalogue[relation] = {i: {attribute: value for attribute, value in row} for i, row in enumerate(result)}
+					else:
+						results_catalogue[relation] = [row[0][1] for row in result]
+				else:
+					if (_forceAttribute):
+						results_catalogue[relation] = {row[0][0]: row[0][1] for row in result}
+					else:
+						results_catalogue[relation] = next(iter(result))[0][1]
+
+		if (forceRelation):
+			return results_catalogue
+		return results_catalogue[relation]
 		
 	def getForeignLinks(self, relationList, updateSchema = True):
 		"""Returns foreign keys that are linked attributes in the given relation.
