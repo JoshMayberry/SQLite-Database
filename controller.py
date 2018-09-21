@@ -32,9 +32,8 @@ threadLock = threading.RLock()
 cacheLock = threading.RLock()
 indexCache = cachetools.LFUCache(maxsize = 10)
 valueCache = cachetools.LFUCache(maxsize = 1000)
-attributeCache = cachetools.LFUCache(maxsize = 100)
 
-def hash_formatAtribute(*args, alias = None, **kwargs):
+def hash_formatAttribute(*args, alias = None, **kwargs):
 	key = cachetools.keys.hashkey(*args, **kwargs)
 	if (isinstance(alias, dict)):
 		key += tuple(sorted(alias.items()))
@@ -270,33 +269,73 @@ class Database():
 			return False
 
 	#Cache Functions
-	def setCacheSize_index(self, size):
+	def setCacheSize_index(self, size = None):
 		"""Sets the max size for the index cache.
 
+		size (int) - How large the cache will be
+			- If None: Will set the cache to it's default size
+
+		Example Input: setCacheSize_index()
 		Example Input: setCacheSize_index(15)
 		"""
 		global indexCache
 
+		if (size is None):
+			size = 10
+
 		indexCache._Cache__maxsize = size
 
-	def setCacheSize_value(self, size):
+	def setCacheSize_value(self, size = None):
 		"""Sets the max size for the value cache.
 
+		size (int) - How large the cache will be
+			- If None: Will set the cache to it's default size
+
+		Example Input: setCacheSize_value()
 		Example Input: setCacheSize_value(15)
 		"""
 		global valueCache
 
+		if (size is None):
+			size = 1000
+
 		valueCache._Cache__maxsize = size
 
-	def setCacheSize_attribute(self, size):
-		"""Sets the max size for the attribute cache.
+	def removeCache_value(self, *args, returnForeign = None, _raiseError = True, **kwargs):
+		"""Removes the cached value for the value cache with the given args and kwargs.
 
-		Example Input: setCacheSize_attribute(15)
+		Example Input: removeCache_value()
 		"""
-		global attributeCache
+		global valueCache, hash_formatValue
 
-		attributeCache._Cache__maxsize = size
+		if (_raiseError):
+			extraArgs = []
+		else:
+			extraArgs = [None]
 
+		if (returnForeign is None):
+			valueCache.pop(hash_formatValue(self, *args, returnForeign = True, **kwargs), *extraArgs)
+			valueCache.pop(hash_formatValue(self, *args, returnForeign = False, **kwargs), *extraArgs)
+		else:
+			valueCache.pop(hash_formatValue(self, *args, returnForeign = returnForeign, **kwargs), *extraArgs)
+
+	def clearCache_value(self):
+		"""Empties the value cache.
+
+		Example Input: clearCache_value()
+		"""
+		global valueCache
+
+		valueCache.clear()
+
+	def clearCache_index(self):
+		"""Empties the index cache.
+
+		Example Input: clearCache_index()
+		"""
+		global indexCache
+
+		indexCache.clear()
 
 	#Event Functions
 	def setFunction_cmd_startWaiting(self, function):
@@ -801,29 +840,39 @@ class Database():
 			#The value is not pointing to anything
 			return [newValue for value in currentValues]
 
-		foreign_relation, foreign_attribute = self.findForeign(relation, attribute)
-		command = f"SELECT {self.getPrimaryKey(foreign_relation)} FROM [{foreign_relation}] WHERE ({foreign_attribute} = ?)"
-		targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)
-		if (targetId):
-			#Use existing key
-			return [targetId[0] for value in currentValues]
+		foreign_relation, foreign_attribute = self.foreignKeys_catalogue[relation][attribute]
+		try:
+			command = f"SELECT {self.getPrimaryKey(foreign_relation)} FROM [{foreign_relation}] WHERE ({foreign_attribute} = ?)"
+			targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)
+			if (targetId):
+				#Use existing key
+				return [targetId[0] for value in currentValues]
 
-		#Should I create a new key or modify the current one?
-		if (updateForeign is None):
-			usedKeys = self.getForeignUses(foreign_relation, foreign_attribute, currentValues, excludeUser = relation, 
-				filterIndex = False, updateSchema = False)
+			#Should I create a new key or modify the current one?
+			if (updateForeign):
+				#I will modify one of the keys, regardless of who is using it
+				self.changeTuple({foreign_relation: foreign_attribute}, {self.getPrimaryKey(foreign_relation): currentValues[0]}, newValue)
+				return [currentValues[0] for value in currentValues]
 
-		changed = set()
-		valueList = [*currentValues]
-		for i, index in enumerate(currentValues):
-			if ((index not in changed) and (updateForeign or ((updateForeign is None) and (not usedKeys.get(index))))):
-				self.changeTuple({foreign_relation: foreign_attribute}, {self.getPrimaryKey(foreign_relation): index}, newValue)
-				changed.add(index)
-			else:
-				self.addTuple({foreign_relation: {foreign_attribute: newValue}}, unique = None)
-				targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)[0]
-				return [targetId for value in currentValues]
-		return valueList
+			elif (updateForeign is None):
+				usedKeys = self.getForeignUses(foreign_relation, foreign_attribute, currentValues, excludeUser = relation, filterIndex = False, updateSchema = False)
+				for index in currentValues:
+					if (usedKeys.get(index)):
+						continue
+					#I found a key I can change, so I will use that one
+					self.changeTuple({foreign_relation: foreign_attribute}, {self.getPrimaryKey(foreign_relation): index}, newValue)
+					return [index for value in currentValues]
+
+			#I could not find a key I can change, so I will make a new one to use
+			self.addTuple({foreign_relation: {foreign_attribute: newValue}}, unique = None)
+			return self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)[0]
+		
+		except Exception as error:
+			raise error
+
+		finally:
+			for value in currentValues:
+				self.removeCache_value(value, self.getPrimaryKey(foreign_relation), foreign_relation, _raiseError = False)
 
 	@cachetools.cached(valueCache, key = hash_formatValue)#, lock = cacheLock)
 	def formatValue(self, value, attribute, relation, returnNull = False, returnForeign = True, formatter = None):
@@ -831,6 +880,8 @@ class Database():
 
 		Example Input: formatValue(value, attribute, relation)
 		"""
+
+		# print("@formatValue", value, attribute, relation, returnForeign)
 
 		def returnValue(_value):
 			if (formatter):
@@ -862,25 +913,6 @@ class Database():
 		assert len(subResults) is 1
 		return returnValue(subResults[0])
 
-	@cachetools.cached(attributeCache, key = hash_formatAtribute)#, lock = cacheLock)
-	def formatAtribute(self, attribute, alias = None):
-		"""Returns a formatted attribute.
-
-		Example Input: formatAtribute(attribute)
-		Example Input: formatAtribute(attribute, alias)
-		"""
-
-		alias = alias or {}
-
-		return alias.get(attribute, attribute)
-
-	def configureForeign(self, results, relation, attributeList, filterForeign = False, 
-		returnNull = False, returnForeign = True):
-		"""Allows the user to use foreign keys.
-		Use: https://www.techonthenet.com/sqlite/joins.php
-		"""
-
-	
 	def configureOrder(self, relation, orderBy = None, direction = None):
 		"""Sets up the ORDER BY portion of the SQL message.
 
@@ -1306,8 +1338,8 @@ class Database():
 		self.multiProcess_delay = multiProcess_delay
 		self.resultError_replacement = resultError_replacement
 
-		if (self.resultError_replacement is None):
-			self.resultError_replacement = "!!! SELECT ERROR !!!"
+		# if (self.resultError_replacement is None):
+		# 	self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		#Establish connection
 		if (connectionType == "sqlite3"):
@@ -1816,6 +1848,10 @@ class Database():
 				else:
 					command = f"INSERT { {True: 'OR REPLACE ', False: '', None: 'OR IGNORE '}[unique] }INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for i in valueList)})"
 				
+				if (unique):
+					for value, attribute in zip(valueList, attributeList):
+						self.removeCache_value(value, attribute, relation, _raiseError = False)
+
 				assert len(attributeList) is len(valueList)
 				if (incrementForeign):
 					self.executeCommand_add(relation, command, valueList)
@@ -1916,6 +1952,7 @@ class Database():
 				for i, _value in enumerate(currentValues):
 					command = f"UPDATE [{relation}] SET [{attribute}] = ? WHERE ({locationInfo} AND [{attribute}] = ?)"
 					self.executeCommand(command, (valueList[i], *locationValues, _value))
+					self.removeCache_value(_value, attribute, relation, _raiseError = False)
 			
 			if (oldRows is not None):
 				newRows = self.executeCommand(selectCommand, valuesAsSet = True)
@@ -1969,8 +2006,12 @@ class Database():
 		for relation, nextTo in myTuple.items():
 			locationInfo, valueList = self.configureLocation(relation, nextTo = nextTo, **locationKwargs)
 
-			command = "DELETE FROM [{}] WHERE ({})".format(relation, locationInfo)
+			for row in self.getValue({relation: None}, nextTo = nextTo, **locationKwargs, 
+				forceAttribute = True, forceTuple = True, rowsAsList = True, attributeFirst = False):
+				for attribute, value in row.items():
+					self.removeCache_value(value, attribute, relation, _raiseError = False)
 
+			command = "DELETE FROM [{}] WHERE ({})".format(relation, locationInfo)
 			if (incrementForeign):
 				self.executeCommand_subtract(relation, command, valueList)
 			else:
@@ -2197,43 +2238,34 @@ class Database():
 					result = result[:limit]
 
 				returnForeign = False
-				assert result
 			else:
 				if (limit is not None):
 					command += " LIMIT {}".format(limit)
 
 				result = self.executeCommand(command, valueList, valuesAsList = True, resultKeys = attributeList, filterTuple = attributeFirst)
 
-				if (not result):
-					if (not forceMatch):
-						if (forceAttribute or (len(attributeList) > 1)):
-							results_catalogue[relation] = {attribute: {} for attribute in attributeList}
-						else:
-							results_catalogue[relation] = {}
-						continue
-					result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
-						filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
-					print(result)
-					jkhhjkj
-					return result
+			if (not result):
+				if (not forceMatch):
+					if (forceAttribute or (len(attributeList) > 1)):
+						results_catalogue[relation] = {attribute: {} for attribute in attributeList}
+					else:
+						results_catalogue[relation] = {}
+					continue
+				result = self.getValue({relation: attributeList}, nextTo, forceMatch = True, checkForeigen = checkForeigen, 
+					filterForeign = filterForeign, returnNull = returnNull, returnForeign = returnForeign, **locationKwargs)
+				print(result)
+				jkhhjkj
+				return result
 
 			_forceAttribute = forceAttribute or (len(attributeList) > 1)
 			if (attributeFirst):
 				_forceTuple = forceTuple or (len(next(iter(result.values()), [])) > 1)
 				result = {alias.get(attribute, attribute): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
 					returnForeign = returnForeign) for value in row] for attribute, row in result.items()}
-				# result = {alias.get(attribute, attribute): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
-				# 	returnForeign = returnForeign, formatter = formatValue) for value in row] for attribute, row in result.items()}
-				# result = {self.formatAtribute(attribute, alias = alias): [self.formatValue(value, attribute, relation, returnNull = returnNull, 
-				# 	returnForeign = returnForeign, formatter = formatValue) for value in row] for attribute, row in result.items()}
 			else:
 				_forceTuple = forceTuple or (len(result) > 1)
 				result = [[tuple((alias.get(attribute, attribute), self.formatValue(value, attribute, relation, returnNull = returnNull, 
 					returnForeign = returnForeign))) for attribute, value in row] for row in result]
-				# result = [[tuple((alias.get(attribute, attribute), self.formatValue(value, attribute, relation, returnNull = returnNull, 
-				# 	returnForeign = returnForeign, formatter = formatValue))) for attribute, value in row] for row in result]
-				# result = [[tuple((self.formatAtribute(attribute, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, 
-				# 	returnForeign = returnForeign, formatter = formatValue))) for attribute, value in row] for row in result]
 
 			if (attributeFirst):
 				if (_forceTuple):
