@@ -840,10 +840,10 @@ class Database():
 		index = self.getPrimaryKey(foreign_relation)
 		try:
 			command = f"SELECT {self.getPrimaryKey(foreign_relation)} FROM [{foreign_relation}] WHERE ({foreign_attribute} = ?)"
-			targetId = self.executeCommand(command, (newValue,), valuesAsList = True, filterTuple = True)
+			targetId = self.executeCommand(command, (newValue,))
 			if (targetId):
 				#Use existing key
-				return targetId[0]
+				return targetId[0][0]
 
 			#Should I create a new key or modify the current one?
 			if (updateForeign):
@@ -858,7 +858,7 @@ class Database():
 						continue
 					#I found a key I can change, so I will use that one
 					self.changeTuple({foreign_relation: foreign_attribute}, {index: _index}, newValue)
-					return [index for value in currentValues]
+					return _index
 
 			#I could not find a key I can change, so I will make a new one to use
 			self.addTuple({foreign_relation: {foreign_attribute: newValue}}, unique = None)
@@ -1160,16 +1160,14 @@ class Database():
 		if (relation not in self.foreignKeys_catalogue):
 			return self.executeCommand(*args, **kwargs)
 
-		index = self.getPrimaryKey(relation)
-		foreignList = self.foreignKeys_catalogue[relation].keys()
-		resultKeys = [index, *foreignList]
-		command = f"SELECT DISTINCT {', '.join(resultKeys)} FROM [{relation}]"
+		attributeList = [self.getPrimaryKey(relation), *self.foreignKeys_catalogue[relation].keys()]
+		command = f"SELECT DISTINCT {', '.join(attributeList)} FROM [{relation}]"
 		oldRows = set(self.executeCommand(command))
 
 		answer = self.executeCommand(*args, **kwargs)
 
 		function = [self.subtractForeignUse, self.addForeignUse][add]
-		for _attribute, rows in itertools.islice(zip((index, *foreignList), zip(*(oldRows ^ set(self.executeCommand(command))))), 1, None):
+		for _attribute, rows in itertools.islice(zip(attributeList, zip(*(oldRows ^ set(self.executeCommand(command))))), 1, None):
 			for item in rows:
 				if (item is None):
 					continue
@@ -1182,7 +1180,7 @@ class Database():
 
 		return self.executeCommand_add(*args, add = False, **kwargs)
 
-	def executeCommand(self, command, valueList = (), hackCheck = False, filterNone = False, 
+	def executeCommand(self, command, valueList = (), hackCheck = False, filterNone = False, rowsAsList = False,
 		valuesAsList = None, valuesAsSet = False, filterTuple = False, printError_command = True, attributeFirst = False,
 		resultKeys = [], alias = None, relation = None, formatter = None, returnNull = None, checkForeign = None):
 		"""Executes an SQL command. Allows for multi-threading.
@@ -1211,7 +1209,7 @@ class Database():
 		def yieldRow(resultCursor):
 			try:
 				for row in resultCursor.fetchall():
-					yield True, row
+					yield row
 			except UnicodeDecodeError:
 				fails = 0
 				failThreshold = 10 #Keep it from spinning its wheels
@@ -1222,10 +1220,19 @@ class Database():
 						return
 					except Exception as error:
 						fails += 1
-						yield False, ("error" for error in range(n))
+						yield ("error" for error in range(n))
 					if (row is None):
 						break
-					yield True, row
+					yield row
+
+		def yieldValue(i, row):
+			assert relation
+			for attribute, value in zip(resultKeys, row):
+				if ((filterNone) and (value is None)):
+					continue
+
+				yield self.formatAttribute(attribute, row = i, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
+
 
 		#####################################################################
 
@@ -1254,15 +1261,25 @@ class Database():
 
 			if (resultKeys):
 				if (not attributeFirst):
-					return [{self.formatAttribute(attribute, row = i, alias = alias): self.formatValue(value, 
-						attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter) 
-						for attribute, value in zip(resultKeys, row)} for i, (noError, row) in enumerate(yieldRow(resultCursor))]
+					if (rowsAsList):
+						print([{attribute: value for attribute, value in yieldValue(i, row)} for i, row in enumerate(yieldRow(resultCursor))])
+						sddds
+					return [{attribute: value for attribute, value in yieldValue(i, row)} for i, row in enumerate(yieldRow(resultCursor))]
 				
-				result = collections.defaultdict(list)
-				for i, (noError, row) in enumerate(yieldRow(resultCursor)):
-					for attribute, value in zip(resultKeys, row): 
-						result[self.formatAttribute(attribute, row = i, alias = alias)].append(self.formatValue(value, 
-							attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter))
+				if (valuesAsSet):
+					result = collections.defaultdict(set)
+					for i, row in enumerate(yieldRow(resultCursor)):
+						for attribute, value in yieldValue(i, row): 
+							result[attribute].add(value)
+				else:
+					result = collections.defaultdict(list)
+					for i, row in enumerate(yieldRow(resultCursor)):
+						for attribute, value in yieldValue(i, row): 
+							result[attribute].append(value)
+				if (rowsAsList):
+					print(result)
+					fdff
+
 				return result
 
 
@@ -1279,13 +1296,15 @@ class Database():
 
 
 
+		if (rowsAsList):
+			result = list(zip(*yieldRow(resultCursor)))
+		else:
+			result = list(yieldRow(resultCursor))
 
 
 
 
 
-
-			result = list(row for noError, row in yieldRow(resultCursor))
 
 		#Configure results
 		if (filterNone):
@@ -1966,14 +1985,13 @@ class Database():
 				# 	yield f"{_value}"
 
 		def yieldChange(attributeList, valueList):
-			if (not checkForeign):
+			if (not incrementForeign):
 				for attribute, newValue in zip(attributeList, yieldValue(valueList)):
 					yield attribute, newValue
 				return
 
 			for attribute, newValue in zip(attributeList, yieldValue(valueList)):
-				print("@changeTuple.2", attribute, newValue)
-				newValue = self.changeForeign(relation, attribute, newValue, current[attribute], updateForeign = updateForeign)
+				newValue = self.changeForeign(relation, attribute, newValue, oldRows[attribute], updateForeign = updateForeign)
 				yield attribute, newValue
 
 		#############################################################################
@@ -1982,7 +2000,6 @@ class Database():
 			applyChanges = self.defaultCommit
 				
 		for relation, attributeDict in myTuple.items():
-			print("\n@changeTuple.0", relation)
 			if (not isinstance(attributeDict, dict)):
 				if (isinstance(attributeDict, (list, tuple, set, range, types.GeneratorType))):
 					attributeDict = {item: value for item in attributeDict}
@@ -1992,168 +2009,47 @@ class Database():
 			
 			index = self.getPrimaryKey(relation)
 			locationInfo, locationValues = self.configureLocation(relation, nextTo = nextTo, **locationKwargs)
-
-			## FOR DEBUGGING ##
-			if (relation == "Users"):
-				locationInfo = ""
-				locationValues = []
-			## END DEBUGGING ##
 			
 			command = f"SELECT {index} FROM [{relation}]"
 			if (locationInfo):
 				command += f" WHERE ({locationInfo})"
-			affected = self.executeCommand(command, locationValues)
+			command += f" ORDER BY {index}"
+			affected = self.executeCommand(command, locationValues, rowsAsList = True)
 			if (not affected):
 				if (not forceMatch):
 					errorMessage = f"There is no row in the relation {relation} with the criteria: { {'nextTo': nextTo, **locationKwargs} }"
 					raise KeyError(errorMessage)
-				self.addTuple({relation: {**nextTo, **locationKwargs, **attributeDict}}, unique = None, incrementForeign = False)
+				self.addTuple({relation: {**nextTo, **locationKwargs, **attributeDict}}, unique = None)
 				continue
 
-			if (checkForeign):
-				command = f"SELECT {', '.join(attributeList)} FROM [{relation}]"
-				if (locationInfo):
-					command += f" WHERE ({locationInfo})"
-				current = self.executeCommand(command, locationValues, resultKeys = attributeList, attributeFirst = True)
+			if ((checkForeign) and (relation in self.foreignKeys_catalogue)):
+				foreign_attributeList = [index, *self.foreignKeys_catalogue[relation].keys()]
+				selectCommand = f"SELECT {', '.join(foreign_attributeList)} FROM [{relation}] WHERE ({index} IN ({', '.join('?' for item in affected[0])})) ORDER BY {index}"
+				oldRows = self.executeCommand(selectCommand, affected[0], resultKeys = foreign_attributeList, 
+					filterNone = True, relation = relation, checkForeign = False, attributeFirst = True)
+				incrementForeign = True
+			else:
+				incrementForeign = False
 					
 			_attributeList, newValues = zip(*yieldChange(attributeList, valueList))
 			command = f"UPDATE [{relation}] SET {', '.join(f'{attribute} = ?' for attribute in _attributeList)}"
 			if (locationInfo):
 				command += f" WHERE ({locationInfo})"
-			
-			print("@changeForeign.0.1", self.getValue({relation: _attributeList}))
-			print("@changeForeign.0.2", command, (*newValues, *locationValues))
-
 			self.executeCommand(command, (*newValues, *locationValues))
 
-			print("@changeTuple.1", _attributeList, newValues)
-			print("@changeTuple.2", affected)
-			print("@changeTuple.3", dict(current))
+			if (incrementForeign):
+				newRows = self.executeCommand(selectCommand, affected[0], resultKeys = foreign_attributeList, filterNone = True, 
+					relation = relation, checkForeign = False, attributeFirst = True)#, valuesAsSet = True)
 
-			if (checkForeign):
-				command = f"SELECT {', '.join(attributeList)} FROM [{relation}] WHERE ({index} IN ({', '.join('?' for item in affected[0])}))"
-				print(command)
-				new = self.executeCommand(command, affected[0], resultKeys = attributeList, attributeFirst = True)
-				print("@changeTuple.4", dict(new))
+				for attribute in itertools.islice(foreign_attributeList, 1, None):
+					for old, new in itertools.zip_longest(oldRows[attribute], newRows[attribute]):
+						if (old is new):
+							continue
 
-			# new = self.executeCommand(command, locationValues, resultKeys = attributeList, attributeFirst = True)
-			# print("@changeTuple.3", dict(new))
-
-			# foreignCatalogue = {} #{attribute: (command, rows)}
-			# if (checkForeign and (relation in self.foreignKeys_catalogue)):
-			# 	selectAttributes = [index, *attributeDict.keys()]
-			# 	for attribute, newValue in attributeDict.items():
-			# 		if (attribute not in self.foreignKeys_catalogue[relation]):
-			# 			continue
-			# 		foreign_relation, foreign_attribute = self.foreignKeys_catalogue[relation][attribute]
-			# 		command = f"""SELECT {', '.join(selectAttributes)} FROM [{relation}] WHERE (({locationInfo}) OR ({
-			# 			attribute} = (SELECT {self.getPrimaryKey(foreign_relation)} FROM {foreign_relation} WHERE ({foreign_attribute} = ?))))"""
-			# 		foreignCatalogue[attribute] = (command, set(self.executeCommand(command, (*locationValues, newValue))), (*locationValues, newValue))
-
-			# for attribute, newValue in attributeDict.items():
-			# 	if (newValue is None):
-			# 		newValue = NULL()
-			# 	elif (newValue in ["True", True]):
-			# 		newValue = 1
-			# 	elif (newValue in ["False", False]):
-			# 		newValue = 0
-			# 	elif (not isinstance(newValue, NULL)):
-			# 		newValue = f"{newValue}"
-
-			# 	command = f"SELECT {attribute} FROM [{relation}] WHERE ({locationInfo})"
-			# 	currentValues = self.executeCommand(command, locationValues)[0]
-			# 	assert currentValues
-
-			# 	if (not checkForeign):
-			# 		valueList = currentValues
-			# 	else:
-			# 		valueList = self.changeForeign(relation, attribute, newValue, currentValues, updateForeign = updateForeign)
-
-			# 	for i, _value in enumerate(currentValues):
-			# 		command = f"UPDATE [{relation}] SET [{attribute}] = ? WHERE ({locationInfo} AND [{attribute}] = ?)"
-			# 		# print("@1.0", command, (valueList[i], *locationValues, _value))
-			# 		self.executeCommand(command, (valueList[i], *locationValues, _value))
-			# 		self.removeCache_value(_value, attribute, relation, _raiseError = False)
-			
-			# if (foreignCatalogue):
-
-			# 	for attribute, (command, oldRows, valueList, attributeList) in foreignCatalogue.items():
-			# 		newRows = set(self.executeCommand(command, valueList))
-			# 		print(valueList, attributeList)
-			# 		print(command)
-
-			# 		# for function, difference in ((self.subtractForeignUse, oldRows - newRows), (self.addForeignUse, newRows - oldRows)):
-			# 		# 	for _attribute, rows, in itertools.islice(zip((index, *foreignList), zip(*difference)), 1, None):
-			# 		# 		for item in rows:
-			# 		# 			if (item is None):
-			# 		# 				continue
-			# 		# 			function(relation, item, *self.foreignKeys_catalogue[relation][_attribute])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-			# foreignCatalogue = {} #{attribute: (command, rows)}
-			# if (checkForeign and (relation in self.foreignKeys_catalogue)):
-			# 	selectAttributes = [index, *attributeDict.keys()]
-			# 	for attribute, newValue in attributeDict.items():
-			# 		if (attribute not in self.foreignKeys_catalogue[relation]):
-			# 			continue
-			# 		foreign_relation, foreign_attribute = self.foreignKeys_catalogue[relation][attribute]
-			# 		command = f"""SELECT {', '.join(selectAttributes)} FROM [{relation}] WHERE (({locationInfo}) OR ({
-			# 			attribute} = (SELECT {self.getPrimaryKey(foreign_relation)} FROM {foreign_relation} WHERE ({foreign_attribute} = ?))))"""
-			# 		foreignCatalogue[attribute] = (command, set(self.executeCommand(command, (*locationValues, newValue))), (*locationValues, newValue))
-
-			# for attribute, newValue in attributeDict.items():
-			# 	if (newValue is None):
-			# 		newValue = NULL()
-			# 	elif (newValue in ["True", True]):
-			# 		newValue = 1
-			# 	elif (newValue in ["False", False]):
-			# 		newValue = 0
-			# 	elif (not isinstance(newValue, NULL)):
-			# 		newValue = f"{newValue}"
-
-			# 	command = f"SELECT {attribute} FROM [{relation}] WHERE ({locationInfo})"
-			# 	currentValues = self.executeCommand(command, locationValues)[0]
-			# 	assert currentValues
-
-			# 	if (not checkForeign):
-			# 		valueList = currentValues
-			# 	else:
-			# 		valueList = self.changeForeign(relation, attribute, newValue, currentValues, updateForeign = updateForeign)
-
-			# 	for i, _value in enumerate(currentValues):
-			# 		command = f"UPDATE [{relation}] SET [{attribute}] = ? WHERE ({locationInfo} AND [{attribute}] = ?)"
-			# 		# print("@1.0", command, (valueList[i], *locationValues, _value))
-			# 		self.executeCommand(command, (valueList[i], *locationValues, _value))
-			# 		self.removeCache_value(_value, attribute, relation, _raiseError = False)
-			
-			# if (foreignCatalogue):
-
-			# 	for attribute, (command, oldRows, valueList, attributeList) in foreignCatalogue.items():
-			# 		newRows = set(self.executeCommand(command, valueList))
-			# 		print(valueList, attributeList)
-			# 		print(command)
-
-			# 		# for function, difference in ((self.subtractForeignUse, oldRows - newRows), (self.addForeignUse, newRows - oldRows)):
-			# 		# 	for _attribute, rows, in itertools.islice(zip((index, *foreignList), zip(*difference)), 1, None):
-			# 		# 		for item in rows:
-			# 		# 			if (item is None):
-			# 		# 				continue
-			# 		# 			function(relation, item, *self.foreignKeys_catalogue[relation][_attribute])
-
-			# sys.exit()
+						if (old is not None):
+							self.subtractForeignUse(relation, old, *self.foreignKeys_catalogue[relation][attribute])
+						if (new is not None):
+							self.addForeignUse(relation, new, *self.foreignKeys_catalogue[relation][attribute])
 
 			if (applyChanges):
 				self.saveDatabase()
@@ -3195,82 +3091,81 @@ def test_sqlite():
 
 		database_API.addTuple({"Other Users": {"name": "Sit", "age": None, "height": 1}}, unique = None)
 
-		# #Simple Actions
-		# print("Simple Actions")
-		# print(database_API.getValue("Users"))
-		# print(database_API.getValue({"Users": "name"}))
-		# print(database_API.getValue({"Users": "name"}, checkForeign = False))
-		# print(database_API.getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 26})]))
+		#Simple Actions
+		print("Simple Actions")
+		print(database_API.getValue("Users"))
+		print(database_API.getValue({"Users": "name"}))
+		print(database_API.getValue({"Users": "name"}, checkForeign = False))
+		print(database_API.getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 26})]))
 
-		# print(database_API.getValue({"Users": ["name", "age"]}))
-		# print(database_API.getValue({"Users": ["name", "age"]}, maximum = "age"))
-		# print(database_API.getValue({"Users": ["name", "age"]}, minimum = "age"))
-		# print(database_API.getValue({"Users": "age"}, average = True))
-		# print(database_API.getValue({"Users": "age"}, summation = True))
-		# print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False))
-		# print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, alias = {"age": "login time"}))
-		# print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, formatValue = lambda value, *args: f"-- {value} --"))
-		# print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, formatValue = {"age": lambda value, *args: value if (value is None) else value * 2}))
-		# print(database_API.getValue({"Other Users": "name"}))
+		print(database_API.getValue({"Users": ["name", "age"]}))
+		print(database_API.getValue({"Users": ["name", "age"]}, maximum = "age"))
+		print(database_API.getValue({"Users": ["name", "age"]}, minimum = "age"))
+		print(database_API.getValue({"Users": "age"}, average = True))
+		print(database_API.getValue({"Users": "age"}, summation = True))
+		print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, rowsAsList = True))
+		print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, alias = {"age": "login time"}))
+		print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, formatValue = lambda value, *args: f"-- {value} --"))
+		print(database_API.getValue({"Users": ["name", "age"]}, attributeFirst = False, formatValue = {"age": lambda value, *args: value if (value is None) else value * 2}))
+		print(database_API.getValue({"Other Users": "name"}))
 	
-		# print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
-		# print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True))
-		# print(database_API.getValue({"Users": "name"}, forceRelation = True))
+		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		print(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True))
+		print(database_API.getValue({"Users": "name"}, forceRelation = True))
 
-		# print(database_API.getValue({"Users": "name"}, {"name": "Lorem"}))
-		# print(database_API.getValue({"Users": "name"}, {"name": "Ipsum"}))
-		# print(database_API.getValue({"Users": "name"}, {"name": "Amet"}))
-		# print()
+		print(database_API.getValue({"Users": "name"}, {"name": "Lorem"}))
+		print(database_API.getValue({"Users": "name"}, {"name": "Ipsum"}))
+		print(database_API.getValue({"Users": "name"}, {"name": "Amet"}))
+		print()
 
-		# #Ordering Data
-		# print("Ordering Data")
-		# print(database_API.getValue({"Users": "name"}, orderBy = "age"))
-		# print(database_API.getValue({"Users": "name"}, orderBy = "name"))
-		# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
-		# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = True))
-		# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = False))
+		#Ordering Data
+		print("Ordering Data")
+		print(database_API.getValue({"Users": "name"}, orderBy = "age"))
+		print(database_API.getValue({"Users": "name"}, orderBy = "name"))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = True))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2, direction = False))
 
-		# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
-		# print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"]))
+		print(database_API.getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False}))
 
-		# print(database_API.getValue({"Users": "name", "Names": "first_name"}))
-		# print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
-		# print()
+		print(database_API.getValue({"Users": "name", "Names": "first_name"}))
+		print(database_API.getValue({"Users": "name", "Names": ["first_name", "extra_data"]}))
+		print()
 
-		# #Changing Attributes
-		# print("Changing Attributes")
-		# print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
-		# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Ipsum")
-		# print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
-		# database_API.changeTuple({"Users": "name"}, {"name": "Sit"}, "Amet")
+		#Changing Attributes
+		print("Changing Attributes")
+		print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
+		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Ipsum")
+		print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
 		database_API.changeTuple({"Users": {"name": "Amet", "address": 123, "height": 1}}, {"name": "Sit"})
-		# print(database_API.getValue({"Other Users": "name"}, rowsAsList = True, attributeFirst = False))
-		# print(database_API.getValue({"Users": "name"}, rowsAsList = True, attributeFirst = False))
-		# database_API.changeTuple({"Users": "name"}, {"age": 27}, "Consectetur", forceMatch = True)
-		# print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
-		# print()
+		print(database_API.getValue({"Other Users": "name"}, rowsAsList = True, attributeFirst = False))
+		print(database_API.getValue({"Users": "name"}, rowsAsList = True, attributeFirst = False))
+		database_API.changeTuple({"Users": "name"}, {"age": 27}, "Consectetur", forceMatch = True)
+		print(database_API.getValue({"Users": ["name", "age"]}, rowsAsList = True, attributeFirst = False))
+		print()
 
 
-		# #Triggers
-		# print("Triggers")
-		# database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
-		# print(database_API.getTrigger())
-		# print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
-		# time.sleep(1)
-		# database_API.changeTuple({"Users": "name"}, {"age": 26}, "Lorem")#, forceMatch = True)
-		# print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
-		# print()
+		#Triggers
+		print("Triggers")
+		database_API.createTrigger("Users_lastModified", "Users", reaction = "lastModified")
+		print(database_API.getTrigger())
+		print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
+		time.sleep(1)
+		database_API.changeTuple({"Users": "name"}, {"age": 26}, "Lorem")#, forceMatch = True)
+		print(database_API.getValue({"Users": ["name", "age", "lastModified"]}, {"age": 26}))
+		print()
 
 		#Etc
-		# print("Etc")
-		# print(database_API.getValue({"Users": "name"}, forceRelation = True))
-		# print(database_API.getValue({"Other Users": "name"}, forceRelation = True))
-		# print(database_API.getForeignUses("Names", "first_name", filterIndex = False, filterUser = False, showVariable = True))
-		# print(database_API.getForeignUses("Names", "first_name"))
-		# print(database_API.getForeignUses("Names", "first_name", 3, "Users"))
-		# print(database_API.getForeignUses("Names", "first_name", "Sit", filterUser = False))
-		# print(database_API.getForeignUses("Names", "first_name", filterIndex = False))
-		# print(database_API.getForeignUses("Names", "first_name", filterRelation = False, filterAttribute = False))
+		print("Etc")
+		print(database_API.getValue({"Users": "name"}, forceRelation = True))
+		print(database_API.getValue({"Other Users": "name"}, forceRelation = True))
+		print(database_API.getForeignUses("Names", "first_name", filterIndex = False, filterUser = False, showVariable = True))
+		print(database_API.getForeignUses("Names", "first_name"))
+		print(database_API.getForeignUses("Names", "first_name", 3, "Users"))
+		print(database_API.getForeignUses("Names", "first_name", "Sit", filterUser = False))
+		print(database_API.getForeignUses("Names", "first_name", filterIndex = False))
+		print(database_API.getForeignUses("Names", "first_name", filterRelation = False, filterAttribute = False))
 	
 	finally:
 		database_API.saveDatabase()
