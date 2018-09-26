@@ -2172,7 +2172,7 @@ class Database():
 		if (isinstance(exclude, dict)):
 			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
 		else:
-			excludeList = self.ensure_container(exclude, convertNone = True)
+			excludeList = self.ensure_container(exclude, convertNone = False)
 
 		myTuple = {}
 		for _relation in relation:
@@ -2310,7 +2310,6 @@ class Database():
 		assert "filterAttribute" not in locationKwargs
 		
 		exclude = self.ensure_container(exclude)
-
 
 		if (isinstance(myTuple, dict)):
 			forceRelation = forceRelation or (len(myTuple) > 1)
