@@ -26,31 +26,6 @@ from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 	# sqlite3
 	# pyodbc
 
-threadLock = threading.RLock()
-
-#Caching
-# cacheLock = threading.RLock()
-indexCache = cachetools.LFUCache(maxsize = 10)
-valueCache = cachetools.LFUCache(maxsize = 1000)
-definitionCache = cachetools.LFUCache(maxsize = 30)
-valueCache_sub_1 = cachetools.LFUCache(maxsize = 1000)
-valueCache_sub_2 = cachetools.LFUCache(maxsize = 1000)
-connectionTypeCache = cachetools.LFUCache(maxsize = 2)
-
-def hash_isSQLite(self):
-	return cachetools.keys.hashkey(1)
-
-def hash_isAccess(self):
-	return cachetools.keys.hashkey(2)
-
-def hash_formatValue(self, *args, formatter = None, **kwargs):
-	if (not isinstance(formatter, dict)):
-		return cachetools.keys.hashkey(*args, formatter = formatter, **kwargs)
-	return cachetools.keys.hashkey(*args, formatter = tuple(sorted(formatter.items())), **kwargs)
-
-def hash_noSelf(self, *args, **kwargs):
-	return cachetools.keys.hashkey(*args, **kwargs)
-
 #Debugging functions
 def printCurrentTrace(printout = True, quitAfter = False):
 	"""Prints out the stack trace for the current place in the program.
@@ -128,11 +103,11 @@ def wrap_connectionCheck(makeDialog = True, fileName = "error_log.log"):
 
 			return function(self, *args, **kwargs)
 
-			# if (self.connection is not None):
-			# 	answer = function(self, *args, **kwargs)
-			# else:
-			# 	warnings.warn("No database is open", Warning, stacklevel = 2)
-			# 	answer = None
+			if (self.connection is not None):
+				answer = function(self, *args, **kwargs)
+			else:
+				warnings.warn(f"No database is open for {self.__repr__()}", Warning, stacklevel = 2)
+				answer = None
 
 			return answer
 		return wrapper
@@ -224,6 +199,8 @@ class Database():
 		Example Input: Database("emaildb")
 		"""
 
+		self.threadLock = threading.RLock()
+
 		#Internal variables
 		self.cursor = None
 		self.waiting = False
@@ -271,6 +248,28 @@ class Database():
 			return False
 
 	#Cache Functions
+	# cacheLock = threading.RLock()
+	indexCache = cachetools.LFUCache(maxsize = 10)
+	valueCache = cachetools.LFUCache(maxsize = 1000)
+	definitionCache = cachetools.LFUCache(maxsize = 30)
+	valueCache_sub_1 = cachetools.LFUCache(maxsize = 1000)
+	valueCache_sub_2 = cachetools.LFUCache(maxsize = 1000)
+	connectionTypeCache = cachetools.LFUCache(maxsize = 10)
+
+	def hash_isSQLiteelf):
+		return cachetools.keys.hashkey(id(self), 1)
+
+	def hash_isAccesself):
+		return cachetools.keys.hashkey(id(self), 2)
+
+	def hash_formatValue(self, *args, formatter = None, **kwargs):
+		if (not isinstance(formatter, dict)):
+			return cachetools.keys.hashkey(id(self), *args, formatter = formatter, **kwargs)
+		return cachetools.keys.hashkey(id(self), *args, formatter = tuple(sorted(formatter.items())), **kwargs)
+
+	def hash_noSelf(self, *args, **kwargs):
+		return cachetools.keys.hashkey(id(self), *args, **kwargs)
+
 	def setCacheSize_index(self, size = None):
 		"""Sets the max size for the index cache.
 
@@ -280,12 +279,11 @@ class Database():
 		Example Input: setCacheSize_index()
 		Example Input: setCacheSize_index(15)
 		"""
-		global indexCache
 
 		if (size is None):
 			size = 10
 
-		indexCache._Cache__maxsize = size
+		self.indexCache._Cache__maxsize = size
 
 	def setCacheSize_value(self, size = None):
 		"""Sets the max size for the value cache.
@@ -296,19 +294,17 @@ class Database():
 		Example Input: setCacheSize_value()
 		Example Input: setCacheSize_value(15)
 		"""
-		global valueCache
 
 		if (size is None):
 			size = 1000
 
-		valueCache._Cache__maxsize = size
+		self.valueCache._Cache__maxsize = size
 
 	def removeCache_value(self, *args, checkForeign = None, _raiseError = True, **kwargs):
 		"""Removes the cached value for the value cache with the given args and kwargs.
 
 		Example Input: removeCache_value()
 		"""
-		global valueCache, hash_formatValue
 
 		if (_raiseError):
 			extraArgs = ()
@@ -316,28 +312,26 @@ class Database():
 			extraArgs = (None,)
 
 		if (checkForeign is None):
-			valueCache.pop(hash_formatValue(self, *args, checkForeign = True, **kwargs), *extraArgs)
-			valueCache.pop(hash_formatValue(self, *args, checkForeign = False, **kwargs), *extraArgs)
+			self.valueCache.pop(self.hash_formatValue(self, *args, checkForeign = True, **kwargs), *extraArgs)
+			self.valueCache.pop(self.hash_formatValue(self, *args, checkForeign = False, **kwargs), *extraArgs)
 		else:
-			valueCache.pop(hash_formatValue(self, *args, checkForeign = checkForeign, **kwargs), *extraArgs)
+			self.valueCache.pop(self.hash_formatValue(self, *args, checkForeign = checkForeign, **kwargs), *extraArgs)
 
 	def clearCache_value(self):
 		"""Empties the value cache.
 
 		Example Input: clearCache_value()
 		"""
-		global valueCache
 
-		valueCache.clear()
+		self.valueCache.clear()
 
 	def clearCache_index(self):
 		"""Empties the index cache.
 
 		Example Input: clearCache_index()
 		"""
-		global indexCache
 
-		indexCache.clear()
+		self.indexCache.clear()
 
 	#Event Functions
 	def setFunction_cmd_startWaiting(self, function):
@@ -407,14 +401,6 @@ class Database():
 			return item
 		return item
 
-	@cachetools.cached(connectionTypeCache, key = hash_isSQLite)#, lock = cacheLock)
-	def isSQLite(self):
-		return self.connectionType == "sqlite3"
-	
-	@cachetools.cached(connectionTypeCache, key = hash_isAccess)#, lock = cacheLock)
-	def isAccess(self):
-		return self.connectionType == "access"
-
 	@cachetools.cached(indexCache)#, lock = cacheLock)
 	def getPrimaryKey(self, relation):
 		"""Returns the primary key to use for the given relation.
@@ -422,7 +408,19 @@ class Database():
 		Example Input: getPrimaryKey()
 		"""
 
-		return next(iter(self.getSchema(relation)["primary"].keys()), None)
+		schema = self.getSchema(relation)
+
+		for key, state in schema["primary"].items():
+			if (state):
+				return key
+
+		for key, state in schema["unique"].items():
+			if (state):
+				return key
+
+		errorMessage = f"There is no valid primary key for {relation} in getPrimaryKey()"
+		print("--", {key: dict(value) for key, value in schema.items()})
+		raise KeyError(errorMessage)
 
 	def yieldKey(self, subject, catalogue = None, *, exclude = None):
 		"""A convenience function for iterating over subject.
@@ -488,7 +486,7 @@ class Database():
 		Example Input: getRelationNames(include = ["_Job"], includeFunction = lambda relation, myList: any(relation.startswith(item) for item in myList)
 		"""
 
-		if (self.isSQLite()):
+		if (self.isSQLite):
 			exclude = self.ensure_set(exclude, convertNone = True)
 			exclude.add("sqlite_sequence")
 
@@ -505,7 +503,7 @@ class Database():
 			relationList = [table_info.table_name for tableType in ("TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
 			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
 			# relationList = [table_info.table_name for tableType in ("TABLE", "VIEW", "SYSTEM TABLE", "ALIAS", "SYNONYM") for table_info in self.cursor.tables(tableType = tableType)]
-			relationList = [relation for relation in relationList if (((not exclude) or excludeFunction(relation, exclude)) and ((not includ) or includeFunction(relation, include)))]
+			relationList = [relation for relation in relationList if (((not exclude) or excludeFunction(relation, exclude)) and ((not include) or includeFunction(relation, include)))]
 
 
 		return relationList
@@ -524,7 +522,7 @@ class Database():
 
 		exclude = self.ensure_container(exclude)
 
-		if (self.isSQLite()):
+		if (self.isSQLite):
 			table_info = self.executeCommand("PRAGMA table_info([{}])".format(relation))
 			attributeList = tuple(attribute[1] for attribute in table_info if attribute[1] not in exclude)
 		else:
@@ -597,7 +595,7 @@ class Database():
 		#Setup
 		data = collections.defaultdict(lambda: collections.defaultdict(bool))
 
-		if (self.isSQLite()):
+		if (self.isSQLite):
 			#Get Schema Info
 			raw_sql = self.executeCommand("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{}'".format(relation), filterTuple = True)
 			if (not raw_sql):
@@ -637,16 +635,23 @@ class Database():
 		else:
 			for item in self.cursor.statistics(table = relation):
 				non_unique    = item[3]
-				primary       = item[5] == "PrimaryKey"
+				index         = item[5]
 				# column        = item[7]
 				attributeName = item[8]
 				# rows          = item[10]
 				# pages         = item[11]
 
+				if (attributeName is None):
+					continue
+
 				if (not non_unique):
 					data["unique"][attributeName] = True
-				if (primary):
-					data["primary"][attributeName] = True
+				
+				if (index is not None):
+					if (index == "PrimaryKey"):
+						data["primary"][attributeName] = True
+					else:
+						data["index"][attributeName] = index
 
 			for item in self.cursor.columns(table = relation):
 				attributeName = item[3]
@@ -656,11 +661,14 @@ class Database():
 				default       = item[12]
 				# includesNull  = item[17]
 
+				if (attributeName is None):
+					continue
+
 				if (not canBeNull):
 					data["notNull"][attributeName] = True
 				data["default"][attributeName] = True
 
-			if (not self.isAccess()):
+			if (not self.isAccess):
 				primary_key_list = self.cursor.primaryKeys(table = relation)
 				foreign_key_list = self.cursor.foreignKey(relation)
 				jkjkhkhjkkj
@@ -682,7 +690,7 @@ class Database():
 		if ((primary) or (autoPrimary)):
 				command += " PRIMARY KEY"
 
-		if (autoIncrement and (self.isSQLite())):
+		if (autoIncrement and (self.isSQLite)):
 				command += " AUTOINCREMENT"
 
 		# if ((unsigned) or (autoPrimary)):
@@ -775,13 +783,13 @@ class Database():
 		"""
 
 		self.foreignKeys_catalogue.clear()
-		if (self.isAccess()):
+		if (self.isAccess):
 			#ODBC Driver does not support Foreign Keys for MS Access
 			return 
 
 		#Get the foreign schema for each relation
 		for relation in self.getRelationNames():
-			if (self.isSQLite()):
+			if (self.isSQLite):
 				foreign_schemaList = self.executeCommand("PRAGMA foreign_key_list([{}])".format(relation))
 			else:
 				foreign_key_list = self.cursor.foreignKeys(table = relation)
@@ -904,7 +912,7 @@ class Database():
 		Example Input: formatValue(value, attribute, relation)
 		"""
 
-		@cachetools.cached(valueCache_sub_1)#, lock = cacheLock)
+		@cachetools.cached(self.valueCache_sub_1)#, lock = cacheLock)
 		def _eveluateValue(value, attribute, relation, returnNull = False, checkForeign = True):
 			if (value is None):
 				return (None, NULL)[returnNull]
@@ -921,7 +929,7 @@ class Database():
 			assert len(subResults) is 1
 			return subResults[0]
 
-		@cachetools.cached(valueCache_sub_2, key = hash_formatValue)#, lock = cacheLock)
+		@cachetools.cached(self.valueCache_sub_2, key = self.hash_formatValue)#, lock = cacheLock)
 		def _formatValue(value, _, attribute, relation, *args, formatter = None, **kwargs):
 			if (formatter):
 				if (isinstance(formatter, dict)):
@@ -1191,7 +1199,8 @@ class Database():
 			self.waiting = False
 			while True:
 				try:
-					return self.cursor.execute(command, valueList)
+					# return self.cursor.execute(command, valueList)
+					return self.connection.execute(command, valueList)
 
 				except sqlite3.OperationalError as error:
 					if ("database is locked" not in error.args):
@@ -1224,37 +1233,49 @@ class Database():
 					self.previousCommand = (command, valueList)
 
 		def yieldRow(command, valueList):
-			resultCursor = getCursor(command, valueList)
-			try:
-				for row in resultCursor.fetchall():
-					yield row
-			except pyodbc.ProgrammingError:
-				return
-			except UnicodeDecodeError:
-				fails = 0
-				failThreshold = 10 #Keep it from spinning its wheels
-				while (fails < failThreshold):
-					try:
-						row = resultCursor.fetchone()
-					except pyodbc.ProgrammingError:
-						return
-					except Exception as error:
-						fails += 1
-						yield ("error" for error in range(n))
-					if (row is None):
-						break
-					yield row
+			with self.threadLock:
+				resultCursor = getCursor(command, valueList)
+				try:
+					for row in resultCursor.fetchall():
+						yield row
+				except pyodbc.ProgrammingError:
+					return
+				except UnicodeDecodeError:
+					fails = 0
+					failThreshold = 10 #Keep it from spinning its wheels
+					while (fails < failThreshold):
+						try:
+							row = resultCursor.fetchone()
+						except pyodbc.ProgrammingError:
+							return
+						except Exception as error:
+							fails += 1
+							yield ("error" for error in range(len(resultKeys) or 1))
+						if (row is None):
+							break
+						yield row
+
+		def yieldValue_command(valueList):
+			for value in valueList:
+				if (value in [None, NULL]):
+					yield None
+				elif (value in [True, "True"]):
+					yield 1
+				elif (value in [False, "False"]):
+					yield 0
+				else:
+					yield f"{value}"
 
 		if (resultKeys):
 			assert relation
-			def yieldValue(i, row):
+			def yieldValue_result(i, row):
 				for attribute, value in zip(resultKeys, row):
 					if (not checkFilter(value)):
 						continue
 
 					yield self.formatAttribute(attribute, row = i, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
 		else:
-			def yieldValue(row):
+			def yieldValue_result(row):
 				for value in row:
 					if (not checkFilter(value)):
 						continue
@@ -1296,36 +1317,31 @@ class Database():
 		#Filter NULL placeholder
 		if (valueList is None):
 			valueList = ()
-		elif (isinstance(valueList, (str))):
-			valueList = (valueList,)
-		elif (isinstance(valueList, (int, float))):
-			valueList = (f"{valueList}",)
 		else:
-			valueList = [f"{item}" if (item not in [None, NULL]) else None for item in valueList]
+			valueList = tuple(yieldValue_command(self.ensure_container(valueList)))
 
 		#Run Command
 		# print("@0.1", command, valueList)
-		with threadLock:
-			if (resultKeys):
-				assert not transpose
+		if (resultKeys):
+			assert not transpose
 
-				if (not attributeFirst):
-					if (rowsAsList):
-						return [{attribute: value for attribute, value in yieldValue(i, row)} for i, row in enumerate(yieldRow(command, valueList))]
-					else:
-						return tuple({attribute: value for attribute, value in yieldValue(i, row)} for i, row in enumerate(yieldRow(command, valueList)))
-				
-				if (valuesAsSet):
-					result = collections.defaultdict(set)
-					for i, row in enumerate(yieldRow(command, valueList)):
-						for attribute, value in yieldValue(i, row): 
-							result[attribute].add(value)
+			if (not attributeFirst):
+				if (rowsAsList):
+					return [{attribute: value for attribute, value in yieldValue_result(i, row)} for i, row in enumerate(yieldRow(command, valueList))]
 				else:
-					result = collections.defaultdict(list)
-					for i, row in enumerate(yieldRow(command, valueList)):
-						for attribute, value in yieldValue(i, row): 
-							result[attribute].append(value)
-				return result
+					return tuple({attribute: value for attribute, value in yieldValue_result(i, row)} for i, row in enumerate(yieldRow(command, valueList)))
+			
+			if (valuesAsSet):
+				result = collections.defaultdict(set)
+				for i, row in enumerate(yieldRow(command, valueList)):
+					for attribute, value in yieldValue_result(i, row): 
+						result[attribute].add(value)
+			else:
+				result = collections.defaultdict(list)
+				for i, row in enumerate(yieldRow(command, valueList)):
+					for attribute, value in yieldValue_result(i, row): 
+						result[attribute].append(value)
+			return result
 
 		iterator = yieldRow(command, valueList)
 		if (transpose):
@@ -1333,19 +1349,19 @@ class Database():
 
 		if (filterTuple):
 			if (valuesAsSet):
-				return {value for item in iterator for value in yieldValue(item)}
+				return {value for item in iterator for value in yieldValue_result(item)}
 			if (rowsAsList):
-				return [value for item in iterator for value in yieldValue(item)]
-			return tuple(value for item in iterator for value in yieldValue(item))
+				return [value for item in iterator for value in yieldValue_result(item)]
+			return tuple(value for item in iterator for value in yieldValue_result(item))
 
 		if (rowsAsList):
 			if (valuesAsSet):
-				return [set(yieldValue(item)) for item in iterator]
-			return [tuple(yieldValue(item)) for item in iterator]
+				return [set(yieldValue_result(item)) for item in iterator]
+			return [tuple(yieldValue_result(item)) for item in iterator]
 
 		if (valuesAsSet):
-			return tuple(set(yieldValue(item)) for item in iterator)
-		return tuple(tuple(yieldValue(item)) for item in iterator)
+			return tuple(set(yieldValue_result(item)) for item in iterator)
+		return tuple(tuple(yieldValue_result(item)) for item in iterator)
 
 	#Interaction Functions
 	def quickOpen(self):
@@ -1358,7 +1374,7 @@ class Database():
 			return
 
 		self.cursor.close()
-		print("@quickClose", "Connection Closed")
+		print("@quickClose", f"Connection Closed for {self.__repr__()}; {self.connectionType}")
 
 	def setDefaultCommit(self, state):
 		self.defaultCommit = state
@@ -1417,8 +1433,8 @@ class Database():
 		if ("." not in fileName):
 			fileName += self.defaultFileExtension
 
-		definitionCache.clear()
-		connectionTypeCache.clear()
+		self.definitionCache.clear()
+		self.connectionTypeCache.clear()
 		if (connectionType is None):
 			if (fileName.endswith(("mdb", "accdb"))):
 				connectionType = "access"
@@ -1435,14 +1451,17 @@ class Database():
 		# if (self.resultError_replacement is None):
 		# 	self.resultError_replacement = "!!! SELECT ERROR !!!"
 
+		self.isAccess = self.connectionType == "access"
+		self.isSQLite = self.connectionType == "sqlite3"
+
 		#Establish connection
-		if (self.isSQLite()):
+		if (self.isSQLite):
 			if (multiThread):
 				#Temporary fix until I learn SQLAlchemy to do this right
 				self.connection = sqlite3.connect(fileName, check_same_thread = False)
 			else:
 				self.connection = sqlite3.connect(fileName)
-		elif (self.isAccess()):
+		elif (self.isAccess):
 			driverList = self.getDriverList("Microsoft Access Driver")
 			if (not driverList):
 				errorMessage = "You need to install 'Microsoft Access Database Engine 2010 Redistributable'. It can be found at: https://www.microsoft.com/en-US/download/details.aspx?id=13255"
@@ -1526,7 +1545,7 @@ class Database():
 			relation = self.ensure_container(relation)
 
 		for _relation in relation:
-			if (self.isSQLite()):
+			if (self.isSQLite):
 				command = "DROP TABLE IF EXISTS [{}]".format(_relation)
 			else:
 				if (_relation not in self.getRelationNames()):
@@ -1614,6 +1633,7 @@ class Database():
 		Example Input: setSchema("Users", schema = {"counter": int})
 		Example Input: setSchema("Users", database = Database.build("data.db"))
 		"""
+		global indexCache
 
 		schema = schema or {}
 		unique = unique or {}
@@ -1668,6 +1688,9 @@ class Database():
 			
 			#Remove renamed table
 			self.removeRelation("tempCopy_{}".format(relation), applyChanges = applyChanges)
+
+			if (self.isAccess):
+				indexCache.clear()
 
 			if (updateSchema):
 				self.updateInternalforeignSchemas()
@@ -1727,7 +1750,7 @@ class Database():
 
 		schema = schema or {}
 
-		if (self.isAccess()):
+		if (self.isAccess):
 			if (foreign):
 				errorMessage = "The ODBC driver for MS Access does not support foreign keys"
 				raise KeyError(errorMessage)
@@ -1739,7 +1762,7 @@ class Database():
 		#Build SQL command
 		command = "CREATE TABLE "
 
-		if ((noReplication is not None) and (self.isSQLite())):
+		if ((noReplication is not None) and (self.isSQLite)):
 			command += "IF NOT EXISTS "
 		else:
 			self.removeRelation(relation)
@@ -1921,7 +1944,7 @@ class Database():
 				# 			if (existsCheck):
 				# 				return
 
-				# if ((self.isAccess()) and (unique in [True, None])):
+				# if ((self.isAccess) and (unique in [True, None])):
 				# 	removeCatalogue = {} 
 				# 	for attribute, value in myTuple.items():
 				# 		existsCheck = self.getValue({relation: attribute}, {attribute: value})[attribute]
@@ -1948,7 +1971,7 @@ class Database():
 						valueList.append(self.insertForeign(relation, attribute, value, foreignNone = foreignNone))
 						attributeList.append(attribute)
 
-				if (self.isAccess()):
+				if (self.isAccess):
 					command = f"INSERT INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for i in valueList)})"
 				else:
 					command = f"INSERT { {True: 'OR REPLACE ', False: '', None: 'OR IGNORE '}[unique] }INTO [{relation}] ({', '.join(attributeList)}) VALUES ({', '.join('?' for i in valueList)})"
@@ -2352,12 +2375,12 @@ class Database():
 				if (orderInfo):
 					command += f" ORDER BY {orderInfo}"
 
-				if (self.isAccess()):
+				if (self.isAccess):
 					result = self.executeCommand(command, valueList, resultKeys = attributeList, alias = alias, relation = relation, 
 						formatter = formatValue, returnNull = returnNull, checkForeign = checkForeign, attributeFirst = attributeFirst)
 
 					if (limit is not None):
-						result = result[:limit]
+						result = {attribute: row[:limit] for attribute, row in result.items()}
 
 					checkForeign = False
 				else:
@@ -2840,7 +2863,7 @@ class Database():
 		"""
 
 
-		if (self.isAccess()):
+		if (self.isAccess):
 			errorMessage = "The ODBC driver for MS Access does not support adding triggers"
 			raise KeyError(errorMessage)
 
@@ -2950,7 +2973,7 @@ class Database():
 
 		exclude = self.ensure_container(exclude)
 
-		if (self.isAccess()):
+		if (self.isAccess):
 			errorMessage = "The ODBC driver for MS Access does not support getting triggers"
 			raise KeyError(errorMessage)
 
@@ -2977,7 +3000,7 @@ class Database():
 		Example Input: removeTrigger("Users_lastModified")
 		"""
 
-		if (self.isAccess()):
+		if (self.isAccess):
 			errorMessage = "The ODBC driver for MS Access does not support removing triggers"
 			raise KeyError(errorMessage)
 
@@ -3132,7 +3155,7 @@ def test_sqlite():
 		database_API.saveDatabase()
 
 def test_access():
-	print("\n\naccess")
+	quiet("\n\naccess")
 	#Create the database
 	database_API = build()
 	database_API.openDatabase("H:/Python/modules/API_Database/test.accdb", applyChanges = False)
@@ -3140,46 +3163,49 @@ def test_access():
 	database_API.removeRelation()
 
 	#Create tables from the bottom up
-	# database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
-	# database_API.createRelation("Address", {"street": str}, unique = {"street": True})
-	# database_API.saveDatabase()
+	database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+	database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+	database_API.saveDatabase()
 
-	# database_API.addTuple({"Names": {"first_name": "Lorem", "extra_data": 4}}, unique = None)
-	# database_API.addTuple({"Names": {"first_name": "Ipsum", "extra_data": 7}}, unique = None)
-	# database_API.addTuple({"Names": {"first_name": "Dolor", "extra_data": 3}}, unique = None)
-	# database_API.addTuple({"Names": {"first_name": "Sit",   "extra_data": 1}}, unique = None)
-	# database_API.addTuple({"Names": {"first_name": "Amet",  "extra_data": 10}}, unique = None)
+	database_API.addTuple({"Names": {"first_name": "Lorem", "extra_data": 4}}, unique = None)
+	database_API.addTuple({"Names": {"first_name": "Ipsum", "extra_data": 7}}, unique = None)
+	database_API.addTuple({"Names": {"first_name": "Dolor", "extra_data": 3}}, unique = None)
+	database_API.addTuple({"Names": {"first_name": "Sit",   "extra_data": 1}}, unique = None)
+	database_API.addTuple({"Names": {"first_name": "Amet",  "extra_data": 10}}, unique = None)
 	
 	#Simple Actions
-	print("Simple Actions")
-	print(database_API.getValue({"Names": "first_name"}))
-	# print(database_API.getValue({"Names": "first_name"}, filterRelation = False))
-	# print(database_API.getValue({"Names": ["first_name", "extra_data"]}))
-	# print()
+	quiet("Simple Actions")
+	quiet(database_API.getValue({"Names": "first_name"}))
+	quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True, forceAttribute = True))
+	quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True))
+	quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}))
+	quiet(database_API.getValue({"Names": "first_name"}, rowsAsList = True))
+	quiet()
 
-	# #Ordering Data
-	# print("Ordering Data")
-	# print(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
-	# print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
-	# print(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
-	# print()
+	#Ordering Data
+	quiet("Ordering Data")
+	quiet(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
+	quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
+	quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
+	quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = False))
+	quiet()
 
-	# #Changing Attributes
-	# print("Changing Attributes")
-	# print(database_API.getValue({"Names": "first_name"}))
-	# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
-	# print(database_API.getValue({"Names": "first_name"}))
-	# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
-	# print(database_API.getValue({"Names": "first_name"}))
-	# print()
+	#Changing Attributes
+	quiet("Changing Attributes")
+	quiet(database_API.getValue({"Names": "first_name"}))
+	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
+	quiet(database_API.getValue({"Names": "first_name"}))
+	database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
+	quiet(database_API.getValue({"Names": "first_name"}))
+	quiet()
 
-	# database_API.saveDatabase()
+	database_API.saveDatabase()
 
 def main():
 	"""The main program controller."""
 
 	test_sqlite()
-	# test_access()
+	test_access()
 
 	# filePath = "R:\\Material Log - Database\\Users\\Josh Mayberry\\User Database.mdb"
 	# with build(filePath, resultError_replacement = "!!! Import Error !!!") as myImportDatabase:
