@@ -1287,7 +1287,7 @@ class Database():
 				else:
 					yield f"{value}"
 
-		def yieldValue_result(row, i = None):
+		def yieldValue_result(row, i = None, returnFlag = False):
 			yieldedSomething = False
 			if (not resultKeys):
 				for value in row:
@@ -1315,10 +1315,10 @@ class Database():
 			else:
 				for attribute, value in zip(resultKeys, row):
 					if (not checkFilter(value)):
-						if (variableLength):
-							yield self.formatAttribute(attribute, row = i, alias = alias), FLAG
-						else:
+						if (not variableLength):
 							yield self.formatAttribute(attribute, row = i, alias = alias), default
+						elif (returnFlag):
+							yield self.formatAttribute(attribute, row = i, alias = alias), FLAG
 						continue
 
 					yield self.formatAttribute(attribute, row = i, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
@@ -1340,6 +1340,11 @@ class Database():
 			valueList = ()
 		else:
 			valueList = tuple(yieldValue_command(self.ensure_container(valueList)))
+
+		if (valuesAsSet):
+			rowContainer = set
+		else:
+			rowContainer = tuple
 
 		#Run Command
 		# print("@0.1", command, valueList)
@@ -1365,7 +1370,7 @@ class Database():
 				if (_forceTuple):
 					if (not rows):
 						# () -> ()
-						return ()
+						return rowContainer()
 
 					elif (_forceAttribute):
 						# ((1, "Lorem"), (2, "Ipsum")) -> {id: {1, 2}, name: {"Lorem", "Ipsum"}} # if (valuesAsSet)
@@ -1373,14 +1378,14 @@ class Database():
 						result = collections.defaultdict((list, _set)[valuesAsSet])
 						if (isinstance(alias, (tuple, list))):
 							for i, row in enumerate(rows):
-								for attribute, value in yieldValue_result(row, i):
+								for attribute, value in yieldValue_result(row, i, returnFlag = True):
 									if (value is FLAG):
 										result[attribute]
 									else:
 										result[attribute].append(value)
 						else:
 							for row in rows:
-								for attribute, value in yieldValue_result(row, 0):
+								for attribute, value in yieldValue_result(row, 0, returnFlag = True):
 									if (value is FLAG):
 										result[attribute]
 									else:
@@ -1388,24 +1393,18 @@ class Database():
 						return dict(result)
 
 					else:
-						if (valuesAsSet):
-							# ((1,), (2,)) -> {1, 2}
-							return {value for row in rows for value in yieldValue_result(row) if (value is not FLAG)}
-						else:
-							# ((1,), (2,)) -> (1, 2)
-							return tuple(value for row in rows for value in yieldValue_result(row) if (value is not FLAG))
+						# ((1,), (2,)) -> {1, 2} # if (valuesAsSet)
+						# ((1,), (2,)) -> (1, 2)
+						return rowContainer(value for row in rows for value in yieldValue_result(row))
 				else:
 					if (_forceAttribute):
 						if (not rows):
-							if (valuesAsSet):
-								# () -> {id: set()}
-								return {attribute: set() for attribute in resultKeys}
-							else:
-								# () -> {id: ()}
-								return {attribute: () for attribute in resultKeys}
+							# () -> {id: set()} # if (valuesAsSet)
+							# () -> {id: ()}
+							return {attribute: rowContainer() for attribute in resultKeys}
 
 						# ((1, "Lorem")) -> {id: 1, name: "Lorem"}
-						return {attribute: value if (value is not FLAG) else () for i, row in enumerate(rows) for attribute, value in yieldValue_result(row, i)}
+						return {attribute: value if (value is not FLAG) else rowContainer() for i, row in enumerate(rows) for attribute, value in yieldValue_result(row, i, returnFlag = True)}
 
 					else:
 						if (not rows):
@@ -1413,7 +1412,7 @@ class Database():
 							return ()
 						else:
 							# ((1,)) -> 1
-							return next((value if (value is not FLAG) else () for row in rows for value in yieldValue_result(row)), ())
+							return next((value for row in rows for value in yieldValue_result(row)), rowContainer())
 			else:
 				if (_forceTuple):
 					if (not rows):
@@ -1423,25 +1422,23 @@ class Database():
 					elif (_forceAttribute):
 						if (rowsAsList):
 							# ((1, "Lorem"), (2, "Ipsum")) -> ({"id": 1, "name": "Lorem"}, {"id": 2, "name": "Ipsum"})
-							return tuple({attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, i)} for i, row in enumerate(rows))
+							return rowContainer({attribute: value if (value is not FLAG) else rowContainer() for attribute, value in yieldValue_result(row, i, returnFlag = True)} for i, row in enumerate(rows))
 						else:
 							# ((1, "Lorem"), (2, "Ipsum")) -> {0: {"id": 1, "name": "Lorem"}, 1: {"id": 2, "name": "Ipsum"}}
-							return {i: {attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, i)} for i, row in enumerate(rows)}
+							return {i: {attribute: value if (value is not FLAG) else rowContainer() for attribute, value in yieldValue_result(row, i, returnFlag = True)} for i, row in enumerate(rows)}
 					else:
 						if (rowsAsList):
 							# ((1,), (2,)) -> (1, 2)
-							return tuple(value for row in rows for value in yieldValue_result(row) if (value is not FLAG))
+							return rowContainer(value for row in rows for value in yieldValue_result(row))
 						else:
 							# ((1,), (2,)) -> {0: 1, 1: 2}
-							return {i: value if (value is not FLAG) else () for i, row in enumerate(rows) for value in yieldValue_result(row)}
+							return {i: value if (value is not FLAG) else rowContainer() for i, row in enumerate(rows) for value in yieldValue_result(row, returnFlag = True)}
 				else:
 					if (not rows):
-						if (valuesAsSet):
-							# () -> set()
-							return set()
-						elif (rowsAsList):
+						if (rowsAsList):
+							# () -> set() # if (valuesAsSet)
 							# () -> ()
-							return ()
+							return rowContainer()
 						else:
 							# () -> {}
 							return {}
@@ -1449,34 +1446,27 @@ class Database():
 					elif (_forceAttribute):
 						if (rowsAsList):
 							# ((1, "Lorem")) -> ({"id": 1, "name": "Lorem"})
-							return tuple({attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, 0)} for row in rows)
+							return rowContainer({attribute: value if (value is not FLAG) else rowContainer() for attribute, value in yieldValue_result(row, 0, returnFlag = True)} for row in rows)
 						else:
 							# ((1, "Lorem")) -> {0: {"id": 1, "name": "Lorem"}}
-							return {0: {attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, 0)} for row in rows}
+							return {0: {attribute: value if (value is not FLAG) else rowContainer() for attribute, value in yieldValue_result(row, 0, returnFlag = True)} for row in rows}
 
 					else:
 						# ((1,)) -> 1
-						return next((value if (value is not FLAG) else () for row in rows for value in yieldValue_result(row)), ())
+						return next((value for row in rows for value in yieldValue_result(row)), rowContainer())
 
 		iterator = yieldRow(command, valueList)
 		if (transpose):
 			iterator = zip(*iterator)
 
 		if (filterTuple):
-			if (valuesAsSet):
-				return {value for item in iterator for value in yieldValue_result(item)}
 			if (rowsAsList):
 				return [value for item in iterator for value in yieldValue_result(item)]
-			return tuple(value for item in iterator for value in yieldValue_result(item))
+			return rowContainer(value for item in iterator for value in yieldValue_result(item))
 
 		if (rowsAsList):
-			if (valuesAsSet):
-				return [set(yieldValue_result(item)) for item in iterator]
-			return [tuple(yieldValue_result(item)) for item in iterator]
-
-		if (valuesAsSet):
-			return tuple(set(yieldValue_result(item)) for item in iterator)
-		return tuple(tuple(yieldValue_result(item)) for item in iterator)
+			return [rowContainer(yieldValue_result(item)) for item in iterator]
+		return tuple(rowContainer(yieldValue_result(item)) for item in iterator)
 
 	#Interaction Functions
 	def quickOpen(self):
@@ -2308,8 +2298,8 @@ class Database():
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, alias = None, 
-		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, 
-		maximum = None, minimum = None, average = None, summation = None,
+		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False,
+		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
 		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True, rowsAsList = False, 
 		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
@@ -2476,9 +2466,10 @@ class Database():
 					if (limit is not None):
 						command += " LIMIT {}".format(limit)
 
-				result = self.executeCommand(command, valueList, filterNone = filterNone, returnNull = returnNull, 
+				result = self.executeCommand(command, valueList, 
+					filterNone = filterNone, returnNull = returnNull, variableLength = variableLength, default = variableLength_default, 
 					resultKeys = attributeList, alias = alias, relation = relation, formatter = formatValue, checkForeign = checkForeign, 
-					attributeFirst = attributeFirst, forceAttribute = forceAttribute, forceTuple = forceTuple, rowsAsList = rowsAsList)
+					attributeFirst = attributeFirst, forceAttribute = forceAttribute, forceTuple = forceTuple, rowsAsList = rowsAsList, valuesAsSet = valuesAsSet)
 
 				if (self.isAccess):
 					if (limit is not None):
