@@ -164,6 +164,11 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 		return wrapper
 	return decorator
 
+#Custom Types
+class _set(set):
+	def append(self, *args, **kwargs):
+		return self.add(*args, **kwargs)
+
 #Controllers
 def build(*args, **kwargs):
 	"""Starts the GUI making process."""
@@ -180,6 +185,7 @@ class Singleton():
 		return f"{self.label}()"
 
 NULL = Singleton("NULL")
+FLAG = Singleton("FLAG")
 
 class Database():
 	"""Used to create and interact with a database.
@@ -255,12 +261,6 @@ class Database():
 	valueCache_sub_1 = cachetools.LFUCache(maxsize = 1000)
 	valueCache_sub_2 = cachetools.LFUCache(maxsize = 1000)
 	connectionTypeCache = cachetools.LFUCache(maxsize = 10)
-
-	def hash_isSQLiteelf):
-		return cachetools.keys.hashkey(id(self), 1)
-
-	def hash_isAccesself):
-		return cachetools.keys.hashkey(id(self), 2)
 
 	def hash_formatValue(self, *args, formatter = None, **kwargs):
 		if (not isinstance(formatter, dict)):
@@ -1171,9 +1171,10 @@ class Database():
 
 		return self.executeCommand_add(*args, add = False, **kwargs)
 
-	def executeCommand(self, command, valueList = None, hackCheck = False, filterNone = False, transpose = False,
-		valuesAsSet = False, printError_command = True, attributeFirst = False, filterTuple = False,
-		exclude = None, excludeFunction = None, include = None, includeFunction = None, rowsAsList = False, 
+	def executeCommand(self, command, valueList = None, hackCheck = False, printError_command = True, 
+		filterNone = False, valuesAsSet = False, transpose = False, variableLength = False, default = None, 
+		exclude = None, excludeFunction = None, include = None, includeFunction = None, 
+		attributeFirst = False, filterTuple = False, rowsAsList = False, forceAttribute = None, forceTuple = None,
 		resultKeys = None, alias = None, relation = None, formatter = None, returnNull = None, checkForeign = None):
 		"""Executes an SQL command. Allows for multi-threading.
 		Special thanks to Joaquin Sargiotto for how to lock threads on https://stackoverflow.com/questions/26629080/python-and-sqlite3-programmingerror-recursive-use-of-cursors-not-allowed
@@ -1255,33 +1256,6 @@ class Database():
 							break
 						yield row
 
-		def yieldValue_command(valueList):
-			for value in valueList:
-				if (value in [None, NULL]):
-					yield None
-				elif (value in [True, "True"]):
-					yield 1
-				elif (value in [False, "False"]):
-					yield 0
-				else:
-					yield f"{value}"
-
-		if (resultKeys):
-			assert relation
-			def yieldValue_result(i, row):
-				for attribute, value in zip(resultKeys, row):
-					if (not checkFilter(value)):
-						continue
-
-					yield self.formatAttribute(attribute, row = i, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
-		else:
-			def yieldValue_result(row):
-				for value in row:
-					if (not checkFilter(value)):
-						continue
-
-					yield value
-
 		def checkFilter(value):
 			if ((filterNone) and (value is None)):
 				return False
@@ -1301,6 +1275,53 @@ class Database():
 					return False
 
 			return True
+
+		def yieldValue_command(valueList):
+			for value in valueList:
+				if (value in [None, NULL]):
+					yield None
+				elif (value in [True, "True"]):
+					yield 1
+				elif (value in [False, "False"]):
+					yield 0
+				else:
+					yield f"{value}"
+
+		def yieldValue_result(row, i = None):
+			yieldedSomething = False
+			if (not resultKeys):
+				for value in row:
+					if (not checkFilter(value)):
+						continue
+
+					yield value
+					yieldedSomething = True
+				
+				if ((not yieldedSomething) and (not variableLength)):
+					yield default
+				return
+			
+			assert relation
+			if (i is None):
+				for attribute, value in zip(resultKeys, row):
+					if (not checkFilter(value)):
+						continue
+
+					yield self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
+					yieldedSomething = True
+				if ((not yieldedSomething) and (not variableLength)):
+					yield default
+			
+			else:
+				for attribute, value in zip(resultKeys, row):
+					if (not checkFilter(value)):
+						if (variableLength):
+							yield self.formatAttribute(attribute, row = i, alias = alias), FLAG
+						else:
+							yield self.formatAttribute(attribute, row = i, alias = alias), default
+						continue
+
+					yield self.formatAttribute(attribute, row = i, alias = alias), self.formatValue(value, attribute, relation, returnNull = returnNull, checkForeign = checkForeign, formatter = formatter)
 
 		#####################################################################
 
@@ -1325,23 +1346,117 @@ class Database():
 		if (resultKeys):
 			assert not transpose
 
-			if (not attributeFirst):
-				if (rowsAsList):
-					return [{attribute: value for attribute, value in yieldValue_result(i, row)} for i, row in enumerate(yieldRow(command, valueList))]
+			rows = tuple(yieldRow(command, valueList))
+			_forceTuple = forceTuple or (len(rows) > 1)
+			_forceAttribute = forceAttribute or (len(resultKeys) > 1)
+
+			# print("@execute.0")
+			# print("   -- resultKeys:", resultKeys)
+			# print("   -- attributeFirst:", attributeFirst)
+			# print("   -- forceTuple:", forceTuple, _forceTuple)
+			# print("   -- forceAttribute:", forceAttribute, _forceAttribute)
+			# print("   -- rowsAsList:", rowsAsList)
+			# print("   -- filterTuple:", filterTuple)
+			# print("   -- valuesAsSet:", valuesAsSet)
+			# print("   -- filterNone:", filterNone)
+			# print("@execute.1", rows)
+
+			if (attributeFirst):
+				if (_forceTuple):
+					if (not rows):
+						# () -> ()
+						return ()
+
+					elif (_forceAttribute):
+						# ((1, "Lorem"), (2, "Ipsum")) -> {id: {1, 2}, name: {"Lorem", "Ipsum"}} # if (valuesAsSet)
+						# ((1, "Lorem"), (2, "Ipsum")) -> {id: [1, 2], name: ["Lorem", "Ipsum"]}
+						result = collections.defaultdict((list, _set)[valuesAsSet])
+						if (isinstance(alias, (tuple, list))):
+							for i, row in enumerate(rows):
+								for attribute, value in yieldValue_result(row, i):
+									if (value is FLAG):
+										result[attribute]
+									else:
+										result[attribute].append(value)
+						else:
+							for row in rows:
+								for attribute, value in yieldValue_result(row, 0):
+									if (value is FLAG):
+										result[attribute]
+									else:
+										result[attribute].append(value)
+						return dict(result)
+
+					else:
+						if (valuesAsSet):
+							# ((1,), (2,)) -> {1, 2}
+							return {value for row in rows for value in yieldValue_result(row) if (value is not FLAG)}
+						else:
+							# ((1,), (2,)) -> (1, 2)
+							return tuple(value for row in rows for value in yieldValue_result(row) if (value is not FLAG))
 				else:
-					return tuple({attribute: value for attribute, value in yieldValue_result(i, row)} for i, row in enumerate(yieldRow(command, valueList)))
-			
-			if (valuesAsSet):
-				result = collections.defaultdict(set)
-				for i, row in enumerate(yieldRow(command, valueList)):
-					for attribute, value in yieldValue_result(i, row): 
-						result[attribute].add(value)
+					if (_forceAttribute):
+						if (not rows):
+							if (valuesAsSet):
+								# () -> {id: set()}
+								return {attribute: set() for attribute in resultKeys}
+							else:
+								# () -> {id: ()}
+								return {attribute: () for attribute in resultKeys}
+
+						# ((1, "Lorem")) -> {id: 1, name: "Lorem"}
+						return {attribute: value if (value is not FLAG) else () for i, row in enumerate(rows) for attribute, value in yieldValue_result(row, i)}
+
+					else:
+						if (not rows):
+							# () -> ()
+							return ()
+						else:
+							# ((1,)) -> 1
+							return next((value if (value is not FLAG) else () for row in rows for value in yieldValue_result(row)), ())
 			else:
-				result = collections.defaultdict(list)
-				for i, row in enumerate(yieldRow(command, valueList)):
-					for attribute, value in yieldValue_result(i, row): 
-						result[attribute].append(value)
-			return result
+				if (_forceTuple):
+					if (not rows):
+						# () -> ()
+						return ()
+
+					elif (_forceAttribute):
+						if (rowsAsList):
+							# ((1, "Lorem"), (2, "Ipsum")) -> ({"id": 1, "name": "Lorem"}, {"id": 2, "name": "Ipsum"})
+							return tuple({attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, i)} for i, row in enumerate(rows))
+						else:
+							# ((1, "Lorem"), (2, "Ipsum")) -> {0: {"id": 1, "name": "Lorem"}, 1: {"id": 2, "name": "Ipsum"}}
+							return {i: {attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, i)} for i, row in enumerate(rows)}
+					else:
+						if (rowsAsList):
+							# ((1,), (2,)) -> (1, 2)
+							return tuple(value for row in rows for value in yieldValue_result(row) if (value is not FLAG))
+						else:
+							# ((1,), (2,)) -> {0: 1, 1: 2}
+							return {i: value if (value is not FLAG) else () for i, row in enumerate(rows) for value in yieldValue_result(row)}
+				else:
+					if (not rows):
+						if (valuesAsSet):
+							# () -> set()
+							return set()
+						elif (rowsAsList):
+							# () -> ()
+							return ()
+						else:
+							# () -> {}
+							return {}
+
+					elif (_forceAttribute):
+						if (rowsAsList):
+							# ((1, "Lorem")) -> ({"id": 1, "name": "Lorem"})
+							return tuple({attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, 0)} for row in rows)
+						else:
+							# ((1, "Lorem")) -> {0: {"id": 1, "name": "Lorem"}}
+							return {0: {attribute: value if (value is not FLAG) else () for attribute, value in yieldValue_result(row, 0)} for row in rows}
+
+					else:
+						# ((1,)) -> 1
+						return next((value if (value is not FLAG) else () for row in rows for value in yieldValue_result(row)), ())
 
 		iterator = yieldRow(command, valueList)
 		if (transpose):
@@ -1524,6 +1639,16 @@ class Database():
 		#Save changes
 		self.connection.commit()
 
+	def autoSave(self, applyChanges):
+		"""
+		applyChanges (bool) - Determines if the database will be saved after the change is made.
+			- If None: The default flag set upon opening the database will be used
+
+		Example Input: autoSave(applyChanges)
+		"""
+		if (applyChanges or ((applyChanges is None) and self.defaultCommit)):
+			self.saveDatabase()
+
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
 	def removeRelation(self, relation = None, applyChanges = None):
@@ -1556,11 +1681,7 @@ class Database():
 			self.subtractForeignUse(relation = _relation, n = None)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 		#Update internal foreign schema catalogue
 		self.updateInternalforeignSchemas()
@@ -1580,13 +1701,10 @@ class Database():
 
 		#Update internal foreign schema catalogue
 		self.updateInternalforeignSchemas()
+		self.subtractForeignUse(relation = relation, n = None)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1610,14 +1728,11 @@ class Database():
 			self.executeCommand(command)
 
 			#Save Changes
-			if (applyChanges is None):
-				applyChanges = self.defaultCommit
-
-			if (applyChanges):
-				self.saveDatabase()
+			self.autoSave(applyChanges)
 
 			#Update internal foreign schema catalogue
 			self.updateInternalforeignSchemas()
+			self.renameForeignUse(relation, newName)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1779,6 +1894,7 @@ class Database():
 
 			command += re.sub("CREATE TABLE .*?\(", f"(", raw_sql)
 			self.executeCommand(command)
+			foreign = re.search("foreign", raw_sql, re.IGNORECASE)
 		else:
 			#Format schema
 			commandList = []
@@ -1795,14 +1911,12 @@ class Database():
 			self.createIndex(relation, index)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 		#Update internal foreign schema catalogue
 		self.updateInternalforeignSchemas()
+		if (foreign):
+			self.updateForeignUses()
 
 	def copyAttribute(self, source_relation, source_attribute, destination_relation, destination_attribute = None):
 		"""Copies an attribute from an existing table to another.
@@ -1886,14 +2000,7 @@ class Database():
 				raise error
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
-
-		#Update internal foreign schema catalogue
-		self.updateInternalforeignSchemas()
+		self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -1987,11 +2094,7 @@ class Database():
 					self.executeCommand(command, valueList)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -2050,13 +2153,11 @@ class Database():
 				return
 
 			for attribute, newValue in zip(attributeList, yieldValue(valueList)):
-				newValue = self.changeForeign(relation, attribute, newValue, oldRows[attribute], updateForeign = updateForeign)
+				if (attribute in oldRows):
+					newValue = self.changeForeign(relation, attribute, newValue, oldRows[attribute], updateForeign = updateForeign)
 				yield attribute, newValue
 
 		#############################################################################
-
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
 				
 		for relation, attributeDict in myTuple.items():
 			if (not isinstance(attributeDict, dict)):
@@ -2085,7 +2186,7 @@ class Database():
 				foreign_attributeList = [index, *self.foreignKeys_catalogue[relation].keys()]
 				selectCommand = f"SELECT {', '.join(foreign_attributeList)} FROM [{relation}] WHERE ({index} IN ({', '.join('?' for item in affected[0])})) ORDER BY {index}"
 				oldRows = self.executeCommand(selectCommand, affected[0], resultKeys = foreign_attributeList, 
-					filterNone = True, relation = relation, checkForeign = False, attributeFirst = True)
+					filterNone = True, relation = relation, checkForeign = False, attributeFirst = True, forceTuple = True, forceAttribute = True)
 				incrementForeign = True
 			else:
 				incrementForeign = False
@@ -2098,7 +2199,7 @@ class Database():
 
 			if (incrementForeign):
 				newRows = self.executeCommand(selectCommand, affected[0], resultKeys = foreign_attributeList, filterNone = True, 
-					relation = relation, checkForeign = False, attributeFirst = True)
+					relation = relation, checkForeign = False, attributeFirst = True, variableLength = True, forceTuple = True, forceAttribute = True)
 
 				for attribute in itertools.islice(foreign_attributeList, 1, None):
 					for old, new in itertools.zip_longest(oldRows[attribute], newRows[attribute]):
@@ -2110,8 +2211,7 @@ class Database():
 						if (new is not None):
 							self.addForeignUse(relation, new, *self.foreignKeys_catalogue[relation][attribute])
 
-			if (applyChanges):
-				self.saveDatabase()
+			self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -2160,11 +2260,7 @@ class Database():
 				self.executeCommand(command, valueList)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -2375,95 +2471,23 @@ class Database():
 				if (orderInfo):
 					command += f" ORDER BY {orderInfo}"
 
-				if (self.isAccess):
-					result = self.executeCommand(command, valueList, resultKeys = attributeList, alias = alias, relation = relation, 
-						formatter = formatValue, returnNull = returnNull, checkForeign = checkForeign, attributeFirst = attributeFirst)
-
-					if (limit is not None):
-						result = {attribute: row[:limit] for attribute, row in result.items()}
-
-					checkForeign = False
-				else:
+	
+				if (self.isSQLite):
 					if (limit is not None):
 						command += " LIMIT {}".format(limit)
 
-					result = self.executeCommand(command, valueList, resultKeys = attributeList, alias = alias, relation = relation, 
-						formatter = formatValue, returnNull = returnNull, checkForeign = checkForeign, attributeFirst = attributeFirst)
+				result = self.executeCommand(command, valueList, filterNone = filterNone, returnNull = returnNull, 
+					resultKeys = attributeList, alias = alias, relation = relation, formatter = formatValue, checkForeign = checkForeign, 
+					attributeFirst = attributeFirst, forceAttribute = forceAttribute, forceTuple = forceTuple, rowsAsList = rowsAsList)
 
-				_forceAttribute = forceAttribute or (len(attributeList) > 1)
-				if (not result):
-					if (not forceMatch):
-						if (attributeFirst):
-							if (_forceAttribute):
-								if (rowsAsList):
-									results_catalogue[relation] = {attribute: [] for attribute in attributeList}
-								else:
-									results_catalogue[relation] = {attribute: {} for attribute in attributeList}
-							else:
-								if (rowsAsList):
-									results_catalogue[relation] = []
-								else:
-									results_catalogue[relation] = {}
-						else:
-							if (_forceAttribute):
-								if (rowsAsList):
-									results_catalogue[relation] = [{}]
-								else:
-									results_catalogue[relation] = {}
-							else:
-								if (rowsAsList):
-									results_catalogue[relation] = []
-								else:
-									results_catalogue[relation] = {}
-						continue
-					result = self.getValue({relation: attributeList}, _nextTo, forceMatch = True, checkForeign = checkForeign, 
-						filterForeign = filterForeign, returnNull = returnNull, **locationKwargs)
-					print(result)
-					jkhhjkj
-					return result
+				if (self.isAccess):
+					if (limit is not None):
+						result = {attribute: row[:limit] for attribute, row in result.items()}
 
-				if (attributeFirst):
-					_forceTuple = forceTuple or (len(next(iter(result.values()), [])) > 1)
-				else:
-					_forceTuple = forceTuple or (len(result) > 1)
+				results_catalogue[relation] = result
 
-				if (attributeFirst):
-					if (_forceTuple):
-						if (_forceAttribute):
-							if (rowsAsList):
-								# results_catalogue[relation] = result # results_catalogue[relation] = {attribute: [value for value in row] for attribute, row in result.items()}
-								results_catalogue[relation] = {**result} # results_catalogue[relation] = {attribute: [value for value in row] for attribute, row in result.items()}
-							else:
-								results_catalogue[relation] = {attribute: {i: value for i, value in enumerate(row)} for attribute, row in result.items()}
-						else:
-							if (rowsAsList):
-								results_catalogue[relation] = list(result.values())[0]
-							else:
-								results_catalogue[relation] = {0: list(result.values())[0]}
-					else:
-						if (_forceAttribute):
-							results_catalogue[relation] = {attribute: row[0] for attribute, row in result.items()}
-						else:
-							results_catalogue[relation] = next(iter(result.values()))[0]
-				else:
-					if (_forceTuple):
-						if (_forceAttribute):
-							if (rowsAsList):
-								# results_catalogue[relation] = result # results_catalogue[relation] = [{attribute: value for attribute, value in row} for row in result]
-								results_catalogue[relation] = result[:] # results_catalogue[relation] = [{attribute: value for attribute, value in row} for row in result]
-							else:
-								results_catalogue[relation] = {i: row for i, row in enumerate(result)}
-						else:
-							results_catalogue[relation] = [next(iter(row.values())) for row in result]
-					else:
-						if (_forceAttribute):
-							results_catalogue[relation] = {**result[0]}
-						else:
-							results_catalogue[relation] = next(iter(result[0].values()))
-
-				# print(result)
 				if (not results_catalogue):
-					print("\nattributeFirst:", attributeFirst, "\n_forceTuple:", _forceTuple, "\n_forceAttribute:", _forceAttribute, "\nrowsAsList:", rowsAsList, "\n")
+					print("\nattributeFirst:", attributeFirst, "\nforceTuple:", forceTuple, "\nforceAttribute:", forceAttribute, "\nrowsAsList:", rowsAsList, "\n")
 					sys.exit()
 				# print(results_catalogue)
 
@@ -2494,6 +2518,23 @@ class Database():
 				for attribute, (foreign_relation, foreign_attribute) in self.foreignKeys_catalogue[relation].items():
 					links[foreign_relation][foreign_attribute][relation].add(attribute)
 		return links
+
+	def renameForeignUse(self, oldUser, newUser):
+		"""Renames the keys given to this relation
+
+		Example Input: renameForeignUse(oldUser, newUser)
+		"""
+
+		removeList = []
+		for _relation in self.yieldKey(None, self.forigenKeys_used):
+			for _attribute in self.yieldKey(None, self.forigenKeys_used[_relation]):
+				for _index in self.yieldKey(None, self.forigenKeys_used[_relation][_attribute]):
+					for _user in self.yieldKey(oldUser, self.forigenKeys_used[_relation][_attribute][_index]):
+						removeList.append((_relation, _attribute, _index, _user))
+						self.forigenKeys_used[_relation][_attribute][_index][newUser] += self.forigenKeys_used[_relation][_attribute][_index][_user]
+
+		for _relation, _attribute, _index, _user in removeList:
+			del self.forigenKeys_used[_relation][_attribute][_index][_user]
 
 	def addForeignUse(self, relation, index, foreign_relation, foreign_attribute, n = 1):
 		"""Marks a forigen key as used in one place.
@@ -2799,11 +2840,7 @@ class Database():
 				n += len(valueList)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 		return n
 
@@ -2953,11 +2990,7 @@ class Database():
 		self.executeCommand(command)
 
 		#Save Changes
-		if (applyChanges is None):
-			applyChanges = self.defaultCommit
-
-		if (applyChanges):
-			self.saveDatabase()
+		self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -3014,11 +3047,7 @@ class Database():
 				self.executeCommand("DROP TRIGGER IF EXISTS [{}]".format(trigger))
 
 			#Save Changes
-			if (applyChanges is None):
-				applyChanges = self.defaultCommit
-
-			if (applyChanges):
-				self.saveDatabase()
+			self.autoSave(applyChanges)
 
 	@wrap_errorCheck()
 	@wrap_connectionCheck()
@@ -3096,6 +3125,10 @@ def test_sqlite():
 		quiet(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
 		quiet(database_API.getValue({"Users": "name"}, forceRelation = True, forceAttribute = True))
 		quiet(database_API.getValue({"Users": "name"}, forceRelation = True))
+	
+		quiet(database_API.getValue({"Other Users": "name"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		quiet(database_API.getValue({"Other Users": "name"}, forceRelation = True, forceAttribute = True))
+		quiet(database_API.getValue({"Other Users": "name"}, forceRelation = True))
 
 		quiet(database_API.getValue({"Users": "name"}, {"name": "Lorem"}))
 		quiet(database_API.getValue({"Users": "name"}, {"name": "Ipsum"}))
@@ -3205,7 +3238,7 @@ def main():
 	"""The main program controller."""
 
 	test_sqlite()
-	test_access()
+	# test_access()
 
 	# filePath = "R:\\Material Log - Database\\Users\\Josh Mayberry\\User Database.mdb"
 	# with build(filePath, resultError_replacement = "!!! Import Error !!!") as myImportDatabase:
