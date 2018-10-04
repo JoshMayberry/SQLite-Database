@@ -25,6 +25,8 @@ import importlib
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
+sessionMaker = sqlalchemy.orm.sessionmaker()
+
 #Required Modules
 ##py -m pip install
 	# sqlite3
@@ -153,6 +155,153 @@ class _set(set):
 	def append(self, *args, **kwargs):
 		return self.add(*args, **kwargs)
 
+#Schema Mixins
+class Schema_Base():
+	defaultRows = ()
+
+	#Context Managers
+	@classmethod
+	@contextlib.contextmanager
+	def makeSession(cls):
+		"""Provides a transactional scope around a series of operations.
+		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
+		"""
+		global sessionMaker
+		
+		session = sessionMaker(bind = cls.metadata.bind)
+		try:
+			yield session
+			session.commit()
+		except:
+			session.rollback()
+			raise
+		finally:
+			session.close()
+
+	@classmethod
+	@contextlib.contextmanager
+	def makeConnection(cls, asTransaction = True):
+
+		connection = cls.metadata.bind.connect()
+		if (asTransaction):
+			transaction = connection.begin()
+			try:
+				yield connection
+				transaction.commit()
+			except:
+				transaction.rollback()
+				raise
+			finally:
+				connection.close()
+		else:
+			try:
+				yield connection
+			except:
+				raise
+			finally:
+				connection.close()
+
+	#Virtual Functions
+	@classmethod
+	def reset(cls):
+		"""Clears all rows and places in default ones."""
+
+		with cls.makeSession() as session:
+			session.query(cls).delete()
+			for catalogue in cls.defaultRows:
+				session.add(cls(**catalogue))
+
+	def change(self, values = {}, **kwargs):
+		for variable, newValue in values.items():
+			setattr(self, variable, newValue)
+
+class Schema_AutoForeign():
+	foreignKeys = {}
+
+	def __init__(self, kwargs = {}):
+		"""Automatically creates tuples for the provided relations if one does not exist.
+		Special thanks to van for how to automatically add children on https://stackoverflow.com/questions/8839211/sqlalchemy-add-child-in-one-to-many-relationship
+		"""
+
+		for variable, relationHandle in self.foreignKeys.items():
+			catalogue = kwargs.pop(variable, None)
+			if (not catalogue):
+				continue
+			if (not isinstance(catalogue, dict)):
+				catalogue = {"label": catalogue}
+
+			with self.makeSession() as session:
+				child = session.query(relationHandle).filter(sqlalchemy.and_(getattr(relationHandle, key) == value for key, value in catalogue.items())).one_or_none()
+				if (child is None):
+					child = relationHandle(**catalogue)
+					session.add(child)
+					session.commit()
+					setattr(self, variable, child)
+				kwargs[f"{variable}_id"] = child.id
+
+	@classmethod
+	def formatForeign(cls, schema):
+		"""Automatically creates the neccissary things to accommodate the foreign keys.
+		Special thanks to Cecil Curry fro the quickest way to get the first item in a set on: https://stackoverflow.com/questions/59825/how-to-retrieve-an-element-from-a-set-without-removing-it
+		
+		Example Input: formatForeign(self.schema)
+		_______________________________________________________________
+
+		Example Usage: 
+			for module in Schema_AutoForeign.__subclasses__():
+				module.formatForeign(hasForeignCatalogue)
+		_______________________________________________________________
+		"""
+
+		cls.foreignKeys = {}
+		for attribute, columnHandle in cls.__mapper__.columns.items():
+			if (attribute.endswith("_id")):
+				assert columnHandle.foreign_keys
+				for foreignKey in columnHandle.foreign_keys: break
+
+				variable = attribute.rstrip('_id')
+				relationHandle = schema[foreignKey._table_key()]
+				cls.foreignKeys[variable] = relationHandle
+
+				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower())) #Many to One
+
+	def change(self, session, values = {}, updateForeign = None, checkForeign = True):
+		"""
+		checkForeign (bool) - Determines if foreign keys will be take in account
+		updateForeign (bool) - Determines what happens to existing foreign keys
+			- If True: Foreign keys will be updated to the new value
+			- If False: A new foreign tuple will be inserted
+			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
+		"""
+
+		if (not checkForeign):
+			super().change(session, values = values)
+
+		for variable, catalogue in values.items():
+			if (variable not in self.foreignKeys):
+				setattr(self, variable, catalogue)
+				continue
+
+			handle = getattr(self, variable)
+			if (not isinstance(catalogue, dict)):
+				catalogue = {"label": catalogue}
+
+			if (handle is None):
+				#I have no foreign key, so I will make a new one
+				child = handle.__class__(**catalogue)
+				session.add(child)
+				setattr(self, variable, child)
+
+			elif (updateForeign or ((updateForeign is None) and (len(getattr(handle, self.__class__.__name__.lower())) is 1))):
+				#I am the only one using this foreign key, so I can change it; I was told to force the change on this foreign key
+				for subVariable, newValue in catalogue.items():
+					setattr(handle, subVariable, newValue)
+			else:
+				#Someone else is using that foreign key, so I will make a new one; I was told to force no change on this foreign key
+				child = handle.__class__(**catalogue)
+				session.add(child)
+				setattr(self, variable, child)
+
 #Controllers
 def build(*args, **kwargs):
 	"""Starts the GUI making process."""
@@ -171,7 +320,50 @@ class Singleton():
 NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
 
-class Database():
+#Utility Classes
+class Utility_Base():
+	#Context Managers
+	@contextlib.contextmanager
+	def makeSession(self):
+		"""Provides a transactional scope around a series of operations.
+		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
+		"""
+		global sessionMaker
+		
+		session = sessionMaker(bind = self.engine)
+		try:
+			yield session
+			session.commit()
+		except:
+			session.rollback()
+			raise
+		finally:
+			session.close()
+
+	@contextlib.contextmanager
+	def makeConnection(self, asTransaction = True):
+
+		connection = self.engine.connect()
+		if (asTransaction):
+			transaction = connection.begin()
+			try:
+				yield connection
+				transaction.commit()
+			except:
+				transaction.rollback()
+				raise
+			finally:
+				connection.close()
+		else:
+			try:
+				yield connection
+			except:
+				raise
+			finally:
+				connection.close()
+
+#Main API
+class Database(Utility_Base):
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 	"""
@@ -190,7 +382,6 @@ class Database():
 		"""
 
 		self.threadLock = threading.RLock()
-		self.sessionMaker = sqlalchemy.orm.sessionmaker()
 		self.TableBase = sqlalchemy.ext.declarative.declarative_base()
 
 		#Internal variables
@@ -226,45 +417,6 @@ class Database():
 		if (traceback is not None):
 			print(exc_type, exc_value)
 			return False
-
-	#Context Managers
-	@contextlib.contextmanager
-	def makeSession(self):
-		"""Provides a transactional scope around a series of operations.
-		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
-		"""
-		
-		session = self.sessionMaker()
-		try:
-			yield session
-			session.commit()
-		except:
-			session.rollback()
-			raise
-		finally:
-			session.close()
-
-	@contextlib.contextmanager
-	def makeConnection(self, asTransaction = True):
-		connection = self.engine.connect()
-
-		if (asTransaction):
-			transaction = connection.begin()
-			try:
-				yield connection
-				transaction.commit()
-			except:
-				transaction.rollback()
-				raise
-			finally:
-				connection.close()
-		else:
-			try:
-				yield connection
-			except:
-				raise
-			finally:
-				connection.close()
 
 	#Cache Functions
 	indexCache = cachetools.LFUCache(maxsize = 10)
@@ -631,8 +783,7 @@ class Database():
 			errorMessage = f"Unknown connection type {connectionType}"
 			raise KeyError(errorMessage)
 
-		self.sessionMaker.configure(bind = self.engine)
-		# self.metadata = sqlalchemy.MetaData(bind = self.engine)
+		sessionMaker.configure(bind = self.engine)
 		self.loadSchema(schemaPath)
 
 	def _fk_pragma_on_connect(self, connection, record):
@@ -856,7 +1007,7 @@ class Database():
 		if (fromSchema):
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
-					parent = getattr(self.schema, relation)
+					parent = self.schema.relationCatalogue[relation]
 					for attributeDict in self.ensure_container(rows):
 						handle = session.add(parent(**attributeDict))
 		else:
@@ -867,10 +1018,11 @@ class Database():
 						connection.execute(table.insert(values = attributeDict))
 
 	@wrap_errorCheck()
-	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, **locationKwargs):
+	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, fromSchema = True, **locationKwargs):
 		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
+		Use: https://stackoverflow.com/questions/9667138/how-to-update-sqlalchemy-row-entry/26920108#26920108
 
 		myTuple (dict)   - What will be written to the tuple. {relation: attribute to change} or {relation: {attribute to change: value}}
 		nextTo (dict)    - An attribute-value pair that is in the same tuple. {attribute next to one to change: value of this attribute}
@@ -900,6 +1052,26 @@ class Database():
 		"""
 
 		print("@changeTuple.1", myTuple, nextTo)
+
+		if (fromSchema):
+			with self.makeSession() as session:
+				for relation, rows in myTuple.items():
+					parent = self.schema.relationCatalogue[relation]
+					for attributeDict in self.ensure_container(rows):
+						query = session.query(parent)
+						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						for row in query.all():
+							row.change(session, values = attributeDict, updateForeign = updateForeign)
+		else:
+			with self.makeConnection(asTransaction = True) as connection:
+				for relation, rows in myTuple.items():
+					table = self.metadata.tables[relation]
+					for attributeDict in self.ensure_container(rows):
+						#Does not handle foreign keys
+						query = table.update(values = attributeDict)
+						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						connection.execute(query)
+
 
 	@wrap_errorCheck()
 	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, updateForeign = True, incrementForeign = True, **locationKwargs):
@@ -1082,7 +1254,7 @@ class Database():
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
 				if (fromSchema):
-					schema = getattr(self.schema, relation)
+					schema = self.schema.relationCatalogue[relation]
 					handle = connection.query(schema)
 				else:
 					table = self.metadata.tables[relation]
@@ -1243,12 +1415,13 @@ def sandbox():
 	database_API.createRelation()
 	database_API.resetRelation()
 
-	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "jobNumber": 1234}, {"label": "ipsum", "jobNumber": 1234})})
-	print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
-	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
 
-	# database_API.changeTuple({"Containers": {"jobNumber": 5678}}, {"label": "lorem"})
+	database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
 	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
 
 

@@ -1,59 +1,12 @@
 import sys
-import contextlib
-
 import sqlalchemy
 import sqlalchemy.ext.declarative
 
 from datetime import datetime
 
-sessionMaker = sqlalchemy.orm.sessionmaker()
+import API_Database as Database
+
 Mapper = sqlalchemy.ext.declarative.declarative_base()
-
-#Utility Mixins
-class Utility_Base():
-	#Context Managers
-	@classmethod
-	@contextlib.contextmanager
-	def makeSession(cls):
-		"""Provides a transactional scope around a series of operations.
-		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
-		"""
-		global sessionMaker
-		
-		session = sessionMaker(bind = cls.metadata.bind)
-		try:
-			yield session
-			session.commit()
-		except:
-			session.rollback()
-			raise
-		finally:
-			session.close()
-
-	#Virtual Functions
-	@classmethod
-	def reset(cls):
-		pass
-
-class Utility_AutoForeign():
-	def __init__(self, kwargs = {}, **foreignKeys):
-		"""Automatically creates tuples for the provided relations if one does not exist.
-		Special thanks to van for how to automatically add children on https://stackoverflow.com/questions/8839211/sqlalchemy-add-child-in-one-to-many-relationship
-		"""
-
-		for variable, (relationHandle, label, index, catalogue) in foreignKeys.items():
-			# print("@Utility_AutoForeign.1", variable, (relationHandle, label, catalogue))
-			if (label is None):
-				continue
-
-			with self.makeSession() as session:
-				job = session.query(relationHandle).filter(relationHandle.label == label).one_or_none()
-				if (job is None):
-					job = relationHandle(label = label)
-					session.add(job)
-					session.commit()
-					catalogue.append(job)
-				kwargs[index] = job.id
 
 #Mapper Mixins
 class _Date():
@@ -107,13 +60,21 @@ class _Setting(_Date):
 	comments._creation_order = 1500
 
 #Tables - Choices
-class Choices_Color(Mapper, _Choice, Utility_Base):
+class Choices_Color(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Color'
 
-class Choices_Container(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "n/a"},
+	)
+
+class Choices_Container(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Container'
 
-class Choices_Customer(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "n/a"},
+	)
+
+class Choices_Customer(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Customer'
 
 	phone 				= sqlalchemy.Column(sqlalchemy.String(250))
@@ -124,36 +85,50 @@ class Choices_Customer(Mapper, _Choice, Utility_Base):
 	address._creation_order = 101
 	order_catalogue._creation_order = 102
 
-class Choices_DMTE_Contact(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "unknown"},
+	)
+
+class Choices_DMTE_Contact(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_DMTE_Contact'
 	
 	phone 				= sqlalchemy.Column(sqlalchemy.String(250))
 	
 	phone._creation_order = 100
 
-class Choices_Item(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "unknown"},
+	)
+
+class Choices_Item(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Item'
 
-class Choices_Job(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "unknown"},
+	)
+
+class Choices_Job(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Job'
 
-	# containers = sqlalchemy.orm.relationship("Containers", back_populates = "jobNumber")
+	defaultRows = (
+		{"id": 0, "label": "unknown"},
+	)
 
-	@classmethod
-	def reset(cls):
-		"""Clears all jobs and places in default ones."""
-
-		with cls.makeSession() as session:
-			session.query(cls).delete()
-			session.add(cls(id = 1, label = "unknown"))
-
-class Choices_Material(Mapper, _Choice, Utility_Base):
+class Choices_Material(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Material'
 
-class Choices_Supplier(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "n/a"},
+	)
+
+class Choices_Supplier(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Supplier'
 
-class Choices_Vendor(Mapper, _Choice, Utility_Base):
+	defaultRows = (
+		{"id": 0, "label": "n/a"},
+	)
+
+class Choices_Vendor(Mapper, _Choice, Database.Schema_Base):
 	__tablename__ = 'Choices_Vendor'
 
 	phone 				= sqlalchemy.Column(sqlalchemy.String(250))
@@ -164,8 +139,12 @@ class Choices_Vendor(Mapper, _Choice, Utility_Base):
 	address._creation_order = 101
 	product_catalogue._creation_order = 102
 
+	defaultRows = (
+		{"id": 0, "label": "n/a"},
+	)
+
 #Tables - Settings
-class Constructor_VariableNames(Mapper, Utility_Base):
+class Constructor_VariableNames(Mapper, Database.Schema_Base):
 	__tablename__ = 'Constructor_VariableNames'
 
 	id 						= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, nullable = False, unique = True)
@@ -192,46 +171,184 @@ class Constructor_VariableNames(Mapper, Utility_Base):
 	search_defaultSearchBy._creation_order = 10
 	search_defaultOrderBy._creation_order = 11
 
-class DatabaseInfo(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"id": 0, "table": "unknown"},
+		{"table": "Users", 					"filterName": "user", 					"defaultName": "User", 				"defaultChild": "guest"},
+		{"table": "Containers", 			"filterName": "container", 				"defaultName": "Container", 		"inventoryTitle": "Containers", 	"constructor_order": 1, 	"defaultExport": True},
+		
+		{"table": "Choices_Job", 			"filterName": "choice_job", 			"defaultName": "Job", 				"inventoryTitle": "Jobs", 			"constructor_order": 2},
+		{"table": "Choices_Customer", 		"filterName": "choice_customer", 		"defaultName": "Customer", 			"inventoryTitle": "Customers", 		"constructor_order": 3},
+		{"table": "Choices_Vendor", 		"filterName": "choice_vendor", 			"defaultName": "Vendor", 			"inventoryTitle": "Vendors", 		"constructor_order": 4},
+		{"table": "Choices_Container", 		"filterName": "choice_container", 		"defaultName": "Container Type"},
+		{"table": "Choices_Item", 			"filterName": "choice_item", 			"defaultName": "Contents Type"},
+		{"table": "Choices_DMTE_Contact", 	"filterName": "choice_dmte_contact", 	"defaultName": "DMTE Contact"},
+		{"table": "Choices_Material", 		"filterName": "choice_material", 		"defaultName": "Material"},
+		{"table": "Choices_Supplier", 		"filterName": "choice_supplier", 		"defaultName": "Supplier"},
+		{"table": "Choices_Color", 			"filterName": "choice_color", 			"defaultName": "Color"},
+		
+		{"table": "Settings_ChangeLog", 	"filterName": "setting_changeLog"},
+		{"table": "Settings_BugReport", 	"filterName": "setting_bugReport"},
+		{"table": "Settings_Converter", 	"filterName": "setting_converter"},
+		{"table": "Settings_Comparer", 		"filterName": "setting_comparer"},
+		{"table": "Settings_AutoSave", 		"filterName": "setting_autoSave"},
+		{"table": "Settings_Scanner", 		"filterName": "setting_scanner"},
+		{"table": "Settings_Frames", 		"filterName": "setting_frame"},
+		{"table": "Settings_Barcode", 		"filterName": "setting_barcode"},
+	)
+
+class DatabaseInfo(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'DatabaseInfo'
 
-class Settings_AutoSave(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "programVersion", "value": "2.1.0", "comments": "The program release version this was built for"},
+		{"label": "barcodeVersion", "value": "1.1.0", "comments": "The barcode version used in this program"},
+	)
+
+class Settings_AutoSave(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_AutoSave'
 
-class Settings_Barcode(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "save_autoSave", "value": 1, "comments": "-- deprecated --"},
+		{"label": "save_autoCommit", "value": 1, "comments": "-- deprecated --"},
+		{"label": "save_autoSave_scanDelay", "value": 100, "comments": "-- deprecated --"},
+		
+		{"label": "save_importDelay", "value": 0, "comments": "-- deprecated --"},
+		{"label": "save_autoSave_importDelay", "value": 0, "comments": "-- deprecated --"},
+		
+		{"label": "save_saveStatus_scanDelay", "value": 100, "comments": "How long to wait between checking the save status of the database"},
+		
+		{"label": "save_multiProcess_retryAttempts", "value": -1, "comments": "Determines how many times to try executing a command if another process is using the database\n0 or None: Do not retry\n-1: Retry forever"},
+		{"label": "save_multiProcess_retryDelay", "value": 100, "comments": "How many milli-seconds to wait before trying to to execute a command again"},
+	)
+
+class Settings_Barcode(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Barcode'
 
-class Settings_BugReport(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "barcodeType", "value": "qr", "comments": "What type of barcode to create/read"},
+		{"label": "barcodeKey_barcodeVersion", "value": "*", "comments": "What key to use for the barcode version"},
+		{"label": "barcodeKey_barcodeName", "value": "@", "comments": "What key to use for what handle to search in"},
+	)
+
+class Settings_BugReport(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_BugReport'
 
-class Settings_ChangeLog(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "email_fromAddress", "value": "material.tracker@decaturmold.com", "comments": "The email to send the bug report from"},
+		{"label": "email_fromPassword", "value": "f@tfr3ddy$c@t", "comments": "The password for the email to send the bug report from"},
+		{"label": "email_to", "value": "josh.mayberry@decaturmold.com", "comments": "The email to send the bug report to"},
+		
+		{"label": "attach_errorLog", "value": 1, "comments": "If the error log should be attached to the bug report"},
+		{"label": "server", "value": "194.2.1.1", "comments": "What server to send the email from"},
+		{"label": "port", "value": 587, "comments": "What port to send the email from"},
+	)
+
+class Settings_ChangeLog(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_ChangeLog'
 
-class Settings_Comparer(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "filePath", "value": "_CHANGELOG.md", "comments": "The path to the changelog file"},
+	)
+
+class Settings_Comparer(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Comparer'
 
-class Settings_Container(Mapper, _Setting, Utility_Base):
+class Settings_Container(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Container'
 
-class Settings_Converter(Mapper, _Setting, Utility_Base):
+class Settings_Converter(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Converter'
 
-class Settings_Filter(Mapper, _Setting, Utility_Base):
+class Settings_Filter(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Filter'
 
-class Settings_General(Mapper, _Setting, Utility_Base):
+class Settings_General(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_General'
 
-class Settings_Inventory(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "startup_user", "value": "Admin", "comments": "What user will be logged in when the program first launches"},
+		{"label": "autoLogout", "value": -1, "comments": "How long to wait in seconds before the current user is logged out.\n-1: Disable Feature"},
+		{"label": "startup_window", "value": "Inventory", "comments": "What window will show up when the program first launches"},
+		{"label": "debugging_default", "value": None, "comments": ""},
+		{"label": "debugging_enabled", "value": 1, "comments": ""},
+		{"label": "toolTip_delayAppear", "value": 0, "comments": ""},
+		{"label": "toolTip_delayDisappear", "value": 6000, "comments": ""},
+		{"label": "toolTip_delayReappear", "value": 500, "comments": ""},
+		{"label": "toolTip_enabled", "value": 1, "comments": ""},
+		{"label": "save_backup", "value": 0, "comments": ""},
+		{"label": "debugging_lastState", "value": 1, "comments": ""},
+		{"label": "frameSetting_saveDelay", "value": 3000, "comments": ""},
+	)
+
+class Settings_Inventory(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Inventory'
 
-class Settings_Printer(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "export_excelFileName", "value": "inventory", "comments": ""},
+		{"label": "inventory_startup_table", "value": "--Last Opened--", "comments": ""},
+		{"label": "inventory_currentTable", "value": "['container', True, False, None]", "comments": ""},
+		{"label": "inventory_search_caseSensitive", "value": 0, "comments": ""},
+		{"label": "inventory_search_useWildcards", "value": 0, "comments": ""},
+		{"label": "inventory_showArchived", "value": 1, "comments": ""},
+		{"label": "inventory_startup_listFull_collapseState", "value": 1, "comments": ""},
+		{"label": "inventory_currentTable_saveDelay", "value": 1000, "comments": ""},
+	)
+
+class Settings_Printer(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Printer'
 
-class Settings_Scanner(Mapper, _Setting, Utility_Base):
+	defaultRows = (
+		{"label": "printer_showSetup", "value": 0, "comments": ""},
+		{"label": "printer_showPreview", "value": 1, "comments": ""},
+		{"label": "printer_color", "value": 1, "comments": ""},
+		{"label": "printer_file", "value": "", "comments": ""},
+		{"label": "printer_paperSize", "value": "(215, 279)", "comments": ""},
+		{"label": "printer_printerName", "value": "KONICA MINOLTA C658SeriesPCL", "comments": ""},
+		{"label": "printer_bin", "value": "auto", "comments": ""},
+		{"label": "printer_duplex", "value": None, "comments": ""},
+		{"label": "printer_quality", "value": 600, "comments": ""},
+		{"label": "printer_paperId", "value": "Letter; 8 1/2 by 11 in", "comments": ""},
+		{"label": "printer_printMode", "value": "Send to printer", "comments": ""},
+		{"label": "printer_vertical", "value": 1, "comments": ""},
+		{"label": "printer_collate", "value": 0, "comments": ""},
+		{"label": "printer_min", "value": 0, "comments": ""},
+		{"label": "printer_max", "value": 0, "comments": ""},
+		{"label": "printer_copies", "value": 1, "comments": ""},
+		{"label": "printer_printToFile", "value": 0, "comments": ""},
+		{"label": "printer_selected", "value": 0, "comments": ""},
+		{"label": "printer_printAll", "value": 1, "comments": ""},
+		{"label": "printer_from", "value": 0, "comments": ""},
+		{"label": "printer_to", "value": 0, "comments": ""},
+	)
+
+class Settings_Scanner(Mapper, _Setting, Database.Schema_Base):
 	__tablename__ = 'Settings_Scanner'
 
-class Settings_Frames(Mapper, _Date, Utility_Base):
+	defaultRows = (
+		{"label": "scanner_id", "value": "0000000927C4", "comments": ""},
+		{"label": "barcodeType", "value": "qr", "comments": ""},
+		{"label": "disableOnError", "value": 1, "comments": ""},
+		{"label": "connectDelay", "value": 1000, "comments": ""},
+		{"label": "connectAttempts", "value": 10, "comments": ""},
+		{"label": "modifyBarcodeOverride", "value": 1, "comments": ""},
+		{"label": "readLength", "value": 10000, "comments": ""},
+		{"label": "timeout", "value": 1000, "comments": ""},
+		{"label": "enableScanner_default", "value": None, "comments": ""},
+		{"label": "enableScanner", "value": 0, "comments": ""},
+		{"label": "connect_flushRecieve", "value": 1, "comments": ""},
+		{"label": "connect_flushSend", "value": 1, "comments": ""},
+		{"label": "unknownDelay", "value": 30, "comments": ""},
+		{"label": "defaultReason", "value": "Weight", "comments": ""},
+		{"label": "confirmRemove", "value": 1, "comments": ""},
+		{"label": "functionKeys_requireScan", "value": 0, "comments": ""},
+		{"label": "usb_vendorId", "value": 1529, "comments": ""},
+		{"label": "usb_productId", "value": 16900, "comments": ""},
+		{"label": "autoPrint_changeLocation", "value": 1, "comments": ""},
+		{"label": "printDelay", "value": 100, "comments": ""},
+		{"label": "importDelay", "value": 2000, "comments": ""},
+	)
+
+class Settings_Frames(Mapper, _Date, Database.Schema_Base):
 	__tablename__ = 'Settings_Frames'
 
 	id 						= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, nullable = False, unique = True)
@@ -250,11 +367,27 @@ class Settings_Frames(Mapper, _Date, Utility_Base):
 	sash_position._creation_order = 6
 	defaultStatus_label._creation_order = 7
 
-class Users(Mapper, _Date, Utility_Base):
+	defaultRows = (
+		{"label": "inventory", 			"title": "Inventory", 			"size": "(1563, 578)", 	"position": "(1719, 76)", 	"defaultStatus_label": "Current User"},
+		{"label": "settings", 			"title": "Settings", 			"size": "(712, 696)", 	"position": "(682, 81)", 	"defaultStatus_label": "Current User"},
+		{"label": "login", 				"title": "Login", 				"size": None, 			"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "changePassword", 	"title": "Change Password", 	"size": None, 			"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "modifyBarcode", 		"title": "Modify Barcode", 		"size": "(686, 225)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "testScanner", 		"title": "Test Scanner", 		"size": "(2061, 146)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "showLocation", 		"title": "Show Location", 		"size": "(216, 111)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "externalFiles", 		"title": "External Files", 		"size": "(603, 304)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "filterSettings", 	"title": "Filter Settings", 	"size": "(2225, 303)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "advancedSearch", 	"title": "Advanced Search", 	"size": "(68, 44)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "finalRemove", 		"title": "Pending Removals", 	"size": "(511, 155)", 	"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "bugReport", 			"title": "Bug Report", 			"size": None, 			"position": None, 			"defaultStatus_label": "Current User"},
+		{"label": "changeLog", 			"title": "Change Log", 			"size": "(483, 537)", 	"position": "(68, 44)", 	"defaultStatus_label": "Current User"},
+	)
+
+class Users(Mapper, _Date, Database.Schema_Base):
 	__tablename__ = 'Users'
 	id 				= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, nullable = False, unique = True)
 	label 			= sqlalchemy.Column(sqlalchemy.String(250), unique = True, nullable = False)
-	password 		= sqlalchemy.Column(sqlalchemy.String(250), nullable = False)
+	password 		= sqlalchemy.Column(sqlalchemy.String(250))
 	removePending 	= sqlalchemy.Column(sqlalchemy.Boolean(), default = False)
 
 	inventory_addJob 			= sqlalchemy.Column(sqlalchemy.Boolean(), default = False)
@@ -281,9 +414,13 @@ class Users(Mapper, _Date, Utility_Base):
 	viewTrackedChange 			= sqlalchemy.Column(sqlalchemy.Boolean(), default = True)
 	search_changeSettings 		= sqlalchemy.Column(sqlalchemy.Boolean(), default = True)
 
+	defaultRows = (
+		{"id": 0, "label": "guest"},
+		{"label": "admin", "password": "Admin", **{key: True for key, value in locals().items() if (isinstance(value, sqlalchemy.Column) and (key not in {"id", "label", "password", "removePending"}))}}
+	)
 
 #Tables - Main
-class Containers(Mapper, _Editable, _Files, Utility_AutoForeign, Utility_Base):
+class Containers(Mapper, _Editable, _Files, Database.Schema_AutoForeign, Database.Schema_Base):#, metaclass = AutoForeign_meta):
 	__tablename__ = 'Containers'
 
 	id 				= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, nullable = False, unique = True)
@@ -300,17 +437,14 @@ class Containers(Mapper, _Editable, _Files, Utility_AutoForeign, Utility_Base):
 	orderableBy 	= sqlalchemy.Column(sqlalchemy.String(250))
 	comments 		= sqlalchemy.Column(sqlalchemy.String(250))
 	
-	# jobNumber 		= sqlalchemy.Column(sqlalchemy.String(250), default = 1)
-	jobNumber_id 	= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey("Choices_Job.id", onupdate = "CASCADE", ondelete = "SET NULL"), default = 1)
-	type 			= sqlalchemy.Column(sqlalchemy.String(250))
-	material 		= sqlalchemy.Column(sqlalchemy.String(250))
-	color 			= sqlalchemy.Column(sqlalchemy.String(250))
-	item_type 		= sqlalchemy.Column(sqlalchemy.String(250))
-	vendor 			= sqlalchemy.Column(sqlalchemy.String(250))
-	customer 		= sqlalchemy.Column(sqlalchemy.String(250))
-	dmte_contact 	= sqlalchemy.Column(sqlalchemy.String(250))
-
-	jobNumber_catalogue = sqlalchemy.orm.relationship(Choices_Job, backref = "containers", uselist=True)
+	job_id 				= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Job.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	item_type_id 		= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Item.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	color_id 			= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Color.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	vendor_id 			= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Vendor.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	material_id 		= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Material.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	customer_id 		= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Customer.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	type_id 			= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_Container.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
+	dmte_contact_id 	= sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey(Choices_DMTE_Contact.id, onupdate = "CASCADE", ondelete = "SET NULL"), default = 0)
 
 	id._creation_order = 1
 	label._creation_order = 3
@@ -326,21 +460,24 @@ class Containers(Mapper, _Editable, _Files, Utility_AutoForeign, Utility_Base):
 	orderableBy._creation_order = 20
 	comments._creation_order = 21
 
-	jobNumber_id._creation_order = 2
-	type._creation_order = 8
-	material._creation_order = 9
-	color._creation_order = 10
-	item_type._creation_order = 11
-	vendor._creation_order = 12
-	customer._creation_order = 13
-	dmte_contact._creation_order = 14
+	job_id._creation_order = 2
+	type_id._creation_order = 8
+	material_id._creation_order = 9
+	color_id._creation_order = 10
+	item_type_id._creation_order = 11
+	vendor_id._creation_order = 12
+	customer_id._creation_order = 13
+	dmte_contact_id._creation_order = 14
 
-	def __init__(self, *args, jobNumber = None, **kwargs):
-		Utility_AutoForeign.__init__(self, jobNumber = (Choices_Job, jobNumber, "jobNumber_id", self.jobNumber_catalogue), kwargs = kwargs)
+	def __init__(self, **kwargs):
+		Database.Schema_AutoForeign.__init__(self, kwargs = kwargs)
+		super().__init__(**kwargs)
 
-		super().__init__(*args, **kwargs)
+relationCatalogue = {item.__name__: item for item in Database.Schema_Base.__subclasses__()}
+hasForeignCatalogue = {item.__name__: item for item in Database.Schema_AutoForeign.__subclasses__()}
 
-relationCatalogue = {item.__name__: item for item in Utility_Base.__subclasses__()}
+for module in hasForeignCatalogue.values():
+	module.formatForeign(relationCatalogue)
 
 if __name__ == '__main__':
 	engine = sqlalchemy.create_engine('sqlite:///test_map_example.db')
@@ -348,20 +485,34 @@ if __name__ == '__main__':
 
 	Mapper.metadata.drop_all()
 	Mapper.metadata.create_all()
+	for relationHandle in relationCatalogue.values():
+		relationHandle.reset()
 	# inspector = sqlalchemy.inspect(engine)
 	# print(inspector.get_table_names())
 
-	Choices_Job.reset()
 
+	sessionMaker = sqlalchemy.orm.sessionmaker()
 	DBSession = sqlalchemy.orm.sessionmaker(bind = engine)
 	session = DBSession()
 
-	newContainer = Containers(label = "lorem", jobNumber = 12345, poNumber = 123)
+	newContainer = Containers(label = "lorem", job = 12345, poNumber = 123)
 	session.add(newContainer)
 	session.commit()
 
-	container = session.query(Containers).filter(Containers.poNumber == 123).first()
-	print(container.jobNumber_id, container.jobNumber_catalogue)
+	# container = session.query(Containers).filter(Containers.poNumber == 123).first()
+	# print(container, container.job.label)
+
+	query = session.query(Containers)
+	query = query.join(Containers.job)
+	# query = query.filter(Containers.job.has(label = 12345))
+	query = query.filter_by(label = 12345)
+
+	# print(session.query(Containers).filter(Containers.job.label == "12345"))
+	container = query.first()
+	print(container)
+
+	# for item in dir(Containers):
+	# 	print(item)
 
 
 	# import time
