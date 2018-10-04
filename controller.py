@@ -676,11 +676,24 @@ class Database(Utility_Base):
 			locationFunction = handle.where
 
 		if (nextToCondition):
-			handle = locationFunction(sqlalchemy.and_(*yieldLocation()))
+			return locationFunction(sqlalchemy.and_(*yieldLocation()))
 		else:
-			handle = locationFunction(sqlalchemy.or_(*yieldLocation()))
+			return locationFunction(sqlalchemy.or_(*yieldLocation()))
 
-		return handle
+	def configureOrder(self, handle, relation, orderBy = None, direction = None, nullFirst = None):
+		_orderBy = sqlalchemy.text(orderBy or self.getPrimaryKey(relation))
+		if (direction is not None):
+			if (direction):
+				_orderBy = sqlalchemy.asc(_orderBy)
+			else:
+				_orderBy = sqlalchemy.desc(_orderBy)
+		
+			# if (nullFirst is not None):
+			# 	if (nullFirst):
+			# 		_orderBy = _orderBy.nullsfirst()
+			# 	else:
+			# 		_orderBy = _orderBy.nullslast()
+		return handle.order_by(_orderBy)
 
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
@@ -1051,8 +1064,6 @@ class Database(Utility_Base):
 		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
 
-		print("@changeTuple.1", myTuple, nextTo)
-
 		if (fromSchema):
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
@@ -1074,10 +1085,9 @@ class Database(Utility_Base):
 
 
 	@wrap_errorCheck()
-	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, updateForeign = True, incrementForeign = True, **locationKwargs):
+	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = True, **locationKwargs):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
-		WARNING: Does not currently look for forigen keys.
 
 		myTuple (dict) - What will be removed. {relation: attribute: value to look for to delete the row}
 		like (dict)    - Flags things to search for something containing the item- not exactly like it. {relation: attribute: (bool) True or False}
@@ -1091,10 +1101,10 @@ class Database(Utility_Base):
 		applyChanges (bool)  - Determines if the database will be saved after the change is made
 			- If None: The default flag set upon opening the database will be used
 		checkForeign (bool) - Determines if foreign keys will be take in account
-		updateForeign (bool) - Determines what happens to existing foreign keys
-			- If True: Foreign keys will be updated to the new value
-			- If False: A new foreign tuple will be inserted
-			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
+		removeForeign (bool) - Determines what happens to existing foreign keys
+			- If True: Foreign keys will be removed also
+			- If False: Foreign keys will be left alone
+			- If None: A foreign key will be removed if only one item is linked to it, otherwise it will be left alone
 		exclude (list)       - A list of tables to exclude from the 'updateForeign' check
 
 		Example Input: removeTuple({"Users": {"name": "John"}})
@@ -1102,6 +1112,23 @@ class Database(Utility_Base):
 		Example Input: removeTuple({"Users": {"name": "John", "age": 26}})
 		Example Input: removeTuple({"Users": {"name": "John"}}, like = {"Users": {"email": "@gmail.com"}})
 		"""
+
+		if (fromSchema):
+			with self.makeSession() as session:
+				for relation, rows in myTuple.items():
+					parent = self.schema.relationCatalogue[relation]
+					for nextTo in self.ensure_container(rows):
+						query = session.query(parent)
+						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						query.delete()
+		else:
+			with self.makeConnection(asTransaction = True) as connection:
+				for relation, rows in myTuple.items():
+					table = self.metadata.tables[relation]
+					for nextTo in self.ensure_container(rows):
+						query = table.delete()
+						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						connection.execute(query)
 
 	@wrap_errorCheck()
 	def getAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
@@ -1136,6 +1163,7 @@ class Database(Utility_Base):
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
 		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
+		Use: https://stackoverflow.com/questions/11530196/flask-sqlalchemy-query-specify-column-names/45905714#45905714
 
 		myTuple (dict)   - What to return {relation: attribute}
 			- A list of attributes can be returned: {relation: [attribute 1, attribute 2]}
@@ -1242,66 +1270,101 @@ class Database(Utility_Base):
 		Example Input: getValue({"Users": None}, {"age": 24})
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
+		# startTime = time.perf_counter()
+		
+		exclude = self.ensure_container(exclude)
 
-		startTime = time.perf_counter()
+		def yieldColumn(schema, relation, attributeList):
+			nonlocal self, exclude
+
+			#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+			for attribute in self.ensure_container(attributeList) or self.getAttributeNames(relation):
+				if (attribute in exclude):
+					continue
+
+				columnHandle = getattr(schema, attribute)
+
+				if (alias and (attribute in alias)):
+					columnHandle = columnHandle.label(alias[attribute])
+
+				yield columnHandle
 
 		if (fromSchema):
 			contextmanager = self.makeSession()
+			
+			def startQuery(relation, attributeList):
+				nonlocal self
+
+				schema = self.schema.relationCatalogue[relation]
+				query = connection.query(*yieldColumn(schema, relation, attributeList))
+
+				return schema, query
+
+			def yieldRow(query):
+				nonlocal count
+
+				if (count):
+					yield (query.count(),)
+					return
+
+				for result in query.all():
+					if (forceAttribute or (len(result) > 1)):
+						yield result._asdict()
+					else:
+						yield result[0]
 		else:
 			contextmanager = self.makeConnection(asTransaction = True)
+			
+			def startQuery(relation, attributeList):
+				nonlocal self
+
+				schema = self.metadata.tables[relation].columns
+				query = sqlalchemy.select(columns = yieldColumn(schema, relation, attributeList))
+
+				return schema, query
+
+			def yieldRow(query):
+				for result in connection.execute(query).fetchall():
+					if (forceAttribute or (len(result) > 1)):
+						yield dict(result)
+					else:
+						yield result[0]
+
+		def getResult(query, connection):
+			nonlocal forceTuple
+
+			answer = tuple(yieldRow(query))
+			if (not answer):
+				return ()
+			elif (forceTuple or (len(answer) > 1)):
+				return answer
+			else:
+				return answer[0]
+
+		########################################################################
 
 		results_catalogue = {}
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
-				if (fromSchema):
-					schema = self.schema.relationCatalogue[relation]
-					handle = connection.query(schema)
-				else:
-					table = self.metadata.tables[relation]
-					handle = table.select()
-					schema = table.columns
+				schema, query = startQuery(relation, attributeList)
 
-				selectAll = attributeList is None
-				if (selectAll):
-					attributeList = self.getAttributeNames(relation, exclude = exclude)
-				else:
-					exclude = self.ensure_container(exclude)
-					attributeList = tuple(attribute for attribute in self.ensure_container(attributeList) if (attribute not in exclude))
-
-				_orderBy = sqlalchemy.text(orderBy or self.getPrimaryKey(relation))
-				if (direction is not None):
-					if (direction):
-						_orderBy = sqlalchemy.asc(_orderBy)
-					else:
-						_orderBy = sqlalchemy.desc(_orderBy)
-				
-					# if (nullFirst is not None):
-					# 	if (nullFirst):
-					# 		_orderBy = _orderBy.nullsfirst()
-					# 	else:
-					# 		_orderBy = _orderBy.nullslast()
-				handle = handle.order_by(_orderBy)
-
-				if (not includeDuplicates):
-					handle = handle.distinct()
-
-				handle = self.configureLocation(handle, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+				query = self.configureOrder(query, relation, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+				query = self.configureLocation(query, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
 				if (limit is not None):
-					handle = handle.limit(limit)
+					query = query.limit(limit)
+				if (not includeDuplicates):
+					query = query.distinct()
+				if (count and (not fromSchema)):
+					query = query.count()
 
-				if (fromSchema):
-					if (count):
-						results_catalogue[relation] = handle.count()
-					else:
-						results_catalogue[relation] = tuple(handle)
-				else:
-					if (count):
-						handle = handle.count()
-					results_catalogue[relation] = tuple(connection.execute(handle))
+				results_catalogue[relation] = getResult(query, connection)
+		
+		# print(f"@getValue.9", fromSchema, f"{time.perf_counter() - startTime:.6f}")
 
-		print(f"@getValue.9", f"{time.perf_counter() - startTime:.6f}")
-		return results_catalogue
+		if (forceRelation or (len(myTuple) > 1)):
+			return results_catalogue
+		return results_catalogue[relation]
 
 	@wrap_errorCheck()
 	def createTrigger(self, label, relation,
@@ -1415,14 +1478,39 @@ def sandbox():
 	database_API.createRelation()
 	database_API.resetRelation()
 
+	#Add Items
 	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+	database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+	
+	# #Get Items
+	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
+	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
 	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
-	# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
-	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
 
-	database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
-	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
+	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
+
+	# #Change Items
+	# print(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
+	# print(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	
+	#Remove Items
+	# database_API.removeTuple({"Containers": {"label": "dolor"}})
+	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+
+	database_API.removeTuple({"Containers": {"label": "sit"}})
+	# print(database_API.getValue({"Containers": ("label", "weight_total")}))
+
 
 
 
