@@ -155,8 +155,68 @@ class _set(set):
 	def append(self, *args, **kwargs):
 		return self.add(*args, **kwargs)
 
+class Base():
+	@classmethod
+	def ensure_set(cls, item, convertNone = False):
+		"""Makes sure the given item is a set.
+
+		Example Input: ensure_set(exclude)
+		Example Input: ensure_set(exclude, convertNone = True)
+		"""
+
+		if (item is not None):
+			if (isinstance(item, (str, int, float))):
+				return {item}
+			elif (not isinstance(item, set)):
+				return set(item)
+			return item
+
+		if (convertNone):
+			return set()
+
+	@classmethod
+	def ensure_list(cls, item, convertNone = False):
+		"""Makes sure the given item is a list.
+
+		Example Input: ensure_list(exclude)
+		Example Input: ensure_list(exclude, convertNone = True)
+		"""
+
+		if (item is not None):
+			if (isinstance(item, (str, int, float))):
+				return [item]
+			elif (not isinstance(item, list)):
+				return list(item)
+			return item
+
+		if (convertNone):
+			return []
+
+	@classmethod
+	def ensure_container(cls, item, evaluateGenerator = True, convertNone = False):
+		"""Makes sure the given item is a container.
+
+		Example Input: ensure_container(valueList)
+		Example Input: ensure_container(valueList, convertNone = True)
+		Example Input: ensure_container(valueList, evaluateGenerator = False)
+		"""
+
+		if (item is None):
+			if (convertNone):
+				return (None,)
+			return ()
+		
+		if (isinstance(item, (str, int, float, dict))):
+			return (item,)
+
+		if (not isinstance(item, (list, tuple, set))):
+			if (evaluateGenerator):
+				return tuple(item)
+			return item
+		return item
+
 #Schema Mixins
-class Schema_Base():
+class Schema_Base(Base):
 	defaultRows = ()
 
 	#Context Managers
@@ -211,6 +271,24 @@ class Schema_Base():
 			for catalogue in cls.defaultRows:
 				session.add(cls(**catalogue))
 
+	@classmethod
+	def yieldColumn(cls, attributeList, exclude, alias):
+		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		for attribute in attributeList:
+			for answer in cls._yieldColumn_noForeign(attribute, exclude, alias):
+				yield answer
+
+	@classmethod
+	def _yieldColumn_noForeign(cls, attribute, exclude, alias):
+		if (attribute in exclude):
+			return
+
+		columnHandle = getattr(cls, attribute)
+		if (alias and (attribute in alias)):
+			columnHandle = columnHandle.label(alias[attribute])
+		yield columnHandle
+
 	def change(self, values = {}, **kwargs):
 		for variable, newValue in values.items():
 			setattr(self, variable, newValue)
@@ -263,7 +341,43 @@ class Schema_AutoForeign():
 				relationHandle = schema[foreignKey._table_key()]
 				cls.foreignKeys[variable] = relationHandle
 
-				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower())) #Many to One
+				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower())) #Many to One 
+				#cascade="all, delete, delete-orphan" #https://docs.sqlalchemy.org/en/latest/orm/tutorial.html
+
+	# @classmethod
+	# def _yieldColumn_noForeign(cls, attribute, exclude, alias):
+	# 	if (attribute in exclude):
+	# 		return
+
+	# 	columnHandle = getattr(cls, attribute)
+	# 	if (alias and (attribute in alias)):
+	# 		columnHandle = columnHandle.label(alias[attribute])
+	# 	yield columnHandle
+
+	@classmethod
+	def yieldColumn(cls, catalogueList, exclude, alias):
+		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		for catalogue in catalogueList:
+			if (not isinstance(catalogue, dict)):
+				if (catalogue not in cls.foreignKeys):
+					for answer in cls._yieldColumn_noForeign(catalogue, exclude, alias):
+						yield answer
+					continue
+				catalogue = {catalogue: "label"}
+
+			for foreignKey, attributeList in catalogue.items():
+				relationHandle = cls.foreignKeys[foreignKey]
+
+				for attribute in cls.ensure_container(attributeList):
+					columnHandle = getattr(relationHandle, attribute)
+
+					if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
+						columnHandle = columnHandle.label(alias[foreignKey][attribute])
+					else:
+						columnHandle = columnHandle.label(f"{foreignKey}_{attribute}")
+
+					yield columnHandle
 
 	def change(self, session, values = {}, updateForeign = None, checkForeign = True):
 		"""
@@ -321,7 +435,7 @@ NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
 
 #Utility Classes
-class Utility_Base():
+class Utility_Base(Base):
 	#Context Managers
 	@contextlib.contextmanager
 	def makeSession(self):
@@ -456,62 +570,6 @@ class Database(Utility_Base):
 		pubsub_pub.subscribe(function, "event_cmd_startWaiting")
 
 	#Utility Functions
-	def ensure_set(self, item, convertNone = False):
-		"""Makes sure the given item is a set.
-
-		Example Input: ensure_set(exclude)
-		Example Input: ensure_set(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return {item}
-			elif (not isinstance(item, set)):
-				return set(item)
-			return item
-
-		if (convertNone):
-			return set()
-
-	def ensure_list(self, item, convertNone = False):
-		"""Makes sure the given item is a list.
-
-		Example Input: ensure_list(exclude)
-		Example Input: ensure_list(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return [item]
-			elif (not isinstance(item, list)):
-				return list(item)
-			return item
-
-		if (convertNone):
-			return []
-
-	def ensure_container(self, item, evaluateGenerator = True, convertNone = False):
-		"""Makes sure the given item is a container.
-
-		Example Input: ensure_container(valueList)
-		Example Input: ensure_container(valueList, convertNone = True)
-		Example Input: ensure_container(valueList, evaluateGenerator = False)
-		"""
-
-		if (item is None):
-			if (convertNone):
-				return (None,)
-			return ()
-		
-		if (isinstance(item, (str, int, float, dict))):
-			return (item,)
-
-		if (not isinstance(item, (list, tuple, set))):
-			if (evaluateGenerator):
-				return tuple(item)
-			return item
-		return item
-
 	@cachetools.cached(indexCache)
 	def getPrimaryKey(self, relation):
 		"""Returns the primary key to use for the given relation.
@@ -680,8 +738,9 @@ class Database(Utility_Base):
 		else:
 			return locationFunction(sqlalchemy.or_(*yieldLocation()))
 
-	def configureOrder(self, handle, relation, orderBy = None, direction = None, nullFirst = None):
-		_orderBy = sqlalchemy.text(orderBy or self.getPrimaryKey(relation))
+	def configureOrder(self, handle, relation, schema, orderBy = None, direction = None, nullFirst = None):
+
+		_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
 		if (direction is not None):
 			if (direction):
 				_orderBy = sqlalchemy.asc(_orderBy)
@@ -693,7 +752,21 @@ class Database(Utility_Base):
 			# 		_orderBy = _orderBy.nullsfirst()
 			# 	else:
 			# 		_orderBy = _orderBy.nullslast()
+
 		return handle.order_by(_orderBy)
+
+	def configureJoin(self, query, relation, schema, attributeList, fromSchema = True):
+		for attribute in attributeList:
+			foreignHandle = schema.foreignKeys.get(attribute)
+			if (foreignHandle is None):
+				continue
+
+			if (fromSchema):
+				query = query.join(foreignHandle)
+			else:
+				query = query.select_from(self.metadata.tables[relation].join(foreignHandle))
+
+		return query
 
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
@@ -1274,31 +1347,13 @@ class Database(Utility_Base):
 		
 		exclude = self.ensure_container(exclude)
 
-		def yieldColumn(schema, relation, attributeList):
-			nonlocal self, exclude
-
-			#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
-			for attribute in self.ensure_container(attributeList) or self.getAttributeNames(relation):
-				if (attribute in exclude):
-					continue
-
-				columnHandle = getattr(schema, attribute)
-
-				if (alias and (attribute in alias)):
-					columnHandle = columnHandle.label(alias[attribute])
-
-				yield columnHandle
-
 		if (fromSchema):
 			contextmanager = self.makeSession()
 			
-			def startQuery(relation, attributeList):
-				nonlocal self
+			def startQuery(relation, attributeList, schema):
+				nonlocal self, exclude, alias
 
-				schema = self.schema.relationCatalogue[relation]
-				query = connection.query(*yieldColumn(schema, relation, attributeList))
-
-				return schema, query
+				return connection.query(*schema.yieldColumn(attributeList, exclude, alias)).select_from(schema)
 
 			def yieldRow(query):
 				nonlocal count
@@ -1315,13 +1370,10 @@ class Database(Utility_Base):
 		else:
 			contextmanager = self.makeConnection(asTransaction = True)
 			
-			def startQuery(relation, attributeList):
-				nonlocal self
+			def startQuery(relation, attributeList, schema):
+				nonlocal self, exclude, alias
 
-				schema = self.metadata.tables[relation].columns
-				query = sqlalchemy.select(columns = yieldColumn(schema, relation, attributeList))
-
-				return schema, query
+				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, exclude, alias))
 
 			def yieldRow(query):
 				for result in connection.execute(query).fetchall():
@@ -1346,9 +1398,13 @@ class Database(Utility_Base):
 		results_catalogue = {}
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
-				schema, query = startQuery(relation, attributeList)
+				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation)
 
-				query = self.configureOrder(query, relation, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+				schema = self.schema.relationCatalogue[relation]
+				
+				query = startQuery(relation, attributeList, schema)
+				query = self.configureJoin(query, relation, schema, attributeList, fromSchema = fromSchema)
+				query = self.configureOrder(query, relation, schema, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
 				query = self.configureLocation(query, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
 				if (limit is not None):
@@ -1484,34 +1540,36 @@ def sandbox():
 	database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
 	
 	# #Get Items
-	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
-	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
-	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
-	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
+	# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
 
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
+	# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
 
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True, forceTuple = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
-	# print(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
+	quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
+	quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = False))
 
-	# #Change Items
-	# print(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
+
+	#Change Items
+	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
 	# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
-	# print(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
 	
-	#Remove Items
+	# #Remove Items
 	# database_API.removeTuple({"Containers": {"label": "dolor"}})
-	# print(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
-
-	database_API.removeTuple({"Containers": {"label": "sit"}})
-	# print(database_API.getValue({"Containers": ("label", "weight_total")}))
-
-
+	# database_API.removeTuple({"Containers": {"label": "sit"}})
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
 
 
 	# from test_map import Address, Base, Person
@@ -1546,16 +1604,16 @@ def sandbox():
 	# DBSession.bind = engine
 	# session = DBSession()
 	# # Make a query to find all Persons in the database
-	# print(session.query(Person).all())
+	# quiet(session.query(Person).all())
 	# # Return the first Person from all Persons in the database
 	# person = session.query(Person).first()
-	# print(person.name)
+	# quiet(person.name)
 	# # Find all Address whose person field is pointing to the person object
-	# print(session.query(Address).filter(Address.person == person).all())
+	# quiet(session.query(Address).filter(Address.person == person).all())
 	# # Retrieve one Address whose person field is point to the person object
-	# print(session.query(Address).filter(Address.person == person).one())
+	# quiet(session.query(Address).filter(Address.person == person).one())
 	# address = session.query(Address).filter(Address.person == person).one()
-	# print(address.post_code)
+	# quiet(address.post_code)
 
 def main():
 	"""The main program controller."""

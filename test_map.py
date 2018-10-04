@@ -507,6 +507,8 @@ if __name__ == '__main__':
 	# query = query.filter(Containers.job.has(label = 12345))
 	query = query.filter_by(label = 12345)
 
+	print(query)
+
 	# print(session.query(Containers).filter(Containers.job.label == "12345"))
 	container = query.first()
 	print(container)
