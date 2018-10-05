@@ -8,6 +8,8 @@ import sys
 import time
 import types
 import pyodbc
+import alembic
+import inspect
 import sqlite3
 import sqlalchemy
 import sqlalchemy.ext.declarative
@@ -32,6 +34,7 @@ sessionMaker = sqlalchemy.orm.sessionmaker()
 	# sqlite3
 	# pyodbc
 	# sqlalchemy
+	# alembic
 
 #Debugging functions
 def printCurrentTrace(printout = True, quitAfter = False):
@@ -215,7 +218,80 @@ class Base():
 			return item
 		return item
 
+	@classmethod
+	def getMigrationFunctions(cls):
+		"""Returns the functions needed to migrate the data from the old schema to the new one."""
+
+		return []
+
+#Alembic Dispatches
+class mp_PlainText(alembic.operations.ops.MigrateOperation):
+	def __init__(self, command = None, args = None, kwargs = None):
+		"""Used to insert plain text into the generated alembic files.
+
+		Example Input: PlainText()
+		Example Input: PlainText("print(123)")
+		Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+		"""
+
+		print("@3", command, args)
+
+		self.command = command or ""
+		self.args = args or ()
+		self.kwargs = kwargs or {}
+
+	def formatText(self, command):
+		"""Formats the given command.
+
+		Example Input: formatText("print(123)")
+		Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+		Example Input: formatText(myFunction)
+		"""
+
+		if (isinstance(command, str)):
+			return command
+		elif (callable(command)):
+			try:
+				answer = command(*self.args, **self.kwargs)
+			except Exception as error:
+				# raise error
+				print(error)
+				answer = None
+
+			if (answer is None):
+				print("@1", command)
+				print("@2", inspect.getsource(command))
+				match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
+				assert match
+				lines = match.group(1).rstrip().split("\n")
+				indent = len(lines[0]) - len(lines[0].lstrip('\t'))
+				return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
+			else:
+				return self.formatText(answer)
+		else:
+			return "\n".join(self.formatText(item) for item in command)
+alembic.operations.ops.PlainText = mp_PlainText
+
+@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
+def _setPlainText(context, operation):
+	"""
+	Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
+	Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
+	"""
+
+	return operation.formatText(operation.command)
+
 #Schema Mixins
+def makeBase():
+	return sqlalchemy.ext.declarative.declarative_base(cls = CustomBase, metadata = CustomMetaData())
+
+migrationCatalogue = {}
+class CustomMetaData(sqlalchemy.MetaData):
+	migrationCatalogue = migrationCatalogue
+
+class CustomBase():
+	pass
+
 class Schema_Base(Base):
 	defaultRows = ()
 
@@ -904,15 +980,21 @@ class Database(Utility_Base):
 			self.saveDatabase()
 
 	def loadSchema(self, schemaPath):
-		"""loads in a schema from the given schemaPath.
+		"""Loads in a schema from the given schemaPath.
 
 		Example Input: loadSchema(schemaPath)
 		"""
 
+		print("@3")
 		self.schema = importlib.import_module(schemaPath)
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
 		self.refresh()
+
+	def checkSchema(self):
+		"""Checks the loaded schema against what is in the meta data."""
+
+		print()
 
 	@wrap_errorCheck()
 	def removeRelation(self, relation = None):
@@ -1226,6 +1308,25 @@ class Database(Utility_Base):
 		Example Input: getAllValues(["Users", "Names"], orderBy = "id")
 		"""
 
+		relation = self.ensure_container(relation)
+
+		if (isinstance(exclude, dict)):
+			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+		else:
+			excludeList = self.ensure_container(exclude, convertNone = False)
+
+		myTuple = {}
+		for _relation in relation:
+			if (attribute):
+				if (isinstance(attribute, dict)):
+					myTuple[_relation] = attribute.get(_relation, None)
+				else:
+					myTuple[_relation] = attribute
+			else:
+				myTuple[_relation] = None
+
+		return self.getValue(myTuple, exclude = excludeList, **kwargs)
+
 	@wrap_errorCheck()
 	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
@@ -1345,15 +1446,13 @@ class Database(Utility_Base):
 		"""
 		# startTime = time.perf_counter()
 		
-		exclude = self.ensure_container(exclude)
-
 		if (fromSchema):
 			contextmanager = self.makeSession()
 			
 			def startQuery(relation, attributeList, schema):
-				nonlocal self, exclude, alias
+				nonlocal self, excludeList, alias
 
-				return connection.query(*schema.yieldColumn(attributeList, exclude, alias)).select_from(schema)
+				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias)).select_from(schema)
 
 			def yieldRow(query):
 				nonlocal count
@@ -1371,9 +1470,9 @@ class Database(Utility_Base):
 			contextmanager = self.makeConnection(asTransaction = True)
 			
 			def startQuery(relation, attributeList, schema):
-				nonlocal self, exclude, alias
+				nonlocal self, excludeList, alias
 
-				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, exclude, alias))
+				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias))
 
 			def yieldRow(query):
 				for result in connection.execute(query).fetchall():
@@ -1395,9 +1494,14 @@ class Database(Utility_Base):
 
 		########################################################################
 
+		if (not isinstance(exclude, dict)):
+			excludeList = self.ensure_container(exclude, convertNone = False)
+
 		results_catalogue = {}
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
+				if (isinstance(exclude, dict)):
+					excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
 				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation)
 
 				schema = self.schema.relationCatalogue[relation]
@@ -1529,15 +1633,15 @@ def sandbox():
 
 	database_API = build()
 	# database_API.openDatabase(None, "test_map")
-	database_API.openDatabase("test_map_example.db", "test_map")
-	database_API.removeRelation()
-	database_API.createRelation()
-	database_API.resetRelation()
+	# database_API.openDatabase("test_map_example.db", "test_map")
+	# database_API.removeRelation()
+	# database_API.createRelation()
+	# database_API.resetRelation()
 
-	#Add Items
-	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
-	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+	# #Add Items
+	# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+	# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+	# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
 	
 	# #Get Items
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
@@ -1548,8 +1652,8 @@ def sandbox():
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
 	# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
 
-	quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
-	quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = False))
+	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
+	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = False))
 
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
@@ -1561,7 +1665,10 @@ def sandbox():
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
 
-	#Change Items
+	# quiet(database_API.getAllValues("Containers"))
+
+
+	# #Change Items
 	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
 	# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
 	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
@@ -1571,49 +1678,9 @@ def sandbox():
 	# database_API.removeTuple({"Containers": {"label": "sit"}})
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
 
-
-	# from test_map import Address, Base, Person
-
-	# # Base = sqlalchemy.ext.declarative.declarative_base()
-	# engine = sqlalchemy.create_engine('sqlite:///sqlalchemy_example.db')
-	# # Bind the engine to the metadata of the Base class so that the
-	# # declaratives can be accessed through a DBSession instance
-	# # Base.metadata.bind = engine
-	 
-	# DBSession = sqlalchemy.orm.sessionmaker(bind=engine)
-	# # A DBSession() instance establishes all conversations with the database
-	# # and represents a "staging zone" for all the objects loaded into the
-	# # database session object. Any change made against the objects in the
-	# # session won't be persisted into the database until you call
-	# # session.commit(). If you're not happy about the changes, you can
-	# # revert all of them back to the last commit by calling
-	# # session.rollback()
-	# session = DBSession()
-	 
-	# # Insert a Person in the person table
-	# new_person = Person(name='new person')
-	# session.add(new_person)
-	# session.commit()
-	 
-	# # Insert an Address in the address table
-	# new_address = Address(post_code='00000', person=new_person)
-	# session.add(new_address)
-	# session.commit()
-
-
-	# DBSession.bind = engine
-	# session = DBSession()
-	# # Make a query to find all Persons in the database
-	# quiet(session.query(Person).all())
-	# # Return the first Person from all Persons in the database
-	# person = session.query(Person).first()
-	# quiet(person.name)
-	# # Find all Address whose person field is pointing to the person object
-	# quiet(session.query(Address).filter(Address.person == person).all())
-	# # Retrieve one Address whose person field is point to the person object
-	# quiet(session.query(Address).filter(Address.person == person).one())
-	# address = session.query(Address).filter(Address.person == person).one()
-	# quiet(address.post_code)
+	#Update Schema
+	database_API.openDatabase("test_map_example.db", "test_map_2")
+	database_API.checkSchema()
 
 def main():
 	"""The main program controller."""
