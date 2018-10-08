@@ -3,27 +3,37 @@ __version__ = "3.4.0"
 ## TO DO ##
 # - Add a foreign key cleanup command; removes unused foreign keys in foreign tables
 
+#Standard Modules
 import re
+import os
 import sys
 import time
 import types
-import pyodbc
-import alembic
+import shutil
+
+#Utility Modules
 import inspect
+import warnings
+import traceback
+import importlib
+import itertools
+import functools
+import cachetools
+import contextlib
+import collections
+
+#Database Modules
+import pyodbc
 import sqlite3
 import sqlalchemy
 import sqlalchemy.ext.declarative
-import warnings
-import traceback
-import functools
-import itertools
-import cachetools
-import collections
-import contextlib
-import importlib
+
+import alembic
+import alembic.config
+import alembic.command
+from alembic.config import Config as alembic_config_Config
 
 #For multi-threading
-# import sqlalchemy
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
@@ -120,10 +130,8 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 				answer = None
 				errorMessage = traceback.format_exc()
 				
-				print(f"Previous Command: {self.previousCommand}")
 				if (not raiseError):
 					print(errorMessage)
-
 				try:
 					with open(fileName, "a") as fileHandle:
 						if (timestamp):
@@ -219,67 +227,23 @@ class Base():
 		return item
 
 	@classmethod
-	def getMigrationFunctions(cls):
+	def getSchema(cls):
 		"""Returns the functions needed to migrate the data from the old schema to the new one."""
 
 		return []
 
-#Alembic Dispatches
-class mp_PlainText(alembic.operations.ops.MigrateOperation):
-	def __init__(self, command = None, args = None, kwargs = None):
-		"""Used to insert plain text into the generated alembic files.
+	def getSchemaClass(cls, relation):
+		"""Returns the schema class for the given relation.
+		Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
 
-		Example Input: PlainText()
-		Example Input: PlainText("print(123)")
-		Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+		relation (str) - What relation to return the schema class for
+
+		Example Input: getSchemaClass("Customer")
 		"""
 
-		print("@3", command, args)
-
-		self.command = command or ""
-		self.args = args or ()
-		self.kwargs = kwargs or {}
-
-	def formatText(self, command):
-		"""Formats the given command.
-
-		Example Input: formatText("print(123)")
-		Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
-		Example Input: formatText(myFunction)
-		"""
-
-		if (isinstance(command, str)):
-			return command
-		elif (callable(command)):
-			try:
-				answer = command(*self.args, **self.kwargs)
-			except Exception as error:
-				# raise error
-				print(error)
-				answer = None
-
-			if (answer is None):
-				print("@1", command)
-				print("@2", inspect.getsource(command))
-				match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
-				assert match
-				lines = match.group(1).rstrip().split("\n")
-				indent = len(lines[0]) - len(lines[0].lstrip('\t'))
-				return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
-			else:
-				return self.formatText(answer)
-		else:
-			return "\n".join(self.formatText(item) for item in command)
-alembic.operations.ops.PlainText = mp_PlainText
-
-@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
-def _setPlainText(context, operation):
-	"""
-	Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
-	Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
-	"""
-
-	return operation.formatText(operation.command)
+		# # table = Mapper.metadata.tables.get("Customer")
+		# # column = table.columns["name"]
+		# return Mapper._decl_class_registry[column.table.name]
 
 #Schema Mixins
 def makeBase():
@@ -288,6 +252,11 @@ def makeBase():
 migrationCatalogue = {}
 class CustomMetaData(sqlalchemy.MetaData):
 	migrationCatalogue = migrationCatalogue
+
+	@classmethod
+	def getAlembic(cls):
+
+		assert False
 
 class CustomBase():
 	pass
@@ -553,12 +522,320 @@ class Utility_Base(Base):
 				connection.close()
 
 #Main API
+class Alembic():
+	"""Used to handle database migrations and schema changes.
+
+	Modified code from: https://stackoverflow.com/questions/24622170/using-alembic-api-from-inside-application-code/43530495#43530495
+	Modified code from: https://www.youtube.com/watch?v=xzsbHMHYI5c
+	"""
+
+	def __init__(self, parent, ensureCompatability = False, **kwargs):
+		"""Loads in the alembic directory and creates an alembic handler.
+
+		Example Input: loadAlembic(self)
+		Example Input: loadAlembic(self, source_directory = "database")
+		"""
+
+		self.parent = parent
+
+		self.loadConfig(**kwargs)
+
+		if (ensureCompatability):
+			assert self.check()
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		if (self.parent is not None):
+			output += f"-- Database: {id(self.parent)}\n"
+			if (self.parent.schema is not None):
+				output += f"-- Schema Name: {self.parent.schema.__name__}\n"
+			if (self.parent.fileName is not None):
+				output += f"-- File Name: {self.parent.fileName}\n"
+
+		if (self.source_directory is not None):
+			output += f"-- Source Directory: {self.source_directory}\n"
+		if (self.alembic_directory is not None):
+			output += f"-- Alembic Directory: {self.alembic_directory}\n"
+		if (self.version_directory is not None):
+			output += f"-- Version Directory: {self.version_directory}\n"
+		if (self.ini_path is not None):
+			output += f"-- .ini Path: {self.ini_path}\n"
+		return output
+
+	def __enter__(self):			
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback is not None):
+			print(exc_type, exc_value)
+			return False
+
+	def loadConfig(self, source_directory = None, template_directory = None, ini_filename = None):
+		"""Creates a config object for the given 'alembic_directory'.
+
+		source_directory (str) - Where the alembic folder and configuration settings are kept
+		template_directory (str) - Where the alembic templates are kept
+		ini_filename (str) - The name of the configuration settings file in the source_directory
+			- If this file does not exist, the alembic directory will be (re)made in source_directory and this file will be created
+
+		Example Input: loadConfig()
+		Example Input: loadConfig(source_directory = "database")
+		"""
+
+		self.template_directory = os.path.abspath(template_directory or os.path.join(os.path.dirname(__file__), "alembic_templates"))
+		self.source_directory   = os.path.abspath(source_directory  or os.curdir)
+		self.alembic_directory  = os.path.abspath(os.path.join(self.source_directory, "alembic"))
+		self.version_directory  = os.path.abspath(os.path.join(self.alembic_directory, "versions"))
+		self.ini_path           = os.path.abspath(os.path.join(self.source_directory, ini_filename or "alembic.ini"))
+
+		self.config = alembic_config_Config(self.ini_path)
+		self.config.set_main_option("script_location", self.alembic_directory)
+		self.config.set_main_option("sqlalchemy.url", self.parent.fileName)
+
+		if (not os.path.exists(self.ini_path)):
+			self.resetAlembic()
+
+	def resetAlembic(self, template = "custom"):
+		"""Creates a fresh Alembic environment.
+		NOTE: This will completely remove the alembic directory and create a new one.
+
+		template (str) - Which template folder to use to create the alembic directory
+
+		Example Input: resetAlembic()
+		"""
+
+		if ("alembic_version" in self.parent.getRelationNames()):
+			self.parent.clearRelation("alembic_version")
+
+		if (os.path.exists(self.ini_path)):
+			os.remove(self.ini_path)
+
+		if (not self.ini_path.endswith("alembic.ini")):
+			default_ini_path = os.path.abspath(os.path.join(self.source_directory, "alembic.ini"))
+			if (os.path.exists(default_ini_path)):
+				os.remove(default_ini_path)
+
+		if (os.path.exists(self.alembic_directory)):
+			import stat
+			def onerror(function, path, exc_info):
+				"""An Error handler for shutil.rmtree.
+				Modified code from Justin Peel on https://stackoverflow.com/questions/2656322/shutil-rmtree-fails-on-windows-with-access-is-denied
+				"""
+				if (not os.access(path, os.W_OK)):
+					os.chmod(path, stat.S_IWUSR)
+					function(path)
+				else:
+					raise
+			shutil.rmtree(self.alembic_directory, ignore_errors = False, onerror = onerror)
+
+		alembic.command.init(self.config, self.alembic_directory, template = template)
+
+	def history(self, indicate_current = False):
+		"""Prints out the revision history.
+
+		Example Input: history()
+		"""
+
+		alembic.command.history(self.config, rev_range = None, verbose = False, indicate_current = indicate_current)
+
+	def stamp(self, revision = "head", sql = False):
+		"""Marks the current revision in the database.
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: stamp()
+		"""
+
+		alembic.command.stamp(self.config, revision, sql = sql, tag = None)
+
+	def revision(self, message = None, migrationCatalogue = None, autoStamp = False, sql = False):
+		"""Creates a revision script for modifying the current database to what the schema currently looks like.
+		NOTE: Make sure you proof read the generated revision script before running it.
+
+		message (str) - A short discription of what the schema change is
+		
+		migrationCatalogue (dict) - Extra functions to use for the autogenerate step
+			~ {relation (str): [custom line to put in the script]}
+			~ Custom lines can be a string, a function that returns a string, a function that returns None, or a list of a combination of those
+				If a function returns None, all the source code for that function between "## START ##" and "## STOP ##" will be used
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		autoStamp (bool) - Determines if the current database is assumed to be the most recent version
+
+		Example Input: revision("split name column")
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": ("print(123)", "print(456)",)})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (("print(123)", "print(456)"),)})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (test,)})
+		"""
+
+		if (autoStamp):
+			self.stamp()
+
+		Mapper.metadata.migrationCatalogue.clear()
+		Mapper.metadata.migrationCatalogue.update(migrationCatalogue or {})
+		alembic.command.revision(self.config, autogenerate = True, message = message, sql = sql)
+
+	def upgrade(self, target = "+1", sql = False):
+		"""
+		Runs the upgrade function in the revision script for 'target'.
+		Will only commit changes made by the script if the function does not have any errors during execution.
+
+		target (str) - Which revision to upgrade to
+			- If "head": The most recent up-to-date revision
+			- If "+n": How many revision levels to go up
+			- If str: The name of the revision, or a partial section of it
+			~ The options above can be combined
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: upgrade()
+		Example Input: upgrade("head")
+		Example Input: upgrade("+2")
+		Example Input: upgrade("4f83cf8faa80")
+		Example Input: upgrade("4f8")
+		Example Input: upgrade("4f8+2")
+		Example Input: upgrade("head-1")
+		"""
+		alembic.command.upgrade(self.config, target, sql = sql, tag = None)
+
+	def downgrade(self, target = "-1", sql = False):
+		"""
+		Runs the downgrade function in the revision script for 'target'.
+		Will only commit changes made by the script if the function does not have any errors during execution.
+
+		target (str) - Which revision to upgrade to
+			- If "base": The state it was in before any revisions
+			- If "-n": How many revision levels to go down
+			- If str: The name of the revision, or a partial section of it
+			~ The options above can be combined
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: downgrade()
+		Example Input: downgrade("base")
+		Example Input: downgrade("-2")
+		"""
+		alembic.command.downgrade(self.config, target, sql = sql, tag = None)
+
+	def check(self, returnDifference = False):
+		"""Makes sure the current database matches the current schema.
+
+		returnDifference (bool) - Determines what is returned
+			If True: Returns the differences between the schema and the current database
+			If False: Returns True if they match, and False if they don't
+
+		Example Input: check()
+		"""
+
+		context = alembic.migration.MigrationContext.configure(self.parent.engine.connect())
+		differences = alembic.autogenerate.compare_metadata(context, self.parent.MetaData)
+
+		if (returnDifference):
+			return differences
+		return bool(differences)
+
+	#Alembic Monkey Patches
+	def mp_get_template_directory(self, mp_self):
+		return self.template_directory
+	alembic_config_Config.get_template_directory = mp_get_template_directory
+
+	def mp__generate_template(self, mp_self, source, destination, **kwargs):
+		if (source.endswith("alembic.ini.mako")):
+			kwargs["database_location"] = self.parent.fileName
+		return old__generate_template(mp_self, source, destination, **kwargs)
+	old__generate_template = alembic.command.ScriptDirectory._generate_template
+	alembic.command.ScriptDirectory._generate_template = mp__generate_template
+
+	def mp__copy_file(self, mp_self, source, destination):
+		"""Special thanks to shackra for how to import metadata correctly on https://stackoverflow.com/questions/32032940/how-to-import-the-own-model-into-myproject-alembic-env-py/32218546#32218546"""
+		
+		if (not source.endswith('env.py.mako')):
+			return old__copy_file(mp_self, source, destination)
+		imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {self.parent.schemaPath}\ntarget_metadata = {self.parent.schemaPath}.Mapper.metadata'
+		old__generate_template(mp_self, source, destination.rstrip(".mako"), imports = imports)
+	old__copy_file = alembic.command.ScriptDirectory._copy_file
+	alembic.command.ScriptDirectory._copy_file = mp__copy_file
+
+	def mp_rev_id(self):
+		"""Make Revision IDs sequential"""
+		answer = old_rev_id()
+		n = len(tuple(None for item in os.scandir(self.version_directory) if (item.is_file())))
+		return f"{n:03d}_{answer}"
+	old_rev_id= alembic.util.rev_id
+	alembic.util.rev_id = mp_rev_id
+
+	class mp_PlainText(alembic.operations.ops.MigrateOperation):
+		def __init__(self, command = None, args = None, kwargs = None):
+			"""Used to insert plain text into the generated alembic files.
+
+			Example Input: PlainText()
+			Example Input: PlainText("print(123)")
+			Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+			"""
+
+			self.command = command or ""
+			self.args = args or ()
+			self.kwargs = kwargs or {}
+
+		def formatText(self, command):
+			"""Formats the given command.
+
+			Example Input: formatText("print(123)")
+			Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+			Example Input: formatText(myFunction)
+			"""
+
+			if (isinstance(command, str)):
+				return command
+			elif (callable(command)):
+				try:
+					answer = command(*self.args, **self.kwargs)
+				except Exception as error:
+					# raise error
+					print(error)
+					answer = None
+
+				if (answer is None):
+					match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
+					assert match
+					lines = match.group(1).rstrip().split("\n")
+					indent = len(lines[0]) - len(lines[0].lstrip('\t'))
+					return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
+				else:
+					return self.formatText(answer)
+			else:
+				return "\n".join(self.formatText(item) for item in command)
+	alembic.operations.ops.PlainText = mp_PlainText
+
+	@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
+	def _setPlainText(context, operation):
+		"""
+		Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
+		Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
+		"""
+
+		return operation.formatText(operation.command)
+
 class Database(Utility_Base):
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 	"""
 
-	def __init__(self, fileName = None, *args, **kwargs):
+	def __init__(self, fileName = None, schemaPath = None, alembicPath = None, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
@@ -575,20 +852,22 @@ class Database(Utility_Base):
 		self.TableBase = sqlalchemy.ext.declarative.declarative_base()
 
 		#Internal variables
-		self.schema = None
 		self.cursor = None
+		self.schema = None
+		self.alembic = None
 		self.waiting = False
 		self.fileName = None
+		self.schemaPath = None
+		self.alembicPath = None
 		self.defaultCommit = None
 		self.connectionType = None
 		self.defaultFileExtension = ".db"
-		self.previousCommand = (None, None) #(command (str), valueList (tuple))
-		self.resultError_replacement = None
 		self.aliasError_replacement = None
+		self.resultError_replacement = None
 
 		#Initialization functions
 		if (fileName is not None):
-			self.openDatabase(fileName = fileName, *args, **kwargs)
+			self.openDatabase(fileName = fileName, schemaPath = schemaPath, alembicPath = alembicPath, **kwargs)
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -596,6 +875,10 @@ class Database(Utility_Base):
 
 	def __str__(self):
 		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		if (self.alembic is not None):
+			output += f"-- Alembic: {id(self.alembic)}\n"
+		if (self.schema is not None):
+			output += f"-- Schema Name: {self.schema.__name__}\n"
 		if (self.fileName is not None):
 			output += f"-- File Name: {self.fileName}\n"
 		return output
@@ -877,7 +1160,7 @@ class Database(Utility_Base):
 		self.metadata.reflect()
 
 	@wrap_errorCheck()
-	def openDatabase(self, fileName = None, schemaPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
+	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
 		password = None, readOnly = False, keepOpen = None, multiProcess = -1, multiProcess_delay = 100,
 		resultError_replacement = None, aliasError_replacement = None):
 
@@ -905,6 +1188,7 @@ class Database(Utility_Base):
 		Example Input: openDatabase()
 		Example Input: openDatabase("emaildb")
 		Example Input: openDatabase("emaildb.sqllite")
+		Example Input: openDatabase("emaildb", "test_map")
 		Example Input: openDatabase("emaildb", applyChanges = False)
 		Example Input: openDatabase("emaildb", multiThread = True)
 		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
@@ -939,14 +1223,19 @@ class Database(Utility_Base):
 		self.isMySQL = self.connectionType == "mysql"
 
 		if (self.isSQLite):
-			self.engine = sqlalchemy.create_engine(f"sqlite:///{fileName}")
+			self.fileName = f"sqlite:///{fileName}"
+			self.engine = sqlalchemy.create_engine(self.fileName)
 			sqlalchemy.event.listen(self.engine, 'connect', self._fk_pragma_on_connect)
 		else:
 			errorMessage = f"Unknown connection type {connectionType}"
 			raise KeyError(errorMessage)
 
 		sessionMaker.configure(bind = self.engine)
-		self.loadSchema(schemaPath)
+		
+		if (schemaPath):
+			self.loadSchema(schemaPath)
+
+		self.loadAlembic(alembicPath)
 
 	def _fk_pragma_on_connect(self, connection, record):
 		"""Turns foreign keys on for SQLite.
@@ -985,8 +1274,8 @@ class Database(Utility_Base):
 		Example Input: loadSchema(schemaPath)
 		"""
 
-		print("@3")
-		self.schema = importlib.import_module(schemaPath)
+		self.schemaPath = schemaPath
+		self.schema = importlib.import_module(self.schemaPath)
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
 		self.refresh()
@@ -994,7 +1283,18 @@ class Database(Utility_Base):
 	def checkSchema(self):
 		"""Checks the loaded schema against what is in the meta data."""
 
-		print()
+		assert False
+
+	def loadAlembic(self, alembicPath = None, **kwargs):
+		"""Loads in the alembic directory and creates an alembic handler.
+
+		alembicPath (str) - Where the alembic folder and configuration settings are kept
+
+		Example Input: loadAlembic()
+		Example Input: loadAlembic("database")
+		"""
+
+		self.alembic = Alembic(self, source_directory = alembicPath)
 
 	@wrap_errorCheck()
 	def removeRelation(self, relation = None):
@@ -1101,6 +1401,7 @@ class Database(Utility_Base):
 
 		if (relation is None):
 			self.metadata.create_all()
+			self.alembic.stamp()
 			return
 
 		if (schemaPath is None):
@@ -1685,7 +1986,7 @@ def sandbox():
 def main():
 	"""The main program controller."""
 
-	sandbox()
+	# sandbox()
 
 if __name__ == '__main__':
 	main()
