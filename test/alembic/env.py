@@ -50,11 +50,18 @@ def add_column(context, revision, op):
 		return op
 	else:
 		column.nullable = True
-		return [
-			op, 
-			*(alembic.operations.ops.PlainText(command, args = (op,)) for command in op.column.table.metadata.migrationCatalogue.get(op.table_name, ())), 
-			alembic.operations.ops.AlterColumnOp(op.table_name, column.name, modify_nullable = False, existing_type = column.type)
-		]
+		
+		if (column.table.metadata.bind):
+			return [
+				op, 
+				*(alembic.operations.ops.PlainText(command, args = (op,)) for command in column.table.metadata.migrationCatalogue.get(op.table_name, ())), 
+				alembic.operations.ops.AlterColumnOp(op.table_name, column.name, modify_nullable = False, existing_type = column.type)
+			]
+		else:
+			return [
+				op, 
+				alembic.operations.ops.AlterColumnOp(op.table_name, column.name, modify_nullable = False, existing_type = column.type)
+			]
 
 def run_migrations_offline():
 	"""Run migrations in 'offline' mode.
@@ -68,8 +75,13 @@ def run_migrations_offline():
 	script output.
 
 	"""
-	url = config.get_main_option("sqlalchemy.url")
-	alembic.context.configure(url = url, target_metadata = target_metadata, literal_binds = True, process_revision_directives = writer)
+	alembic.context.configure(
+		url = config.get_main_option("sqlalchemy.url"), 
+		target_metadata = target_metadata, 
+		literal_binds = True, 
+		process_revision_directives = writer,
+		render_as_batch = config.get_main_option('sqlalchemy.url').startswith('sqlite:///'),
+		)
 
 	with alembic.context.begin_transaction():
 		alembic.context.run_migrations()
@@ -92,7 +104,7 @@ def run_migrations_online():
 			connection = connection,
 			target_metadata = target_metadata,
 			process_revision_directives = writer,
-			render_as_batch=config.get_main_option('sqlalchemy.url').startswith('sqlite:///'),
+			render_as_batch = config.get_main_option('sqlalchemy.url').startswith('sqlite:///'),
 		)
 
 		with alembic.context.begin_transaction():

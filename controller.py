@@ -524,6 +524,10 @@ class Utility_Base(Base):
 #Main API
 class Alembic():
 	"""Used to handle database migrations and schema changes.
+	If you want to generate SQL script: 
+		Use: https://alembic.zzzcomputing.com/en/latest/offline.html
+		Use: https://alembic.zzzcomputing.com/en/latest/batch.html#batch-offline-mode
+		Use: https://bitbucket.org/zzzeek/alembic/issues/323/better-exception-when-attempting
 
 	Modified code from: https://stackoverflow.com/questions/24622170/using-alembic-api-from-inside-application-code/43530495#43530495
 	Modified code from: https://www.youtube.com/watch?v=xzsbHMHYI5c
@@ -538,6 +542,7 @@ class Alembic():
 
 		self.parent = parent
 
+		self._applyMonkeyPatches()
 		self.loadConfig(**kwargs)
 
 		if (ensureCompatability):
@@ -596,7 +601,7 @@ class Alembic():
 		self.config.set_main_option("script_location", self.alembic_directory)
 		self.config.set_main_option("sqlalchemy.url", self.parent.fileName)
 
-		if (not os.path.exists(self.ini_path)):
+		if (any(not os.path.exists(item) for item in (self.ini_path, self.alembic_directory))):
 			self.resetAlembic()
 
 	def resetAlembic(self, template = "custom"):
@@ -681,8 +686,8 @@ class Alembic():
 		if (autoStamp):
 			self.stamp()
 
-		Mapper.metadata.migrationCatalogue.clear()
-		Mapper.metadata.migrationCatalogue.update(migrationCatalogue or {})
+		self.parent.metadata.migrationCatalogue.clear()
+		self.parent.metadata.migrationCatalogue.update(migrationCatalogue or {})
 		alembic.command.revision(self.config, autogenerate = True, message = message, sql = sql)
 
 	def upgrade(self, target = "+1", sql = False):
@@ -739,96 +744,96 @@ class Alembic():
 			If False: Returns True if they match, and False if they don't
 
 		Example Input: check()
+		Example Input: check(returnDifference = True)
 		"""
 
 		context = alembic.migration.MigrationContext.configure(self.parent.engine.connect())
-		differences = alembic.autogenerate.compare_metadata(context, self.parent.MetaData)
-
-		if (returnDifference):
-			return differences
-		return bool(differences)
-
-	#Alembic Monkey Patches
-	def mp_get_template_directory(self, mp_self):
-		return self.template_directory
-	alembic_config_Config.get_template_directory = mp_get_template_directory
-
-	def mp__generate_template(self, mp_self, source, destination, **kwargs):
-		if (source.endswith("alembic.ini.mako")):
-			kwargs["database_location"] = self.parent.fileName
-		return old__generate_template(mp_self, source, destination, **kwargs)
-	old__generate_template = alembic.command.ScriptDirectory._generate_template
-	alembic.command.ScriptDirectory._generate_template = mp__generate_template
-
-	def mp__copy_file(self, mp_self, source, destination):
-		"""Special thanks to shackra for how to import metadata correctly on https://stackoverflow.com/questions/32032940/how-to-import-the-own-model-into-myproject-alembic-env-py/32218546#32218546"""
 		
-		if (not source.endswith('env.py.mako')):
-			return old__copy_file(mp_self, source, destination)
-		imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {self.parent.schemaPath}\ntarget_metadata = {self.parent.schemaPath}.Mapper.metadata'
-		old__generate_template(mp_self, source, destination.rstrip(".mako"), imports = imports)
-	old__copy_file = alembic.command.ScriptDirectory._copy_file
-	alembic.command.ScriptDirectory._copy_file = mp__copy_file
+		if (returnDifference):
+			return tuple(alembic.autogenerate.compare_metadata(context, self.parent.metadata))
+		return not bool(alembic.autogenerate.compare_metadata(context, self.parent.metadata))
 
-	def mp_rev_id(self):
-		"""Make Revision IDs sequential"""
-		answer = old_rev_id()
-		n = len(tuple(None for item in os.scandir(self.version_directory) if (item.is_file())))
-		return f"{n:03d}_{answer}"
-	old_rev_id= alembic.util.rev_id
-	alembic.util.rev_id = mp_rev_id
+	def _applyMonkeyPatches(self):
+		def mp_get_template_directory(mp_self):
+			return self.template_directory
+		alembic_config_Config.get_template_directory = mp_get_template_directory
 
-	class mp_PlainText(alembic.operations.ops.MigrateOperation):
-		def __init__(self, command = None, args = None, kwargs = None):
-			"""Used to insert plain text into the generated alembic files.
+		def mp__generate_template(mp_self, source, destination, **kwargs):
+			if (source.endswith("alembic.ini.mako")):
+				kwargs["database_location"] = self.parent.fileName
+			return old__generate_template(mp_self, source, destination, **kwargs)
+		old__generate_template = alembic.command.ScriptDirectory._generate_template
+		alembic.command.ScriptDirectory._generate_template = mp__generate_template
 
-			Example Input: PlainText()
-			Example Input: PlainText("print(123)")
-			Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
-			"""
+		def mp__copy_file(mp_self, source, destination):
+			"""Special thanks to shackra for how to import metadata correctly on https://stackoverflow.com/questions/32032940/how-to-import-the-own-model-into-myproject-alembic-env-py/32218546#32218546"""
+			
+			if (not source.endswith('env.py.mako')):
+				return old__copy_file(mp_self, source, destination)
+			imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {self.parent.schemaPath}\ntarget_metadata = {self.parent.schemaPath}.Mapper.metadata'
+			old__generate_template(mp_self, source, destination.rstrip(".mako"), imports = imports)
+		old__copy_file = alembic.command.ScriptDirectory._copy_file
+		alembic.command.ScriptDirectory._copy_file = mp__copy_file
 
-			self.command = command or ""
-			self.args = args or ()
-			self.kwargs = kwargs or {}
+		def mp_rev_id():
+			"""Make Revision IDs sequential"""
+			answer = old_rev_id()
+			n = len(tuple(None for item in os.scandir(self.version_directory) if (item.is_file())))
+			return f"{n:03d}_{answer}"
+		old_rev_id= alembic.util.rev_id
+		alembic.util.rev_id = mp_rev_id
 
-		def formatText(self, command):
-			"""Formats the given command.
+		class mp_PlainText(alembic.operations.ops.MigrateOperation):
+			def __init__(mp_self, command = None, args = None, kwargs = None):
+				"""Used to insert plain text into the generated alembic files.
 
-			Example Input: formatText("print(123)")
-			Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
-			Example Input: formatText(myFunction)
-			"""
+				Example Input: PlainText()
+				Example Input: PlainText("print(123)")
+				Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+				"""
 
-			if (isinstance(command, str)):
-				return command
-			elif (callable(command)):
-				try:
-					answer = command(*self.args, **self.kwargs)
-				except Exception as error:
-					# raise error
-					print(error)
-					answer = None
+				mp_self.command = command or ""
+				mp_self.args = args or ()
+				mp_self.kwargs = kwargs or {}
 
-				if (answer is None):
-					match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
-					assert match
-					lines = match.group(1).rstrip().split("\n")
-					indent = len(lines[0]) - len(lines[0].lstrip('\t'))
-					return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
+			def formatText(mp_self, command):
+				"""Formats the given command.
+
+				Example Input: formatText("print(123)")
+				Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+				Example Input: formatText(myFunction)
+				"""
+
+				if (isinstance(command, str)):
+					return command
+				elif (callable(command)):
+					try:
+						answer = command(*mp_self.args, **mp_self.kwargs)
+					except Exception as error:
+						# raise error
+						print(error)
+						answer = None
+
+					if (answer is None):
+						match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
+						assert match
+						lines = match.group(1).rstrip().split("\n")
+						indent = len(lines[0]) - len(lines[0].lstrip('\t'))
+						return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
+					else:
+						return mp_self.formatText(answer)
 				else:
-					return self.formatText(answer)
-			else:
-				return "\n".join(self.formatText(item) for item in command)
-	alembic.operations.ops.PlainText = mp_PlainText
+					return "\n".join(mp_self.formatText(item) for item in command)
+		alembic.operations.ops.PlainText = mp_PlainText
 
-	@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
-	def _setPlainText(context, operation):
-		"""
-		Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
-		Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
-		"""
+		@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
+		def _setPlainText(context, operation):
+			"""
+			Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
+			Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
+			"""
 
-		return operation.formatText(operation.command)
+			return operation.formatText(operation.command)
 
 class Database(Utility_Base):
 	"""Used to create and interact with a database.

@@ -11,8 +11,10 @@ Mapper = Database.makeBase()
 class Customer(Mapper, Database.Schema_Base):
 	__tablename__ = 'Customer'
 
-	id 				= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, autoincrement = True)
+	# id 				= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, autoincrement = True)
 	# name 			= sqlalchemy.Column(sqlalchemy.Unicode, nullable = False)
+
+	id 				= sqlalchemy.Column(sqlalchemy.Integer, primary_key = True, autoincrement = True)
 	first_name 		= sqlalchemy.Column(sqlalchemy.Unicode, nullable = False)
 	last_name 		= sqlalchemy.Column(sqlalchemy.Unicode, nullable = False)
 
@@ -23,28 +25,16 @@ for module in hasForeignCatalogue.values():
 	module.formatForeign(relationCatalogue)
 
 if __name__ == '__main__':
+	#Follows https://www.youtube.com/watch?v=xzsbHMHYI5c
 	database = Database.build("test_map_example.db", "test_map_2")
 
 	def startOver():
-		print("@1")
-		# engine = sqlalchemy.create_engine("sqlite:///test_map_example.db")
-		# Mapper.metadata.bind = engine
-		# Mapper.metadata.reflect()
+		database.removeRelation()
+		database.createRelation()
+		database.resetRelation()
 
-		# Mapper.metadata.drop_all()
-		# Mapper.metadata.create_all()
-		# for relationHandle in relationCatalogue.values():
-		# 	relationHandle.reset()
-
-		# sessionMaker = sqlalchemy.orm.sessionmaker()
-		# DBSession = sqlalchemy.orm.sessionmaker(bind = engine)
-		# session = DBSession()
-
-		# session.add(Customer(id = 1, name = "Mickey Mouse"))
-		# session.add(Customer(id = 2, name = "Donald Duck"))
-		# session.commit()
-
-		# database.resetAlembic()
+		database.addTuple({"Customer": ({"id": 1, "name": "Mickey Mouse"}, {"id": 2, "name": "Donald Duck"})})
+		database.alembic.resetAlembic()
 
 	def test(operation):
 		column = operation.column
@@ -81,9 +71,17 @@ if __name__ == '__main__':
 		
 		return nested
 
-	startOver()
-	# revision()
-	# # upgrade()
-	# # upgrade(sql = True)
-	# # history()
-	# # downgrade()
+	# startOver()
+	# database.alembic.revision(message = "split name column")
+	# database.alembic.upgrade(sql = True)
+	# database.alembic.upgrade()
+	# print(database.alembic.check())
+	# print(database.alembic.check(returnDifference = True))
+
+	# database.alembic.history()
+	# database.alembic.history(indicate_current = True)
+
+	# database.alembic.downgrade()
+	# print(database.alembic.check())
+	# print(database.alembic.check(returnDifference = True))
+
