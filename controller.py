@@ -166,6 +166,7 @@ class _set(set):
 	def append(self, *args, **kwargs):
 		return self.add(*args, **kwargs)
 
+#Utility Classes
 class Base():
 	@classmethod
 	def ensure_set(cls, item, convertNone = False):
@@ -245,21 +246,46 @@ class Base():
 		# # column = table.columns["name"]
 		# return Mapper._decl_class_registry[column.table.name]
 
-#Schema Mixins
-def makeBase():
-	return sqlalchemy.ext.declarative.declarative_base(cls = CustomBase, metadata = CustomMetaData())
+class Utility_Base(Base):
+	#Context Managers
+	@contextlib.contextmanager
+	def makeSession(self):
+		"""Provides a transactional scope around a series of operations.
+		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
+		"""
+		global sessionMaker
+		
+		session = sessionMaker(bind = self.engine)
+		try:
+			yield session
+			session.commit()
+		except:
+			session.rollback()
+			raise
+		finally:
+			session.close()
 
-migrationCatalogue = {}
-class CustomMetaData(sqlalchemy.MetaData):
-	migrationCatalogue = migrationCatalogue
+	@contextlib.contextmanager
+	def makeConnection(self, asTransaction = True):
 
-	@classmethod
-	def getAlembic(cls):
-
-		assert False
-
-class CustomBase():
-	pass
+		connection = self.engine.connect()
+		if (asTransaction):
+			transaction = connection.begin()
+			try:
+				yield connection
+				transaction.commit()
+			except:
+				transaction.rollback()
+				raise
+			finally:
+				connection.close()
+		else:
+			try:
+				yield connection
+			except:
+				raise
+			finally:
+				connection.close()
 
 class Schema_Base(Base):
 	defaultRows = ()
@@ -317,7 +343,7 @@ class Schema_Base(Base):
 				session.add(cls(**catalogue))
 
 	@classmethod
-	def yieldColumn(cls, attributeList, exclude, alias):
+	def yieldColumn(cls, attributeList, exclude, alias, **kwargs):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
 
 		for attribute in attributeList:
@@ -400,8 +426,22 @@ class Schema_AutoForeign():
 	# 	yield columnHandle
 
 	@classmethod
-	def yieldColumn(cls, catalogueList, exclude, alias):
+	def yieldColumn(cls, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		def formatAttribute(foreignKey, attribute):
+			if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
+				if (foreignAsDict):
+					return f"zfk_{foreignKey}_zfk_{alias[foreignKey][attribute]}"
+				else:
+					return alias[foreignKey][attribute]
+			else:
+				if (foreignAsDict):
+					return f"zfk_{foreignKey}_zfk_{attribute}"
+				else:
+					return f"{foreignKey}_{attribute}"
+
+		#######################################################
 
 		for catalogue in catalogueList:
 			if (not isinstance(catalogue, dict)):
@@ -409,20 +449,17 @@ class Schema_AutoForeign():
 					for answer in cls._yieldColumn_noForeign(catalogue, exclude, alias):
 						yield answer
 					continue
-				catalogue = {catalogue: "label"}
+
+				if (foreignDefault is None):
+					catalogue = {catalogue: tuple(attribute for attribute in cls.foreignKeys[catalogue].__mapper__.columns.keys() if (attribute not in {"id", *(exclude or ())}))}
+				else:
+					catalogue = {catalogue: foreignDefault}
 
 			for foreignKey, attributeList in catalogue.items():
 				relationHandle = cls.foreignKeys[foreignKey]
 
 				for attribute in cls.ensure_container(attributeList):
-					columnHandle = getattr(relationHandle, attribute)
-
-					if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
-						columnHandle = columnHandle.label(alias[foreignKey][attribute])
-					else:
-						columnHandle = columnHandle.label(f"{foreignKey}_{attribute}")
-
-					yield columnHandle
+					yield getattr(relationHandle, attribute).label(formatAttribute(foreignKey, attribute))
 
 	def change(self, session, values = {}, updateForeign = None, checkForeign = True):
 		"""
@@ -461,6 +498,21 @@ class Schema_AutoForeign():
 				session.add(child)
 				setattr(self, variable, child)
 
+migrationCatalogue = {}
+class CustomMetaData(sqlalchemy.MetaData, Base):
+	migrationCatalogue = migrationCatalogue
+
+	@classmethod
+	def getAlembic(cls):
+
+		assert False
+
+class CustomBase():
+	pass
+
+def makeBase():
+	return sqlalchemy.ext.declarative.declarative_base(cls = CustomBase, metadata = CustomMetaData())
+
 #Controllers
 def build(*args, **kwargs):
 	"""Starts the GUI making process."""
@@ -478,48 +530,6 @@ class Singleton():
 
 NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
-
-#Utility Classes
-class Utility_Base(Base):
-	#Context Managers
-	@contextlib.contextmanager
-	def makeSession(self):
-		"""Provides a transactional scope around a series of operations.
-		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
-		"""
-		global sessionMaker
-		
-		session = sessionMaker(bind = self.engine)
-		try:
-			yield session
-			session.commit()
-		except:
-			session.rollback()
-			raise
-		finally:
-			session.close()
-
-	@contextlib.contextmanager
-	def makeConnection(self, asTransaction = True):
-
-		connection = self.engine.connect()
-		if (asTransaction):
-			transaction = connection.begin()
-			try:
-				yield connection
-				transaction.commit()
-			except:
-				transaction.rollback()
-				raise
-			finally:
-				connection.close()
-		else:
-			try:
-				yield connection
-			except:
-				raise
-			finally:
-				connection.close()
 
 #Main API
 class Alembic():
@@ -770,7 +780,9 @@ class Alembic():
 			
 			if (not source.endswith('env.py.mako')):
 				return old__copy_file(mp_self, source, destination)
-			imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {self.parent.schemaPath}\ntarget_metadata = {self.parent.schemaPath}.Mapper.metadata'
+
+			schema = self.parent.schemaPath.split(".")[-1]
+			imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {schema}\ntarget_metadata = {schema}.Mapper.metadata'
 			old__generate_template(mp_self, source, destination.rstrip(".mako"), imports = imports)
 		old__copy_file = alembic.command.ScriptDirectory._copy_file
 		alembic.command.ScriptDirectory._copy_file = mp__copy_file
@@ -960,19 +972,52 @@ class Database(Utility_Base):
 		return tuple(inspector.get_table_names())
 
 	@wrap_errorCheck()
-	def getAttributeNames(self, relation, exclude = None):
+	def getAttributeNames(self, relation, exclude = None, foreignAsDict = False):
 		"""Returns the names of all attributes (columns) in the given relation (table).
 
 		relation (str) - The name of the relation
 		exclude (list) - A list of which attributes to excude from the returned result
+		foreignAsDict (bool) - Determines how foreign keys are returned
+			- If True: {foreign key (str): [foreign attribute (str)]}
+			- If False: foreign key (str)
+			- If None: domestic id for foreign key (str)
 
 		Example Input: getAttributeNames("Users")
 		Example Input: getAttributeNames("Users", exclude = ["age", "height"])
+
+		Example Input: getAttributeNames("Containers", foreignAsDict = True)
+		Example Input: getAttributeNames("Containers", foreignAsDict = None)
 		"""
 
 		exclude = self.ensure_container(exclude)
 		inspector = sqlalchemy.inspect(self.engine)
-		return tuple(catalogue["name"] for catalogue in inspector.get_columns(relation) if (catalogue["name"] not in exclude))
+
+		if (foreignAsDict is not None):
+			relationHandle = self.schema.relationCatalogue[relation]
+
+
+		def yieldAttribute():
+			nonlocal self, relation, exclude, foreignAsDict
+
+			for catalogue in inspector.get_columns(relation):
+				key = catalogue["name"]
+				if (key in exclude):
+					continue
+
+				if ((foreignAsDict is not None) and (key.endswith("_id"))):
+					foreignKey = key.rstrip('_id')
+					if (foreignKey in relationHandle.foreignKeys):
+						if (foreignAsDict):
+							yield {foreignKey: tuple(self.getAttributeNames(relationHandle.foreignKeys[foreignKey]).__name__)} 
+						else:
+							yield foreignKey
+						continue
+
+				yield key
+
+		##########################################
+
+		return tuple(yieldAttribute())
 
 	@wrap_errorCheck()
 	def getAttributeDefaults(self, relation, attribute = None, exclude = None):
@@ -993,19 +1038,6 @@ class Database(Utility_Base):
 		"""Returns the number of tuples (rows) in a relation (table).
 
 		Example Input: getTupleCount("Users")
-		"""
-
-	# @cachetools.cached(attributeCache, key = hash_formatAttribute)#, lock = cacheLock)
-	def formatAttribute(self, attribute, row = None, alias = None):
-		"""Returns a formatted attribute.
-
-		Example Input: formatValue(attribute, alias)
-		"""
-
-	def formatValue(self, *args, formatter = None, **kwargs):
-		"""Returns a formatted value.
-
-		Example Input: formatValue(value, attribute, relation)
 		"""
 
 	def configureLocation(self, handle, schema, fromSchema = False, nextToCondition = True, nextToCondition_None = None, checkForeign = True, forceMatch = True, 
@@ -1120,17 +1152,22 @@ class Database(Utility_Base):
 		return handle.order_by(_orderBy)
 
 	def configureJoin(self, query, relation, schema, attributeList, fromSchema = True):
+
+		if (fromSchema):
+			handle = query
+		else:
+			handle = self.metadata.tables[relation]
+
 		for attribute in attributeList:
 			foreignHandle = schema.foreignKeys.get(attribute)
 			if (foreignHandle is None):
 				continue
+			handle = handle.join(foreignHandle)
 
-			if (fromSchema):
-				query = query.join(foreignHandle)
-			else:
-				query = query.select_from(self.metadata.tables[relation].join(foreignHandle))
+		if (fromSchema):
+			return handle
 
-		return query
+		return query.select_from(handle)
 
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
@@ -1227,6 +1264,8 @@ class Database(Utility_Base):
 		self.isSQLite = self.connectionType == "sqlite3"
 		self.isMySQL = self.connectionType == "mysql"
 
+		reset = not os.path.exists(fileName)
+
 		if (self.isSQLite):
 			self.fileName = f"sqlite:///{fileName}"
 			self.engine = sqlalchemy.create_engine(self.fileName)
@@ -1240,7 +1279,16 @@ class Database(Utility_Base):
 		if (schemaPath):
 			self.loadSchema(schemaPath)
 
-		self.loadAlembic(alembicPath)
+		if (fileName != ":memory:"):
+			self.loadAlembic(alembicPath)
+
+		if (reset):
+			print(f"Creating Fresh Database for {fileName}")
+			self.createRelation()
+			self.resetRelation()
+
+			if (self.alembic):
+				self.alembic.stamp()
 
 	def _fk_pragma_on_connect(self, connection, record):
 		"""Turns foreign keys on for SQLite.
@@ -1278,6 +1326,11 @@ class Database(Utility_Base):
 
 		Example Input: loadSchema(schemaPath)
 		"""
+
+
+		if (os.path.isfile(schemaPath)):
+			sys.path.append(os.path.dirname(schemaPath))
+			schemaPath = os.path.splitext(os.path.basename(schemaPath))[0]
 
 		self.schemaPath = schemaPath
 		self.schema = importlib.import_module(self.schemaPath)
@@ -1406,7 +1459,9 @@ class Database(Utility_Base):
 
 		if (relation is None):
 			self.metadata.create_all()
-			self.alembic.stamp()
+
+			if (self.alembic):
+				self.alembic.stamp()
 			return
 
 		if (schemaPath is None):
@@ -1612,6 +1667,9 @@ class Database(Utility_Base):
 		Example Input: getAllValues(["Users", "Names"], orderBy = {"Users": ["age", "height"]})
 		Example Input: getAllValues(["Users", "Names"], orderBy = {"Users": ["age", "height"], "Names": "extra_data"})
 		Example Input: getAllValues(["Users", "Names"], orderBy = "id")
+
+		database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived"))
+		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
 
 		relation = self.ensure_container(relation)
@@ -1638,7 +1696,8 @@ class Database(Utility_Base):
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
 		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
 		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True, rowsAsList = False, 
-		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = True, **locationKwargs):
+		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = True,
+		foreignAsDict = False, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -1654,66 +1713,51 @@ class Database(Utility_Base):
 			- If an attribute is a foreign key: {value: {foreign relation: foreign attribute}}
 			- If None: The whole column will be returned
 			- If str: Will return for all columns where that value is present
+		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
+			- If True: Create a new row that contains the default values
+			- If False: Do nothing
+			- If None: Do nothing
+		
 		orderBy (any)    - Determines whether to order the returned values or not. A list can be given to establish priority for multiple things
 			- If None: Do not order
 			- If not None: Order the values by the given attribute
-		limit (int)      - Determines whether to limit the number of values returned or not
-			- If None: Do not limit the return results
-			- If not None: Limit the return results to this many
 		direction (bool) - Determines if a descending or ascending condition should be appled. Used for integers. If a list is given for 'orderBy', either
 			(A) a list must be given with the same number of indicies, (B) a single bool given that will apply to all, or (C) a dictionary given where the 
 			key is the item to adjust and the value is the bool for that item
 			- If True: Ascending order
 			- If False: Descending order
 			- If None: No action taken
-		exclude (list) - What values to not return
-		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
-			- If True: Create a new row that contains the default values
-			- If False: Do nothing
-			- If None: Do nothing
+		limit (int)      - Determines whether to limit the number of values returned or not
+			- If None: Do not limit the return results
+			- If not None: Limit the return results to this many
 
-		nextToCondition (bool) - Determines how to handle multiple nextTo criteria
-			- If True: All of the criteria given must match
-			- If False: Any of the criteria given must match
-		checkForeign (bool)   - Determines if foreign keys will be take in account
-		
-		filterTuple (bool)     - Determines how the final result in the catalogue will be returned if there is only one column
-			- If True: (value 1, value 2, value 3...)
-			- If False: ((value 1, ), (value 2, ), (value 3. ),..)
-		filterRelation (bool)  - Determines how catalogue will be returned
-			- If True: {attribute 1: values, attribute 2: values}
-				For multiple relations: {attribute 1 for relation 1: values, attribute 2 for relation 1: values, attribute 1 for relation 2: values}
-			- If False: {relation: {attribute 1: values, attribute 2: values}}
-				For multiple relations: {relation 1: {attribute 1 for relation 1: values, attribute 2 for relation 1: values}, {attribute 1 for relation 2: values}}
-		filterForeign (bool)   - Determines how results of foreign attributes will be returned
-			- If True: Returns only the values that have valid foreign keys
-			- If False: Returns all values and replaces values that have valid foreign keys
-			- If None:  Returns Replaces values that have valid foreign keys and fills in a None for values with invalid foreign keys
-		filterAttribute (bool) - Determines how catalogue will be returned
-			- If True: returns a list of all values
-				For multiple attributes: [values for attribute 1 and 2]
-			- If False: {attribute: values}
-				For multiple attributes: {attribute 1: values for attribute 1, attribute 2: values for attribute 2}
+		checkForeign (bool)  - Determines if foreign keys will be take in account
+			- If True: Will check foreign keys
+			- If False: Will not check foreign keys
+		foreignAsDict (bool) - Determines how results for foreignKeys are returned
+			- If True: {domestic attribute: {foreign attribute: foreign value}}
+			- If False: {domestic attribute's foreign attribute: domestic attribute's foreign value}
+			- If None: {foreign id: domestic value}
+		foreignDefault (str) - What foreign key to look for when an attribute is a foreign key, but not a dictionary
+			- If None: Will return all foreign attributes that are not primary keys
+			- If str: Will return only that foreign attribute
+			- If list: Will return all foreign attributes in list
 
-		valuesAsList (bool)    - Determines if the values returned should be a list or a tuple
-			- If True: Returned values will be in a list
-			- If False: Returned values will be in a tuple
-		valuesAsRows (bool)    - Determines if the values returned should be returned as rows or columns
-			- If True: Returned values will be all the row values for that column {relation: {attribute 1: {row 1: value, row 2: value, row 3: value}}}
-			- If False: Returned values will be all the column values for that row with the attribute names with each value {relation: {row 1: {attribute 1: value, attribute 2: value, attribute 3: value}}}
-
-		greaterThan (int)          - Determines if returned values must be '>' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
-			- If not None: Returned values will be '>' the given number
-			- If None: Does nothing
-		lessThan (int)             - Determines if returned values must be '<' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
-			- If not None: Returned values will be '<' the given number
-			- If None: Does nothing
-		greaterThanOrEqualTo (int) - Determines if returned values must be '>=' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
-			- If not None: Returned values will be '>=' the given number
-			- If None: Does nothing
-		lessThanOrEqualTo (int)    - Determines if returned values must be '<=' another value. {attribute 1 (str): value (int), attribute 2 (str): value (int)}
-			- If not None: Returned values will be '<=' the given number
-			- If None: Does nothing
+		forceRelation (bool)  - Determines if the relation is returned in the answer
+			- If True: Answers will always contain the relation
+			- If False: Answers will omit the relation if there is only one in the answer
+		forceAttribute (bool) - Determines if the attribute is returned in the answer
+			- If True: Answers will always contain the attribute
+			- If False: Answers will omit the attribute if there is only one in the answer
+		forceTuple (bool)     - Determines if the row separator is returned in the answer
+			- If True: Answers will always contain the row separator
+			- If False: Answers will omit the row separator if there is only one in the answer
+		attributeFirst (bool) - Determines if the attribute is first in the answer
+			- If True: {relation: {attribute: {row: value}}}
+			- If False: {relation: {row: {attribute: value}}}
+		rowsAsList (bool)     - Determines how rows are separated
+			- If True: Rows are a tuple of dictionaries
+			- If False: Rows are dictionary keys that hold dictionaries as values
 
 		Example Input: getValue({"Users": "name"})
 		Example Input: getValue({"Users": "name"}, valuesAsList = True)
@@ -1758,7 +1802,7 @@ class Database(Utility_Base):
 			def startQuery(relation, attributeList, schema):
 				nonlocal self, excludeList, alias
 
-				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias)).select_from(schema)
+				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
 
 			def yieldRow(query):
 				nonlocal count
@@ -1768,24 +1812,47 @@ class Database(Utility_Base):
 					return
 
 				for result in query.all():
-					if (forceAttribute or (len(result) > 1)):
-						yield result._asdict()
-					else:
+					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
+
+					elif (not foreignAsDict):
+						yield result._asdict()
+
+					else:
+						catalogue = collections.defaultdict(dict)
+						for key, value in result._asdict().items():
+							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
+							if (not foreignMatch):
+								catalogue[key] = value
+							else:
+								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
+						yield dict(catalogue)
+
 		else:
 			contextmanager = self.makeConnection(asTransaction = True)
 			
 			def startQuery(relation, attributeList, schema):
 				nonlocal self, excludeList, alias
 
-				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias))
+				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
 
 			def yieldRow(query):
 				for result in connection.execute(query).fetchall():
-					if (forceAttribute or (len(result) > 1)):
-						yield dict(result)
-					else:
+					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
+
+					elif (not foreignAsDict):
+						yield dict(result)
+
+					else:
+						catalogue = collections.defaultdict(dict)
+						for key, value in result.items():
+							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
+							if (not foreignMatch):
+								catalogue[key] = value
+							else:
+								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
+						yield dict(catalogue)
 
 		def getResult(query, connection):
 			nonlocal forceTuple
@@ -1808,7 +1875,7 @@ class Database(Utility_Base):
 			for relation, attributeList in myTuple.items():
 				if (isinstance(exclude, dict)):
 					excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation)
+				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict is None)
 
 				schema = self.schema.relationCatalogue[relation]
 				
@@ -1938,22 +2005,26 @@ def quiet(*args):
 def sandbox():
 
 	database_API = build()
-	# database_API.openDatabase(None, "test_map")
-	# database_API.openDatabase("test_map_example.db", "test_map")
-	# database_API.removeRelation()
-	# database_API.createRelation()
-	# database_API.resetRelation()
+	database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") # database_API.openDatabase("test_map_example.db", "test_map")
+	database_API.removeRelation()
+	database_API.createRelation()
+	database_API.resetRelation()
 
-	# #Add Items
-	# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
-	# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+	#Add Items
+	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+	database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
 	
-	# #Get Items
+	#Get Items
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
 	# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+
 	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignAsDict = True))
+	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label"))
+	quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
+	quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = False))
 
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
 	# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
@@ -1971,7 +2042,10 @@ def sandbox():
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
 	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
 
+	# quiet(database_API.getAllValues("Containers", fromSchema = False))
 	# quiet(database_API.getAllValues("Containers"))
+	# quiet(database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived")))
+	# quiet(database_API.getAllValues("Containers", foreignDefault = ("label", "archived")))
 
 
 	# #Change Items
@@ -1984,14 +2058,14 @@ def sandbox():
 	# database_API.removeTuple({"Containers": {"label": "sit"}})
 	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
 
-	#Update Schema
-	database_API.openDatabase("test_map_example.db", "test_map_2")
-	database_API.checkSchema()
+	# #Update Schema
+	# database_API.openDatabase("test_map_example.db", "test_map_2")
+	# database_API.checkSchema()
 
 def main():
 	"""The main program controller."""
 
-	# sandbox()
+	sandbox()
 
 if __name__ == '__main__':
 	main()
