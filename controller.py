@@ -3,33 +3,48 @@ __version__ = "3.4.0"
 ## TO DO ##
 # - Add a foreign key cleanup command; removes unused foreign keys in foreign tables
 
+#Standard Modules
 import re
+import os
 import sys
 import time
 import types
+import shutil
+
+#Utility Modules
+import inspect
+import warnings
+import traceback
+import importlib
+import itertools
+import functools
+import cachetools
+import contextlib
+import collections
+
+#Database Modules
 import pyodbc
 import sqlite3
 import sqlalchemy
 import sqlalchemy.ext.declarative
-import warnings
-import traceback
-import functools
-import itertools
-import cachetools
-import collections
-import contextlib
-import importlib
+
+import alembic
+import alembic.config
+import alembic.command
+from alembic.config import Config as alembic_config_Config
 
 #For multi-threading
-# import sqlalchemy
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
+
+sessionMaker = sqlalchemy.orm.sessionmaker()
 
 #Required Modules
 ##py -m pip install
 	# sqlite3
 	# pyodbc
 	# sqlalchemy
+	# alembic
 
 #Debugging functions
 def printCurrentTrace(printout = True, quitAfter = False):
@@ -115,10 +130,8 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 				answer = None
 				errorMessage = traceback.format_exc()
 				
-				print(f"Previous Command: {self.previousCommand}")
 				if (not raiseError):
 					print(errorMessage)
-
 				try:
 					with open(fileName, "a") as fileHandle:
 						if (timestamp):
@@ -153,6 +166,301 @@ class _set(set):
 	def append(self, *args, **kwargs):
 		return self.add(*args, **kwargs)
 
+class Base():
+	@classmethod
+	def ensure_set(cls, item, convertNone = False):
+		"""Makes sure the given item is a set.
+
+		Example Input: ensure_set(exclude)
+		Example Input: ensure_set(exclude, convertNone = True)
+		"""
+
+		if (item is not None):
+			if (isinstance(item, (str, int, float))):
+				return {item}
+			elif (not isinstance(item, set)):
+				return set(item)
+			return item
+
+		if (convertNone):
+			return set()
+
+	@classmethod
+	def ensure_list(cls, item, convertNone = False):
+		"""Makes sure the given item is a list.
+
+		Example Input: ensure_list(exclude)
+		Example Input: ensure_list(exclude, convertNone = True)
+		"""
+
+		if (item is not None):
+			if (isinstance(item, (str, int, float))):
+				return [item]
+			elif (not isinstance(item, list)):
+				return list(item)
+			return item
+
+		if (convertNone):
+			return []
+
+	@classmethod
+	def ensure_container(cls, item, evaluateGenerator = True, convertNone = False):
+		"""Makes sure the given item is a container.
+
+		Example Input: ensure_container(valueList)
+		Example Input: ensure_container(valueList, convertNone = True)
+		Example Input: ensure_container(valueList, evaluateGenerator = False)
+		"""
+
+		if (item is None):
+			if (convertNone):
+				return (None,)
+			return ()
+		
+		if (isinstance(item, (str, int, float, dict))):
+			return (item,)
+
+		if (not isinstance(item, (list, tuple, set))):
+			if (evaluateGenerator):
+				return tuple(item)
+			return item
+		return item
+
+	@classmethod
+	def getSchema(cls):
+		"""Returns the functions needed to migrate the data from the old schema to the new one."""
+
+		return []
+
+	def getSchemaClass(cls, relation):
+		"""Returns the schema class for the given relation.
+		Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
+
+		relation (str) - What relation to return the schema class for
+
+		Example Input: getSchemaClass("Customer")
+		"""
+
+		# # table = Mapper.metadata.tables.get("Customer")
+		# # column = table.columns["name"]
+		# return Mapper._decl_class_registry[column.table.name]
+
+#Schema Mixins
+def makeBase():
+	return sqlalchemy.ext.declarative.declarative_base(cls = CustomBase, metadata = CustomMetaData())
+
+migrationCatalogue = {}
+class CustomMetaData(sqlalchemy.MetaData):
+	migrationCatalogue = migrationCatalogue
+
+	@classmethod
+	def getAlembic(cls):
+
+		assert False
+
+class CustomBase():
+	pass
+
+class Schema_Base(Base):
+	defaultRows = ()
+
+	#Context Managers
+	@classmethod
+	@contextlib.contextmanager
+	def makeSession(cls):
+		"""Provides a transactional scope around a series of operations.
+		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
+		"""
+		global sessionMaker
+		
+		session = sessionMaker(bind = cls.metadata.bind)
+		try:
+			yield session
+			session.commit()
+		except:
+			session.rollback()
+			raise
+		finally:
+			session.close()
+
+	@classmethod
+	@contextlib.contextmanager
+	def makeConnection(cls, asTransaction = True):
+
+		connection = cls.metadata.bind.connect()
+		if (asTransaction):
+			transaction = connection.begin()
+			try:
+				yield connection
+				transaction.commit()
+			except:
+				transaction.rollback()
+				raise
+			finally:
+				connection.close()
+		else:
+			try:
+				yield connection
+			except:
+				raise
+			finally:
+				connection.close()
+
+	#Virtual Functions
+	@classmethod
+	def reset(cls):
+		"""Clears all rows and places in default ones."""
+
+		with cls.makeSession() as session:
+			session.query(cls).delete()
+			for catalogue in cls.defaultRows:
+				session.add(cls(**catalogue))
+
+	@classmethod
+	def yieldColumn(cls, attributeList, exclude, alias):
+		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		for attribute in attributeList:
+			for answer in cls._yieldColumn_noForeign(attribute, exclude, alias):
+				yield answer
+
+	@classmethod
+	def _yieldColumn_noForeign(cls, attribute, exclude, alias):
+		if (attribute in exclude):
+			return
+
+		columnHandle = getattr(cls, attribute)
+		if (alias and (attribute in alias)):
+			columnHandle = columnHandle.label(alias[attribute])
+		yield columnHandle
+
+	def change(self, values = {}, **kwargs):
+		for variable, newValue in values.items():
+			setattr(self, variable, newValue)
+
+class Schema_AutoForeign():
+	foreignKeys = {}
+
+	def __init__(self, kwargs = {}):
+		"""Automatically creates tuples for the provided relations if one does not exist.
+		Special thanks to van for how to automatically add children on https://stackoverflow.com/questions/8839211/sqlalchemy-add-child-in-one-to-many-relationship
+		"""
+
+		for variable, relationHandle in self.foreignKeys.items():
+			catalogue = kwargs.pop(variable, None)
+			if (not catalogue):
+				continue
+			if (not isinstance(catalogue, dict)):
+				catalogue = {"label": catalogue}
+
+			with self.makeSession() as session:
+				child = session.query(relationHandle).filter(sqlalchemy.and_(getattr(relationHandle, key) == value for key, value in catalogue.items())).one_or_none()
+				if (child is None):
+					child = relationHandle(**catalogue)
+					session.add(child)
+					session.commit()
+					setattr(self, variable, child)
+				kwargs[f"{variable}_id"] = child.id
+
+	@classmethod
+	def formatForeign(cls, schema):
+		"""Automatically creates the neccissary things to accommodate the foreign keys.
+		Special thanks to Cecil Curry fro the quickest way to get the first item in a set on: https://stackoverflow.com/questions/59825/how-to-retrieve-an-element-from-a-set-without-removing-it
+		
+		Example Input: formatForeign(self.schema)
+		_______________________________________________________________
+
+		Example Usage: 
+			for module in Schema_AutoForeign.__subclasses__():
+				module.formatForeign(hasForeignCatalogue)
+		_______________________________________________________________
+		"""
+
+		cls.foreignKeys = {}
+		for attribute, columnHandle in cls.__mapper__.columns.items():
+			if (attribute.endswith("_id")):
+				assert columnHandle.foreign_keys
+				for foreignKey in columnHandle.foreign_keys: break
+
+				variable = attribute.rstrip('_id')
+				relationHandle = schema[foreignKey._table_key()]
+				cls.foreignKeys[variable] = relationHandle
+
+				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower())) #Many to One 
+				#cascade="all, delete, delete-orphan" #https://docs.sqlalchemy.org/en/latest/orm/tutorial.html
+
+	# @classmethod
+	# def _yieldColumn_noForeign(cls, attribute, exclude, alias):
+	# 	if (attribute in exclude):
+	# 		return
+
+	# 	columnHandle = getattr(cls, attribute)
+	# 	if (alias and (attribute in alias)):
+	# 		columnHandle = columnHandle.label(alias[attribute])
+	# 	yield columnHandle
+
+	@classmethod
+	def yieldColumn(cls, catalogueList, exclude, alias):
+		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		for catalogue in catalogueList:
+			if (not isinstance(catalogue, dict)):
+				if (catalogue not in cls.foreignKeys):
+					for answer in cls._yieldColumn_noForeign(catalogue, exclude, alias):
+						yield answer
+					continue
+				catalogue = {catalogue: "label"}
+
+			for foreignKey, attributeList in catalogue.items():
+				relationHandle = cls.foreignKeys[foreignKey]
+
+				for attribute in cls.ensure_container(attributeList):
+					columnHandle = getattr(relationHandle, attribute)
+
+					if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
+						columnHandle = columnHandle.label(alias[foreignKey][attribute])
+					else:
+						columnHandle = columnHandle.label(f"{foreignKey}_{attribute}")
+
+					yield columnHandle
+
+	def change(self, session, values = {}, updateForeign = None, checkForeign = True):
+		"""
+		checkForeign (bool) - Determines if foreign keys will be take in account
+		updateForeign (bool) - Determines what happens to existing foreign keys
+			- If True: Foreign keys will be updated to the new value
+			- If False: A new foreign tuple will be inserted
+			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
+		"""
+
+		if (not checkForeign):
+			super().change(session, values = values)
+
+		for variable, catalogue in values.items():
+			if (variable not in self.foreignKeys):
+				setattr(self, variable, catalogue)
+				continue
+
+			handle = getattr(self, variable)
+			if (not isinstance(catalogue, dict)):
+				catalogue = {"label": catalogue}
+
+			if (handle is None):
+				#I have no foreign key, so I will make a new one
+				child = handle.__class__(**catalogue)
+				session.add(child)
+				setattr(self, variable, child)
+
+			elif (updateForeign or ((updateForeign is None) and (len(getattr(handle, self.__class__.__name__.lower())) is 1))):
+				#I am the only one using this foreign key, so I can change it; I was told to force the change on this foreign key
+				for subVariable, newValue in catalogue.items():
+					setattr(handle, subVariable, newValue)
+			else:
+				#Someone else is using that foreign key, so I will make a new one; I was told to force no change on this foreign key
+				child = handle.__class__(**catalogue)
+				session.add(child)
+				setattr(self, variable, child)
+
 #Controllers
 def build(*args, **kwargs):
 	"""Starts the GUI making process."""
@@ -171,70 +479,17 @@ class Singleton():
 NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
 
-class Database():
-	"""Used to create and interact with a database.
-	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
-	"""
-
-	def __init__(self, fileName = None, *args, **kwargs):
-		"""Defines internal variables.
-		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
-
-		fileName (str) - If not None: Opens the provided database automatically
-		keepOpen (bool) - Determines if the database is kept open or not
-			- If True: The database will remain open until closed by the user or the program terminates
-			- If False: The database will be opened only when it needs to be accessed, and closed afterwards
-
-		Example Input: Database()
-		Example Input: Database("emaildb")
-		"""
-
-		self.threadLock = threading.RLock()
-		self.sessionMaker = sqlalchemy.orm.sessionmaker()
-		self.TableBase = sqlalchemy.ext.declarative.declarative_base()
-
-		#Internal variables
-		self.schema = None
-		self.cursor = None
-		self.waiting = False
-		self.fileName = None
-		self.defaultCommit = None
-		self.connectionType = None
-		self.defaultFileExtension = ".db"
-		self.previousCommand = (None, None) #(command (str), valueList (tuple))
-		self.resultError_replacement = None
-		self.aliasError_replacement = None
-
-		#Initialization functions
-		if (fileName is not None):
-			self.openDatabase(fileName = fileName, *args, **kwargs)
-
-	def __repr__(self):
-		representation = f"{type(self).__name__}(id = {id(self)})"
-		return representation
-
-	def __str__(self):
-		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		if (self.fileName is not None):
-			output += f"-- File Name: {self.fileName}\n"
-		return output
-
-	def __enter__(self):			
-		return self
-
-	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback is not None):
-			print(exc_type, exc_value)
-			return False
-
+#Utility Classes
+class Utility_Base(Base):
 	#Context Managers
 	@contextlib.contextmanager
 	def makeSession(self):
 		"""Provides a transactional scope around a series of operations.
 		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
 		"""
+		global sessionMaker
 		
-		session = self.sessionMaker()
+		session = sessionMaker(bind = self.engine)
 		try:
 			yield session
 			session.commit()
@@ -246,8 +501,8 @@ class Database():
 
 	@contextlib.contextmanager
 	def makeConnection(self, asTransaction = True):
-		connection = self.engine.connect()
 
+		connection = self.engine.connect()
 		if (asTransaction):
 			transaction = connection.begin()
 			try:
@@ -265,6 +520,381 @@ class Database():
 				raise
 			finally:
 				connection.close()
+
+#Main API
+class Alembic():
+	"""Used to handle database migrations and schema changes.
+	If you want to generate SQL script: 
+		Use: https://alembic.zzzcomputing.com/en/latest/offline.html
+		Use: https://alembic.zzzcomputing.com/en/latest/batch.html#batch-offline-mode
+		Use: https://bitbucket.org/zzzeek/alembic/issues/323/better-exception-when-attempting
+
+	Modified code from: https://stackoverflow.com/questions/24622170/using-alembic-api-from-inside-application-code/43530495#43530495
+	Modified code from: https://www.youtube.com/watch?v=xzsbHMHYI5c
+	"""
+
+	def __init__(self, parent, ensureCompatability = False, **kwargs):
+		"""Loads in the alembic directory and creates an alembic handler.
+
+		Example Input: loadAlembic(self)
+		Example Input: loadAlembic(self, source_directory = "database")
+		"""
+
+		self.parent = parent
+
+		self._applyMonkeyPatches()
+		self.loadConfig(**kwargs)
+
+		if (ensureCompatability):
+			assert self.check()
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		if (self.parent is not None):
+			output += f"-- Database: {id(self.parent)}\n"
+			if (self.parent.schema is not None):
+				output += f"-- Schema Name: {self.parent.schema.__name__}\n"
+			if (self.parent.fileName is not None):
+				output += f"-- File Name: {self.parent.fileName}\n"
+
+		if (self.source_directory is not None):
+			output += f"-- Source Directory: {self.source_directory}\n"
+		if (self.alembic_directory is not None):
+			output += f"-- Alembic Directory: {self.alembic_directory}\n"
+		if (self.version_directory is not None):
+			output += f"-- Version Directory: {self.version_directory}\n"
+		if (self.ini_path is not None):
+			output += f"-- .ini Path: {self.ini_path}\n"
+		return output
+
+	def __enter__(self):			
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback is not None):
+			print(exc_type, exc_value)
+			return False
+
+	def loadConfig(self, source_directory = None, template_directory = None, ini_filename = None):
+		"""Creates a config object for the given 'alembic_directory'.
+
+		source_directory (str) - Where the alembic folder and configuration settings are kept
+		template_directory (str) - Where the alembic templates are kept
+		ini_filename (str) - The name of the configuration settings file in the source_directory
+			- If this file does not exist, the alembic directory will be (re)made in source_directory and this file will be created
+
+		Example Input: loadConfig()
+		Example Input: loadConfig(source_directory = "database")
+		"""
+
+		self.template_directory = os.path.abspath(template_directory or os.path.join(os.path.dirname(__file__), "alembic_templates"))
+		self.source_directory   = os.path.abspath(source_directory  or os.curdir)
+		self.alembic_directory  = os.path.abspath(os.path.join(self.source_directory, "alembic"))
+		self.version_directory  = os.path.abspath(os.path.join(self.alembic_directory, "versions"))
+		self.ini_path           = os.path.abspath(os.path.join(self.source_directory, ini_filename or "alembic.ini"))
+
+		self.config = alembic_config_Config(self.ini_path)
+		self.config.set_main_option("script_location", self.alembic_directory)
+		self.config.set_main_option("sqlalchemy.url", self.parent.fileName)
+
+		if (any(not os.path.exists(item) for item in (self.ini_path, self.alembic_directory))):
+			self.resetAlembic()
+
+	def resetAlembic(self, template = "custom"):
+		"""Creates a fresh Alembic environment.
+		NOTE: This will completely remove the alembic directory and create a new one.
+
+		template (str) - Which template folder to use to create the alembic directory
+
+		Example Input: resetAlembic()
+		"""
+
+		if ("alembic_version" in self.parent.getRelationNames()):
+			self.parent.clearRelation("alembic_version")
+
+		if (os.path.exists(self.ini_path)):
+			os.remove(self.ini_path)
+
+		if (not self.ini_path.endswith("alembic.ini")):
+			default_ini_path = os.path.abspath(os.path.join(self.source_directory, "alembic.ini"))
+			if (os.path.exists(default_ini_path)):
+				os.remove(default_ini_path)
+
+		if (os.path.exists(self.alembic_directory)):
+			import stat
+			def onerror(function, path, exc_info):
+				"""An Error handler for shutil.rmtree.
+				Modified code from Justin Peel on https://stackoverflow.com/questions/2656322/shutil-rmtree-fails-on-windows-with-access-is-denied
+				"""
+				if (not os.access(path, os.W_OK)):
+					os.chmod(path, stat.S_IWUSR)
+					function(path)
+				else:
+					raise
+			shutil.rmtree(self.alembic_directory, ignore_errors = False, onerror = onerror)
+
+		alembic.command.init(self.config, self.alembic_directory, template = template)
+
+	def history(self, indicate_current = False):
+		"""Prints out the revision history.
+
+		Example Input: history()
+		"""
+
+		alembic.command.history(self.config, rev_range = None, verbose = False, indicate_current = indicate_current)
+
+	def stamp(self, revision = "head", sql = False):
+		"""Marks the current revision in the database.
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: stamp()
+		"""
+
+		alembic.command.stamp(self.config, revision, sql = sql, tag = None)
+
+	def revision(self, message = None, migrationCatalogue = None, autoStamp = False, sql = False):
+		"""Creates a revision script for modifying the current database to what the schema currently looks like.
+		NOTE: Make sure you proof read the generated revision script before running it.
+
+		message (str) - A short discription of what the schema change is
+		
+		migrationCatalogue (dict) - Extra functions to use for the autogenerate step
+			~ {relation (str): [custom line to put in the script]}
+			~ Custom lines can be a string, a function that returns a string, a function that returns None, or a list of a combination of those
+				If a function returns None, all the source code for that function between "## START ##" and "## STOP ##" will be used
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		autoStamp (bool) - Determines if the current database is assumed to be the most recent version
+
+		Example Input: revision("split name column")
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": ("print(123)", "print(456)",)})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (("print(123)", "print(456)"),)})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))})
+		Example Input: revision("split name column", migrationCatalogue = {"Customer": (test,)})
+		"""
+
+		if (autoStamp):
+			self.stamp()
+
+		self.parent.metadata.migrationCatalogue.clear()
+		self.parent.metadata.migrationCatalogue.update(migrationCatalogue or {})
+		alembic.command.revision(self.config, autogenerate = True, message = message, sql = sql)
+
+	def upgrade(self, target = "+1", sql = False):
+		"""
+		Runs the upgrade function in the revision script for 'target'.
+		Will only commit changes made by the script if the function does not have any errors during execution.
+
+		target (str) - Which revision to upgrade to
+			- If "head": The most recent up-to-date revision
+			- If "+n": How many revision levels to go up
+			- If str: The name of the revision, or a partial section of it
+			~ The options above can be combined
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: upgrade()
+		Example Input: upgrade("head")
+		Example Input: upgrade("+2")
+		Example Input: upgrade("4f83cf8faa80")
+		Example Input: upgrade("4f8")
+		Example Input: upgrade("4f8+2")
+		Example Input: upgrade("head-1")
+		"""
+		alembic.command.upgrade(self.config, target, sql = sql, tag = None)
+
+	def downgrade(self, target = "-1", sql = False):
+		"""
+		Runs the downgrade function in the revision script for 'target'.
+		Will only commit changes made by the script if the function does not have any errors during execution.
+
+		target (str) - Which revision to upgrade to
+			- If "base": The state it was in before any revisions
+			- If "-n": How many revision levels to go down
+			- If str: The name of the revision, or a partial section of it
+			~ The options above can be combined
+
+		sql (bool) - Determines if the changes are actually applied
+			- If True: Prints out an SQL statement that should cause the needed changes
+			- If False: Applies the needed changes to the database
+
+		Example Input: downgrade()
+		Example Input: downgrade("base")
+		Example Input: downgrade("-2")
+		"""
+		alembic.command.downgrade(self.config, target, sql = sql, tag = None)
+
+	def check(self, returnDifference = False):
+		"""Makes sure the current database matches the current schema.
+
+		returnDifference (bool) - Determines what is returned
+			If True: Returns the differences between the schema and the current database
+			If False: Returns True if they match, and False if they don't
+
+		Example Input: check()
+		Example Input: check(returnDifference = True)
+		"""
+
+		context = alembic.migration.MigrationContext.configure(self.parent.engine.connect())
+		
+		if (returnDifference):
+			return tuple(alembic.autogenerate.compare_metadata(context, self.parent.metadata))
+		return not bool(alembic.autogenerate.compare_metadata(context, self.parent.metadata))
+
+	def _applyMonkeyPatches(self):
+		def mp_get_template_directory(mp_self):
+			return self.template_directory
+		alembic_config_Config.get_template_directory = mp_get_template_directory
+
+		def mp__generate_template(mp_self, source, destination, **kwargs):
+			if (source.endswith("alembic.ini.mako")):
+				kwargs["database_location"] = self.parent.fileName
+			return old__generate_template(mp_self, source, destination, **kwargs)
+		old__generate_template = alembic.command.ScriptDirectory._generate_template
+		alembic.command.ScriptDirectory._generate_template = mp__generate_template
+
+		def mp__copy_file(mp_self, source, destination):
+			"""Special thanks to shackra for how to import metadata correctly on https://stackoverflow.com/questions/32032940/how-to-import-the-own-model-into-myproject-alembic-env-py/32218546#32218546"""
+			
+			if (not source.endswith('env.py.mako')):
+				return old__copy_file(mp_self, source, destination)
+			imports = f'sys.path.insert(0, "{os.path.dirname(self.parent.schema.__file__)}")\nimport {self.parent.schemaPath}\ntarget_metadata = {self.parent.schemaPath}.Mapper.metadata'
+			old__generate_template(mp_self, source, destination.rstrip(".mako"), imports = imports)
+		old__copy_file = alembic.command.ScriptDirectory._copy_file
+		alembic.command.ScriptDirectory._copy_file = mp__copy_file
+
+		def mp_rev_id():
+			"""Make Revision IDs sequential"""
+			answer = old_rev_id()
+			n = len(tuple(None for item in os.scandir(self.version_directory) if (item.is_file())))
+			return f"{n:03d}_{answer}"
+		old_rev_id= alembic.util.rev_id
+		alembic.util.rev_id = mp_rev_id
+
+		class mp_PlainText(alembic.operations.ops.MigrateOperation):
+			def __init__(mp_self, command = None, args = None, kwargs = None):
+				"""Used to insert plain text into the generated alembic files.
+
+				Example Input: PlainText()
+				Example Input: PlainText("print(123)")
+				Example Input: PlainText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+				"""
+
+				mp_self.command = command or ""
+				mp_self.args = args or ()
+				mp_self.kwargs = kwargs or {}
+
+			def formatText(mp_self, command):
+				"""Formats the given command.
+
+				Example Input: formatText("print(123)")
+				Example Input: formatText(("print('Lorem')", "print('Ipsum')"), ("print('Dolor')"))
+				Example Input: formatText(myFunction)
+				"""
+
+				if (isinstance(command, str)):
+					return command
+				elif (callable(command)):
+					try:
+						answer = command(*mp_self.args, **mp_self.kwargs)
+					except Exception as error:
+						# raise error
+						print(error)
+						answer = None
+
+					if (answer is None):
+						match = re.search("## START ##\n?(.*)## STOP ##", inspect.getsource(command), re.DOTALL)
+						assert match
+						lines = match.group(1).rstrip().split("\n")
+						indent = len(lines[0]) - len(lines[0].lstrip('\t'))
+						return "\n## START PLAIN TEXT ##\n{}\n## END PLAIN TEXT ##\n".format('\n'.join(item[indent:] for item in lines))
+					else:
+						return mp_self.formatText(answer)
+				else:
+					return "\n".join(mp_self.formatText(item) for item in command)
+		alembic.operations.ops.PlainText = mp_PlainText
+
+		@alembic.autogenerate.renderers.dispatch_for(alembic.operations.ops.PlainText)
+		def _setPlainText(context, operation):
+			"""
+			Use: https://groups.google.com/d/msg/sqlalchemy-alembic/U8DS6CJsdRs/XIhSkj6xBgAJ
+			Use: https://alembic.zzzcomputing.com/en/latest/api/autogenerate.html#creating-a-render-function
+			"""
+
+			return operation.formatText(operation.command)
+
+class Database(Utility_Base):
+	"""Used to create and interact with a database.
+	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
+	"""
+
+	def __init__(self, fileName = None, schemaPath = None, alembicPath = None, **kwargs):
+		"""Defines internal variables.
+		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
+
+		fileName (str) - If not None: Opens the provided database automatically
+		keepOpen (bool) - Determines if the database is kept open or not
+			- If True: The database will remain open until closed by the user or the program terminates
+			- If False: The database will be opened only when it needs to be accessed, and closed afterwards
+
+		Example Input: Database()
+		Example Input: Database("emaildb")
+		"""
+
+		self.threadLock = threading.RLock()
+		self.TableBase = sqlalchemy.ext.declarative.declarative_base()
+
+		#Internal variables
+		self.cursor = None
+		self.schema = None
+		self.alembic = None
+		self.waiting = False
+		self.fileName = None
+		self.schemaPath = None
+		self.alembicPath = None
+		self.defaultCommit = None
+		self.connectionType = None
+		self.defaultFileExtension = ".db"
+		self.aliasError_replacement = None
+		self.resultError_replacement = None
+
+		#Initialization functions
+		if (fileName is not None):
+			self.openDatabase(fileName = fileName, schemaPath = schemaPath, alembicPath = alembicPath, **kwargs)
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		if (self.alembic is not None):
+			output += f"-- Alembic: {id(self.alembic)}\n"
+		if (self.schema is not None):
+			output += f"-- Schema Name: {self.schema.__name__}\n"
+		if (self.fileName is not None):
+			output += f"-- File Name: {self.fileName}\n"
+		return output
+
+	def __enter__(self):			
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback is not None):
+			print(exc_type, exc_value)
+			return False
 
 	#Cache Functions
 	indexCache = cachetools.LFUCache(maxsize = 10)
@@ -304,62 +934,6 @@ class Database():
 		pubsub_pub.subscribe(function, "event_cmd_startWaiting")
 
 	#Utility Functions
-	def ensure_set(self, item, convertNone = False):
-		"""Makes sure the given item is a set.
-
-		Example Input: ensure_set(exclude)
-		Example Input: ensure_set(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return {item}
-			elif (not isinstance(item, set)):
-				return set(item)
-			return item
-
-		if (convertNone):
-			return set()
-
-	def ensure_list(self, item, convertNone = False):
-		"""Makes sure the given item is a list.
-
-		Example Input: ensure_list(exclude)
-		Example Input: ensure_list(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return [item]
-			elif (not isinstance(item, list)):
-				return list(item)
-			return item
-
-		if (convertNone):
-			return []
-
-	def ensure_container(self, item, evaluateGenerator = True, convertNone = False):
-		"""Makes sure the given item is a container.
-
-		Example Input: ensure_container(valueList)
-		Example Input: ensure_container(valueList, convertNone = True)
-		Example Input: ensure_container(valueList, evaluateGenerator = False)
-		"""
-
-		if (item is None):
-			if (convertNone):
-				return (None,)
-			return ()
-		
-		if (isinstance(item, (str, int, float, dict))):
-			return (item,)
-
-		if (not isinstance(item, (list, tuple, set))):
-			if (evaluateGenerator):
-				return tuple(item)
-			return item
-		return item
-
 	@cachetools.cached(indexCache)
 	def getPrimaryKey(self, relation):
 		"""Returns the primary key to use for the given relation.
@@ -524,11 +1098,39 @@ class Database():
 			locationFunction = handle.where
 
 		if (nextToCondition):
-			handle = locationFunction(sqlalchemy.and_(*yieldLocation()))
+			return locationFunction(sqlalchemy.and_(*yieldLocation()))
 		else:
-			handle = locationFunction(sqlalchemy.or_(*yieldLocation()))
+			return locationFunction(sqlalchemy.or_(*yieldLocation()))
 
-		return handle
+	def configureOrder(self, handle, relation, schema, orderBy = None, direction = None, nullFirst = None):
+
+		_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
+		if (direction is not None):
+			if (direction):
+				_orderBy = sqlalchemy.asc(_orderBy)
+			else:
+				_orderBy = sqlalchemy.desc(_orderBy)
+		
+			# if (nullFirst is not None):
+			# 	if (nullFirst):
+			# 		_orderBy = _orderBy.nullsfirst()
+			# 	else:
+			# 		_orderBy = _orderBy.nullslast()
+
+		return handle.order_by(_orderBy)
+
+	def configureJoin(self, query, relation, schema, attributeList, fromSchema = True):
+		for attribute in attributeList:
+			foreignHandle = schema.foreignKeys.get(attribute)
+			if (foreignHandle is None):
+				continue
+
+			if (fromSchema):
+				query = query.join(foreignHandle)
+			else:
+				query = query.select_from(self.metadata.tables[relation].join(foreignHandle))
+
+		return query
 
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
@@ -563,7 +1165,7 @@ class Database():
 		self.metadata.reflect()
 
 	@wrap_errorCheck()
-	def openDatabase(self, fileName = None, schemaPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
+	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
 		password = None, readOnly = False, keepOpen = None, multiProcess = -1, multiProcess_delay = 100,
 		resultError_replacement = None, aliasError_replacement = None):
 
@@ -591,6 +1193,7 @@ class Database():
 		Example Input: openDatabase()
 		Example Input: openDatabase("emaildb")
 		Example Input: openDatabase("emaildb.sqllite")
+		Example Input: openDatabase("emaildb", "test_map")
 		Example Input: openDatabase("emaildb", applyChanges = False)
 		Example Input: openDatabase("emaildb", multiThread = True)
 		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
@@ -625,15 +1228,19 @@ class Database():
 		self.isMySQL = self.connectionType == "mysql"
 
 		if (self.isSQLite):
-			self.engine = sqlalchemy.create_engine(f"sqlite:///{fileName}")
+			self.fileName = f"sqlite:///{fileName}"
+			self.engine = sqlalchemy.create_engine(self.fileName)
 			sqlalchemy.event.listen(self.engine, 'connect', self._fk_pragma_on_connect)
 		else:
 			errorMessage = f"Unknown connection type {connectionType}"
 			raise KeyError(errorMessage)
 
-		self.sessionMaker.configure(bind = self.engine)
-		# self.metadata = sqlalchemy.MetaData(bind = self.engine)
-		self.loadSchema(schemaPath)
+		sessionMaker.configure(bind = self.engine)
+		
+		if (schemaPath):
+			self.loadSchema(schemaPath)
+
+		self.loadAlembic(alembicPath)
 
 	def _fk_pragma_on_connect(self, connection, record):
 		"""Turns foreign keys on for SQLite.
@@ -667,15 +1274,32 @@ class Database():
 			self.saveDatabase()
 
 	def loadSchema(self, schemaPath):
-		"""loads in a schema from the given schemaPath.
+		"""Loads in a schema from the given schemaPath.
 
 		Example Input: loadSchema(schemaPath)
 		"""
 
-		self.schema = importlib.import_module(schemaPath)
+		self.schemaPath = schemaPath
+		self.schema = importlib.import_module(self.schemaPath)
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
 		self.refresh()
+
+	def checkSchema(self):
+		"""Checks the loaded schema against what is in the meta data."""
+
+		assert False
+
+	def loadAlembic(self, alembicPath = None, **kwargs):
+		"""Loads in the alembic directory and creates an alembic handler.
+
+		alembicPath (str) - Where the alembic folder and configuration settings are kept
+
+		Example Input: loadAlembic()
+		Example Input: loadAlembic("database")
+		"""
+
+		self.alembic = Alembic(self, source_directory = alembicPath)
 
 	@wrap_errorCheck()
 	def removeRelation(self, relation = None):
@@ -782,6 +1406,7 @@ class Database():
 
 		if (relation is None):
 			self.metadata.create_all()
+			self.alembic.stamp()
 			return
 
 		if (schemaPath is None):
@@ -856,7 +1481,7 @@ class Database():
 		if (fromSchema):
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
-					parent = getattr(self.schema, relation)
+					parent = self.schema.relationCatalogue[relation]
 					for attributeDict in self.ensure_container(rows):
 						handle = session.add(parent(**attributeDict))
 		else:
@@ -867,10 +1492,11 @@ class Database():
 						connection.execute(table.insert(values = attributeDict))
 
 	@wrap_errorCheck()
-	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, **locationKwargs):
+	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, fromSchema = True, **locationKwargs):
 		"""Changes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be chanegd.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
+		Use: https://stackoverflow.com/questions/9667138/how-to-update-sqlalchemy-row-entry/26920108#26920108
 
 		myTuple (dict)   - What will be written to the tuple. {relation: attribute to change} or {relation: {attribute to change: value}}
 		nextTo (dict)    - An attribute-value pair that is in the same tuple. {attribute next to one to change: value of this attribute}
@@ -899,13 +1525,30 @@ class Database():
 		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
 
-		print("@changeTuple.1", myTuple, nextTo)
+		if (fromSchema):
+			with self.makeSession() as session:
+				for relation, rows in myTuple.items():
+					parent = self.schema.relationCatalogue[relation]
+					for attributeDict in self.ensure_container(rows):
+						query = session.query(parent)
+						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						for row in query.all():
+							row.change(session, values = attributeDict, updateForeign = updateForeign)
+		else:
+			with self.makeConnection(asTransaction = True) as connection:
+				for relation, rows in myTuple.items():
+					table = self.metadata.tables[relation]
+					for attributeDict in self.ensure_container(rows):
+						#Does not handle foreign keys
+						query = table.update(values = attributeDict)
+						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						connection.execute(query)
+
 
 	@wrap_errorCheck()
-	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, updateForeign = True, incrementForeign = True, **locationKwargs):
+	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = True, **locationKwargs):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
-		WARNING: Does not currently look for forigen keys.
 
 		myTuple (dict) - What will be removed. {relation: attribute: value to look for to delete the row}
 		like (dict)    - Flags things to search for something containing the item- not exactly like it. {relation: attribute: (bool) True or False}
@@ -919,10 +1562,10 @@ class Database():
 		applyChanges (bool)  - Determines if the database will be saved after the change is made
 			- If None: The default flag set upon opening the database will be used
 		checkForeign (bool) - Determines if foreign keys will be take in account
-		updateForeign (bool) - Determines what happens to existing foreign keys
-			- If True: Foreign keys will be updated to the new value
-			- If False: A new foreign tuple will be inserted
-			- If None: A foreign key will be updated to the new value if only one item is linked to it, otherwise a new foreign tuple will be inserted
+		removeForeign (bool) - Determines what happens to existing foreign keys
+			- If True: Foreign keys will be removed also
+			- If False: Foreign keys will be left alone
+			- If None: A foreign key will be removed if only one item is linked to it, otherwise it will be left alone
 		exclude (list)       - A list of tables to exclude from the 'updateForeign' check
 
 		Example Input: removeTuple({"Users": {"name": "John"}})
@@ -930,6 +1573,23 @@ class Database():
 		Example Input: removeTuple({"Users": {"name": "John", "age": 26}})
 		Example Input: removeTuple({"Users": {"name": "John"}}, like = {"Users": {"email": "@gmail.com"}})
 		"""
+
+		if (fromSchema):
+			with self.makeSession() as session:
+				for relation, rows in myTuple.items():
+					parent = self.schema.relationCatalogue[relation]
+					for nextTo in self.ensure_container(rows):
+						query = session.query(parent)
+						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						query.delete()
+		else:
+			with self.makeConnection(asTransaction = True) as connection:
+				for relation, rows in myTuple.items():
+					table = self.metadata.tables[relation]
+					for nextTo in self.ensure_container(rows):
+						query = table.delete()
+						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						connection.execute(query)
 
 	@wrap_errorCheck()
 	def getAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
@@ -954,6 +1614,25 @@ class Database():
 		Example Input: getAllValues(["Users", "Names"], orderBy = "id")
 		"""
 
+		relation = self.ensure_container(relation)
+
+		if (isinstance(exclude, dict)):
+			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+		else:
+			excludeList = self.ensure_container(exclude, convertNone = False)
+
+		myTuple = {}
+		for _relation in relation:
+			if (attribute):
+				if (isinstance(attribute, dict)):
+					myTuple[_relation] = attribute.get(_relation, None)
+				else:
+					myTuple[_relation] = attribute
+			else:
+				myTuple[_relation] = None
+
+		return self.getValue(myTuple, exclude = excludeList, **kwargs)
+
 	@wrap_errorCheck()
 	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
@@ -964,6 +1643,7 @@ class Database():
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
 		For more information on JOIN: https://www.techonthenet.com/sqlite/joins.php
+		Use: https://stackoverflow.com/questions/11530196/flask-sqlalchemy-query-specify-column-names/45905714#45905714
 
 		myTuple (dict)   - What to return {relation: attribute}
 			- A list of attributes can be returned: {relation: [attribute 1, attribute 2]}
@@ -1070,66 +1750,87 @@ class Database():
 		Example Input: getValue({"Users": None}, {"age": 24})
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
-
-		startTime = time.perf_counter()
-
+		# startTime = time.perf_counter()
+		
 		if (fromSchema):
 			contextmanager = self.makeSession()
+			
+			def startQuery(relation, attributeList, schema):
+				nonlocal self, excludeList, alias
+
+				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias)).select_from(schema)
+
+			def yieldRow(query):
+				nonlocal count
+
+				if (count):
+					yield (query.count(),)
+					return
+
+				for result in query.all():
+					if (forceAttribute or (len(result) > 1)):
+						yield result._asdict()
+					else:
+						yield result[0]
 		else:
 			contextmanager = self.makeConnection(asTransaction = True)
+			
+			def startQuery(relation, attributeList, schema):
+				nonlocal self, excludeList, alias
+
+				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias))
+
+			def yieldRow(query):
+				for result in connection.execute(query).fetchall():
+					if (forceAttribute or (len(result) > 1)):
+						yield dict(result)
+					else:
+						yield result[0]
+
+		def getResult(query, connection):
+			nonlocal forceTuple
+
+			answer = tuple(yieldRow(query))
+			if (not answer):
+				return ()
+			elif (forceTuple or (len(answer) > 1)):
+				return answer
+			else:
+				return answer[0]
+
+		########################################################################
+
+		if (not isinstance(exclude, dict)):
+			excludeList = self.ensure_container(exclude, convertNone = False)
 
 		results_catalogue = {}
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
-				if (fromSchema):
-					schema = getattr(self.schema, relation)
-					handle = connection.query(schema)
-				else:
-					table = self.metadata.tables[relation]
-					handle = table.select()
-					schema = table.columns
+				if (isinstance(exclude, dict)):
+					excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation)
 
-				selectAll = attributeList is None
-				if (selectAll):
-					attributeList = self.getAttributeNames(relation, exclude = exclude)
-				else:
-					exclude = self.ensure_container(exclude)
-					attributeList = tuple(attribute for attribute in self.ensure_container(attributeList) if (attribute not in exclude))
-
-				_orderBy = sqlalchemy.text(orderBy or self.getPrimaryKey(relation))
-				if (direction is not None):
-					if (direction):
-						_orderBy = sqlalchemy.asc(_orderBy)
-					else:
-						_orderBy = sqlalchemy.desc(_orderBy)
+				schema = self.schema.relationCatalogue[relation]
 				
-					# if (nullFirst is not None):
-					# 	if (nullFirst):
-					# 		_orderBy = _orderBy.nullsfirst()
-					# 	else:
-					# 		_orderBy = _orderBy.nullslast()
-				handle = handle.order_by(_orderBy)
-
-				if (not includeDuplicates):
-					handle = handle.distinct()
-
-				handle = self.configureLocation(handle, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+				query = startQuery(relation, attributeList, schema)
+				query = self.configureJoin(query, relation, schema, attributeList, fromSchema = fromSchema)
+				query = self.configureOrder(query, relation, schema, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+				query = self.configureLocation(query, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
 				if (limit is not None):
-					handle = handle.limit(limit)
+					query = query.limit(limit)
+				if (not includeDuplicates):
+					query = query.distinct()
+				if (count and (not fromSchema)):
+					query = query.count()
 
-				if (fromSchema):
-					if (count):
-						results_catalogue[relation] = handle.count()
-					else:
-						results_catalogue[relation] = tuple(handle)
-				else:
-					if (count):
-						handle = handle.count()
-					results_catalogue[relation] = tuple(connection.execute(handle))
+				results_catalogue[relation] = getResult(query, connection)
+		
+		# print(f"@getValue.9", fromSchema, f"{time.perf_counter() - startTime:.6f}")
 
-		print(f"@getValue.9", f"{time.perf_counter() - startTime:.6f}")
-		return results_catalogue
+		if (forceRelation or (len(myTuple) > 1)):
+			return results_catalogue
+		return results_catalogue[relation]
 
 	@wrap_errorCheck()
 	def createTrigger(self, label, relation,
@@ -1238,68 +1939,59 @@ def sandbox():
 
 	database_API = build()
 	# database_API.openDatabase(None, "test_map")
-	database_API.openDatabase("test_map_example.db", "test_map")
-	database_API.removeRelation()
-	database_API.createRelation()
-	database_API.resetRelation()
+	# database_API.openDatabase("test_map_example.db", "test_map")
+	# database_API.removeRelation()
+	# database_API.createRelation()
+	# database_API.resetRelation()
 
-	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "jobNumber": 1234}, {"label": "ipsum", "jobNumber": 1234})})
-	print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
-	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# #Add Items
+	# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+	# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+	# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+	
+	# #Get Items
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = False))
+	# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
 
-	# database_API.changeTuple({"Containers": {"jobNumber": 5678}}, {"label": "lorem"})
-	# print(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
+	# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
 
+	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
+	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = False))
 
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
 
-	# from test_map import Address, Base, Person
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True, forceTuple = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True, forceAttribute = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False, forceRelation = True))
+	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = False))
 
-	# # Base = sqlalchemy.ext.declarative.declarative_base()
-	# engine = sqlalchemy.create_engine('sqlite:///sqlalchemy_example.db')
-	# # Bind the engine to the metadata of the Base class so that the
-	# # declaratives can be accessed through a DBSession instance
-	# # Base.metadata.bind = engine
-	 
-	# DBSession = sqlalchemy.orm.sessionmaker(bind=engine)
-	# # A DBSession() instance establishes all conversations with the database
-	# # and represents a "staging zone" for all the objects loaded into the
-	# # database session object. Any change made against the objects in the
-	# # session won't be persisted into the database until you call
-	# # session.commit(). If you're not happy about the changes, you can
-	# # revert all of them back to the last commit by calling
-	# # session.rollback()
-	# session = DBSession()
-	 
-	# # Insert a Person in the person table
-	# new_person = Person(name='new person')
-	# session.add(new_person)
-	# session.commit()
-	 
-	# # Insert an Address in the address table
-	# new_address = Address(post_code='00000', person=new_person)
-	# session.add(new_address)
-	# session.commit()
+	# quiet(database_API.getAllValues("Containers"))
 
 
-	# DBSession.bind = engine
-	# session = DBSession()
-	# # Make a query to find all Persons in the database
-	# print(session.query(Person).all())
-	# # Return the first Person from all Persons in the database
-	# person = session.query(Person).first()
-	# print(person.name)
-	# # Find all Address whose person field is pointing to the person object
-	# print(session.query(Address).filter(Address.person == person).all())
-	# # Retrieve one Address whose person field is point to the person object
-	# print(session.query(Address).filter(Address.person == person).one())
-	# address = session.query(Address).filter(Address.person == person).one()
-	# print(address.post_code)
+	# #Change Items
+	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
+	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+	
+	# #Remove Items
+	# database_API.removeTuple({"Containers": {"label": "dolor"}})
+	# database_API.removeTuple({"Containers": {"label": "sit"}})
+	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+
+	#Update Schema
+	database_API.openDatabase("test_map_example.db", "test_map_2")
+	database_API.checkSchema()
 
 def main():
 	"""The main program controller."""
 
-	sandbox()
+	# sandbox()
 
 if __name__ == '__main__':
 	main()
