@@ -8,11 +8,14 @@ import re
 import os
 import sys
 import time
-import types
 import shutil
+
+import types
+import decimal
 
 #Utility Modules
 import inspect
+import datetime
 import warnings
 import traceback
 import importlib
@@ -233,6 +236,7 @@ class Base():
 
 		return []
 
+	@classmethod
 	def getSchemaClass(cls, relation):
 		"""Returns the schema class for the given relation.
 		Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
@@ -245,6 +249,116 @@ class Base():
 		# # table = Mapper.metadata.tables.get("Customer")
 		# # column = table.columns["name"]
 		# return Mapper._decl_class_registry[column.table.name]
+
+	#Schema Factory Functions
+	dataType_catalogue = {
+		int: sqlalchemy.Integer, "int": sqlalchemy.Integer,
+		"bigint": sqlalchemy.types.BigInteger, "int+": sqlalchemy.types.BigInteger,
+		"smallint": sqlalchemy.types.SmallInteger, "int-": sqlalchemy.types.SmallInteger,
+		
+		float: sqlalchemy.Float(), "float": sqlalchemy.Float(),
+		decimal.Decimal: sqlalchemy.Numeric(), "decimal": sqlalchemy.Numeric(), "numeric": sqlalchemy.Numeric(), 
+		
+		bool: sqlalchemy.Boolean(), "bool": sqlalchemy.Boolean(),
+
+		str: sqlalchemy.Text(), "str": sqlalchemy.String(256), "text": sqlalchemy.Text(), 
+		"unicode": sqlalchemy.Unicode(), "utext": sqlalchemy.UnicodeText(),
+		"json": sqlalchemy.JSON(),
+		
+		datetime.date: sqlalchemy.Date, "date": sqlalchemy.Date,
+		datetime.datetime: sqlalchemy.DateTime(), "datetime": sqlalchemy.DateTime(), 
+		datetime.time: sqlalchemy.Time(), "time": sqlalchemy.Time(), 
+		datetime.timedelta: sqlalchemy.Interval(), "timedelta": sqlalchemy.Interval(), "delta": sqlalchemy.Interval(), "interval": sqlalchemy.Interval(),
+
+		bin: sqlalchemy.LargeBinary(), "bin": sqlalchemy.LargeBinary(), "blob": sqlalchemy.LargeBinary(), "pickle": sqlalchemy.PickleType(),
+	}
+
+	@classmethod
+	def schema_column(cls, dataType = int, default = None, key = None, 
+		system = False, quote = None, docstring = None, comment = None, info = None, 
+		foreignKey = None, foreign_update = True, foreign_delete = False, foreign_info = None,
+		unique = None, notNull = None, autoIncrement = None, primary = None):
+		"""Returns a schema column.
+
+		dataType (type) - What data type the column will have
+			~ int, float, bool, str, datetime.date
+		default (any) - What default value to use for new entries
+		key (str) - What to refer to this column as in the column handle
+			- If None, will use the SQL name for it (The variable name for this column in the class structure)
+		system (bool) - Marks this column as one that should not appear in the CREATE TABLE statement
+		quote (bool) - Determines if quoting names should be forced or not
+			- If None: Will quote the SQL name for this column if it has atleast one uppercase letter or is reserved
+			- If True: Will always quote the SQL name for this column
+			- If False: Will never quote the SQL name for this column
+		docstring (str)     - What docstring to give the column handle
+		comment (str) - What comment to give the SQL column
+		info (dict)   - Extra information attached to the column handle
+
+		foreignKey (str) - What relation and attribute to link to
+			~ Can be a string like: "relation.attribute"
+			~ Can be an sqlalchemy column handle of an existing column belonging to another table
+		foreign_update (bool) - Determines what happens if the foreign key is updated while children are still referencing it
+			- True: Updates all connected children as well
+			- False: Updates the foreign key and sets the connected children to it's default value
+			- None: Throws an error if any children are still connected
+		foreign_delete (bool) - Determines what happens if the foreign key is deleted while children are still referencing it
+			- True: Deletes all connected children as well
+			- False: Deletes the foreign key and sets the connected chilrend to it's default value
+			- None: Throws an error if any children are still connected
+		foreign_info (dict) - Extra information for the foreign key attached to the column handle
+
+		unique (bool) - If this column must be unique
+		notNull (bool) - If this column cannot be NULL
+		autoIncrement (bool) - If this column should have an unused and unique integer as a value
+		primary (bool) - Determines if this is a primary key
+			- If True: If this is a primary key
+			~ Defaults 'unique' and 'notNull' to True, but these can be overridden by their parameters
+
+
+		Example Input: schema_column()
+		Example Input: schema_column(primary = True)
+		Example Input: schema_column(foreignKey = Choices_Job.id)
+		Example Input: schema_column(foreignKey = "Choices_Job.id")
+		Example Input: schema_column(dataType = str)
+		"""
+
+		#sqlalchemy.Enum #use: https://docs.sqlalchemy.org/en/latest/core/type_basics.html#sqlalchemy.types.Enum
+		#money #use: https://docs.sqlalchemy.org/en/latest/core/type_basics.html#sqlalchemy.types.Numeric
+
+		if (dataType in cls.dataType_catalogue):
+			dataType = cls.dataType_catalogue[dataType]
+		
+		columnItems = [] #https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.*args
+		if (foreignKey):
+			columnItems.append(sqlalchemy.ForeignKey(foreignKey, 
+				onupdate = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_update], 
+				ondelete = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_delete],
+				info = foreign_info or {}))
+
+		columnKwargs = {"info": info or {}}
+		if (primary):
+			columnKwargs.update({"primary_key": True, "nullable": (notNull, False)[notNull is None], "unique": (unique, True)[unique is None]})
+		else:
+			if (unique):
+				columnKwargs["unique"] = True
+			
+			if (notNull):
+				columnKwargs["nullable"] = False
+			elif (notNull is not None):
+				columnKwargs["nullable"] = True
+
+		# if (autoIncrement):
+		# 	columnKwargs["autoIncrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+		if (default is not None):
+			columnKwargs["default"] = default
+		if (system):
+			columnKwargs["system"] = True
+		if (docstring):
+			columnKwargs["doc"] = docstring
+		if (comment):
+			columnKwargs["comment"] = comment
+
+		return sqlalchemy.Column(dataType, *columnItems, **columnKwargs)
 
 class Utility_Base(Base):
 	#Context Managers
@@ -507,7 +621,7 @@ class CustomMetaData(sqlalchemy.MetaData, Base):
 
 		assert False
 
-class CustomBase():
+class CustomBase(Base):
 	pass
 
 def makeBase():
