@@ -26,10 +26,12 @@ import contextlib
 import collections
 
 #Database Modules
+import json
 import pyodbc
 import sqlite3
 import sqlalchemy
 import sqlalchemy.ext.declarative
+import configparser
 
 import alembic
 import alembic.config
@@ -208,12 +210,15 @@ class Base():
 			return []
 
 	@classmethod
-	def ensure_container(cls, item, evaluateGenerator = True, convertNone = True):
+	def ensure_container(cls, item, evaluateGenerator = True, convertNone = True, elementTypes = None):
 		"""Makes sure the given item is a container.
+
+		elementTypes (list) - Extra types that are ok to be elements
 
 		Example Input: ensure_container(valueList)
 		Example Input: ensure_container(valueList, convertNone = False)
 		Example Input: ensure_container(valueList, evaluateGenerator = False)
+		Example Input: ensure_container(handle, elementTypes = (Base,))
 		"""
 
 		if (item is None):
@@ -221,7 +226,7 @@ class Base():
 				return ()
 			return (None,)
 		
-		if (isinstance(item, (str, int, float, dict))):
+		if (isinstance(item, (str, int, float, dict, type, *(cls.ensure_container(elementTypes, convertNone = True))))):
 			return (item,)
 
 		if (not isinstance(item, (list, tuple, set))):
@@ -230,6 +235,7 @@ class Base():
 			return item
 		return item
 
+class Base_Database(Base):
 	@classmethod
 	def getSchema(cls):
 		"""Returns the functions needed to migrate the data from the old schema to the new one."""
@@ -274,7 +280,7 @@ class Base():
 	}
 
 	@classmethod
-	def schema_column(cls, dataType = int, default = None, key = None, 
+	def schema_column(cls, dataType = int, default = None, 
 		system = False, quote = None, docstring = None, comment = None, info = None, 
 		foreignKey = None, foreign_update = True, foreign_delete = False, foreign_info = None,
 		unique = None, notNull = None, autoIncrement = None, primary = None):
@@ -283,8 +289,6 @@ class Base():
 		dataType (type) - What data type the column will have
 			~ int, float, bool, str, datetime.date
 		default (any) - What default value to use for new entries
-		key (str) - What to refer to this column as in the column handle
-			- If None, will use the SQL name for it (The variable name for this column in the class structure)
 		system (bool) - Marks this column as one that should not appear in the CREATE TABLE statement
 		quote (bool) - Determines if quoting names should be forced or not
 			- If None: Will quote the SQL name for this column if it has atleast one uppercase letter or is reserved
@@ -317,8 +321,8 @@ class Base():
 
 		Example Input: schema_column()
 		Example Input: schema_column(primary = True)
-		Example Input: schema_column(foreignKey = Choices_Job.id)
-		Example Input: schema_column(foreignKey = "Choices_Job.id")
+		Example Input: schema_column(foreignKey = Choices_Job.databaseId)
+		Example Input: schema_column(foreignKey = "Choices_Job.databaseId")
 		Example Input: schema_column(dataType = str)
 		"""
 
@@ -360,7 +364,7 @@ class Base():
 
 		return sqlalchemy.Column(dataType, *columnItems, **columnKwargs)
 
-class Utility_Base(Base):
+class Utility_Base(Base_Database):
 	#Context Managers
 	@contextlib.contextmanager
 	def makeSession(self):
@@ -401,7 +405,8 @@ class Utility_Base(Base):
 			finally:
 				connection.close()
 
-class Schema_Base(Base):
+class Schema_Base(Base_Database):
+	foreignKeys = {}
 	defaultRows = ()
 
 	#Context Managers
@@ -479,7 +484,7 @@ class Schema_Base(Base):
 			setattr(self, variable, newValue)
 
 class Schema_AutoForeign():
-	foreignKeys = {}
+	_foreignInfo = {}
 
 	def __init__(self, kwargs = {}):
 		"""Automatically creates tuples for the provided relations if one does not exist.
@@ -500,7 +505,7 @@ class Schema_AutoForeign():
 					session.add(child)
 					session.commit()
 					setattr(self, variable, child)
-				kwargs[f"{variable}_id"] = child.id
+				kwargs[f"{variable}_id"] = child.databaseId
 
 	@classmethod
 	def formatForeign(cls, schema):
@@ -526,7 +531,7 @@ class Schema_AutoForeign():
 				relationHandle = schema[foreignKey._table_key()]
 				cls.foreignKeys[variable] = relationHandle
 
-				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower())) #Many to One 
+				setattr(cls, variable, sqlalchemy.orm.relationship(relationHandle, backref = cls.__name__.lower(), info = cls._foreignInfo.get(variable, {}))) #Many to One 
 				#cascade="all, delete, delete-orphan" #https://docs.sqlalchemy.org/en/latest/orm/tutorial.html
 
 	# @classmethod
@@ -565,7 +570,7 @@ class Schema_AutoForeign():
 					continue
 
 				if (foreignDefault is None):
-					catalogue = {catalogue: tuple(attribute for attribute in cls.foreignKeys[catalogue].__mapper__.columns.keys() if (attribute not in {"id", *(exclude or ())}))}
+					catalogue = {catalogue: tuple(attribute for attribute in cls.foreignKeys[catalogue].__mapper__.columns.keys() if (attribute not in (exclude or ())))}
 				else:
 					catalogue = {catalogue: foreignDefault}
 
@@ -621,7 +626,7 @@ class CustomMetaData(sqlalchemy.MetaData, Base):
 
 		assert False
 
-class CustomBase(Base):
+class CustomBase(Base_Database):
 	pass
 
 def makeBase():
@@ -629,9 +634,24 @@ def makeBase():
 
 #Controllers
 def build(*args, **kwargs):
-	"""Starts the GUI making process."""
+	"""Creates a Database object."""
+
+	return build_database(*args, **kwargs)
+
+def build_database(*args, **kwargs):
+	"""Creates a Database object."""
 
 	return Database(*args, **kwargs)
+
+def build_configuration(*args, **kwargs):
+	"""Creates a Configuration object."""
+
+	return Configuration(*args, **kwargs)
+
+def build_json(*args, **kwargs):
+	"""Creates a JSON_Aid object."""
+
+	return JSON_Aid(*args, **kwargs)
 
 class Singleton():
 	"""Used to get values correctly."""
@@ -646,7 +666,7 @@ NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
 
 #Main API
-class Alembic():
+class Alembic(Base):
 	"""Used to handle database migrations and schema changes.
 	If you want to generate SQL script: 
 		Use: https://alembic.zzzcomputing.com/en/latest/offline.html
@@ -660,8 +680,8 @@ class Alembic():
 	def __init__(self, parent, ensureCompatability = False, **kwargs):
 		"""Loads in the alembic directory and creates an alembic handler.
 
-		Example Input: loadAlembic(self)
-		Example Input: loadAlembic(self, source_directory = "database")
+		Example Input: Alembic(self)
+		Example Input: Alembic(self, source_directory = "database")
 		"""
 
 		self.parent = parent
@@ -1143,7 +1163,7 @@ class Database(Utility_Base):
 
 		Example Input: getAttributeDefaults("Users")
 		Example Input: getAttributeDefaults("Users", ["age", "height"])
-		Example Input: getAttributeDefaults("Users", exclude = ["id"])
+		Example Input: getAttributeDefaults("Users", exclude = ["databaseId"])
 		"""
 
 	@wrap_errorCheck()
@@ -1154,20 +1174,26 @@ class Database(Utility_Base):
 		"""
 
 	@wrap_errorCheck()
-	def getInfo(self, relation, attribute = None, exclude = None, forceTuple = False, valuesAsList = True):
-		"""Returns the info dict for the given columns in 'relation'
+	def getInfo(self, relation, attribute = None, exclude = None, forceAttribute = False):
+		"""Returns the info dict for the given columns in 'relation' in the form: {attribute (str): info (dict)}
 
 		relation (str) - The name of the relation
 		attribute (str) - The name of the attribute to get the default for. Can be a list of attributes
 			- If None: Will get the info for all attributes
 		exclude (list) - A list of which attributes to excude from the returned result
 
+		forceAttribute (bool) - Determines if the attribute is returned in the answer
+			- If True: Answers will always contain the attribute
+			- If False: Answers will omit the attribute if there is only one in the answer
+
 		Example Input: getInfo("Users")
 		Example Input: getInfo("Users", ["age", "height"])
-		Example Input: getInfo("Users", exclude = ["id"])
+		Example Input: getInfo("Users", exclude = ["databaseId"])
 		"""
 
 		def yieldInfo():
+			nonlocal exclude, relationHandle
+
 			for item in self.ensure_container(attribute, convertNone = False):
 				if (item in exclude):
 					continue
@@ -1184,17 +1210,13 @@ class Database(Utility_Base):
 		exclude = self.ensure_container(exclude, convertNone = True)
 		relationHandle = getattr(self.schema, relation)
 
-		if (valuesAsList):
-			answer = tuple(value for key, value in yieldInfo())
-		else:
-			answer = {key: value for key, value in yieldInfo()}
-
+		answer = {key: value for key, value in yieldInfo()}
 		if (not answer):
 			return
-		elif (forceTuple or (not valuesAsList) or (len(answer) > 1)):
+		elif (forceAttribute or (len(answer) > 1)):
 			return answer
 		else:
-			return answer[0]
+			return next(iter(answer.values()), ())
 
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
@@ -1324,7 +1346,7 @@ class Database(Utility_Base):
 
 	def configureJoin(self, query, relation, schema, attributeList, fromSchema = False):
 
-		if (fromSchema):
+		if (fromSchema or (not schema.foreignKeys)):
 			return query
 
 		if (fromSchema is None):
@@ -1333,10 +1355,9 @@ class Database(Utility_Base):
 			handle = query
 
 		for attribute in attributeList:
-			foreignHandle = schema.foreignKeys.get(attribute)
-			if (foreignHandle is None):
+			if (attribute not in schema.foreignKeys):
 				continue
-			handle = handle.join(foreignHandle)
+			handle = handle.join(schema.foreignKeys[attribute])
 
 		if (fromSchema is None):
 			return query.select_from(handle)
@@ -1397,7 +1418,7 @@ class Database(Utility_Base):
 		"""
 
 		if (not fileName):
-			fileName = ":memory:"
+			fileName = "" #":memory:"
 			connectionType = "sqlite3"
 		else:
 			#Check for file extension
@@ -1439,7 +1460,7 @@ class Database(Utility_Base):
 		if (schemaPath):
 			self.loadSchema(schemaPath)
 
-		if (fileName != ":memory:"):
+		if (not fileName):
 			self.loadAlembic(alembicPath)
 
 		if (reset):
@@ -1608,7 +1629,7 @@ class Database(Utility_Base):
 		Example Input: createRelation("Users", {"email": str, "count": int})
 		Example Input: createRelation("Users", [{"email": str}, {"count": int}])
 		Example Input: createRelation("Users", {"email": str, "count": int}, applyChanges = False)
-		Example Input: createRelation("Users", {"id": int, "email": str, "count": int}, notNull = {"id": True}, primary = {"id": True}, autoIncrement = {"id": True}, unique = {"id": True}, autoPrimary = False)
+		Example Input: createRelation("Users", {"databaseId": int, "email": str, "count": int}, notNull = {"databaseId": True}, primary = {"databaseId": True}, autoIncrement = {"databaseId": True}, unique = {"databaseId": True}, autoPrimary = False)
 		
 		Example Input: createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
 		Example Input: createRelation("Users", {"age": int, "height": int}, foreign = {"name": {"Names": "first_name"}})
@@ -1827,7 +1848,7 @@ class Database(Utility_Base):
 		Example Input: getAllValues(["Users", "Names"], orderBy = {"Users": "age"})
 		Example Input: getAllValues(["Users", "Names"], orderBy = {"Users": ["age", "height"]})
 		Example Input: getAllValues(["Users", "Names"], orderBy = {"Users": ["age", "height"], "Names": "extra_data"})
-		Example Input: getAllValues(["Users", "Names"], orderBy = "id")
+		Example Input: getAllValues(["Users", "Names"], orderBy = "databaseId")
 
 		database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived"))
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
@@ -1900,7 +1921,7 @@ class Database(Utility_Base):
 			- If False: {domestic attribute's foreign attribute: domestic attribute's foreign value}
 			- If None: {foreign id: domestic value}
 		foreignDefault (str) - What foreign key to look for when an attribute is a foreign key, but not a dictionary
-			- If None: Will return all foreign attributes that are not primary keys
+			- If None: Will return all foreign attributes
 			- If str: Will return only that foreign attribute
 			- If list: Will return all foreign attributes in list
 
@@ -2181,73 +2202,667 @@ class Database(Utility_Base):
 	def removeIndex(self, relation = None, attribute = None, name = None, noReplication = False):
 		"""Removes an index for the given attribute."""
 
+class Configuration(Base):
+	"""Used to handle .ini files.
+
+	- Both keys and values can have spaces
+	- Multi-line values must have extra lines indented one line deeper
+	- Sections and single-line values can be indented with no consequence
+
+	- Keys can be separated from values by either = or :
+	- Keys without values can have no separator
+	- The separator can have spaces on each side
+
+	- Comments can be done using # or ;
+
+	___________________ EXAMPLE INI FILE ___________________
+
+	[DEFAULT]
+	scanDelay = %(delay) %(units)
+	units = ms
+
+	[main]
+	startup_user = admin
+
+	[AutoSave]
+	delay = 1
+	units = s
+
+	[GUI]
+	delay = 500
+	________________________________________________________
+
+	Use: https://pymotw.com/3/configparser/
+	Use: https://docs.python.org/3.6/library/configparser.html
+	Use: https://martin-thoma.com/configuration-files-in-python/#configparser
+	Use: https://www.blog.pythonlibrary.org/2010/01/01/a-brief-configobj-tutorial/
+	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
+	"""
+
+	def __init__(self, default_filePath = None, default_values = None, default_section = None, 
+		allowNone = True, interpolation = True):
+		"""
+
+		allowNone (bool) - Determines what happens if a setting does not have a set value
+			- If True: Will use None
+			- If False: Will raise an error during load()
+
+		interpolation (bool) - Determines what kind of interpolation can be done in get()
+			- If True: Extended Interpolation
+			- If False: Basic Interpolation
+			- If None: No Interpolation
+
+		Example Input: Configuration(self)
+		Example Input: Configuration(self, source_directory = "database")
+		Example Input: Configuration(self, defaults = {"startup_user": "admin"})
+		"""
+
+		self.default_section = default_section or "main"
+		self.default_filePath = default_filePath or "settings.ini"
+
+		if (interpolation):
+			interpolation = configparser.ExtendedInterpolation()
+		elif (interpolation is not None):
+			interpolation = configparser.BasicInterpolation()
+
+		self.config = configparser.ConfigParser(converters = self.converters, allow_no_value = allowNone, 
+			defaults = default_values or {}, interpolation = interpolation)
+
+		self.dataType_catalogue = {
+			None: self.config.get,
+			str: self.config.get,
+			int: self.config.getint,
+			float: self.config.getfloat,
+			bool: self.config.getboolean,
+			datetime.datetime: self.config.getdatetime,
+		}
+
+		if (default_filePath):
+			self.load()
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		return output
+
+	def __enter__(self):
+		return self.config
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback is not None):
+			print(exc_type, exc_value)
+			return False
+
+	def __getitem__(self, key):
+		return self.config[key]
+
+	def __setitem__(self, key, value):
+		self.config[key] = value
+
+	def __delitem__(self, key):
+		del self.config[key]
+
+	def __contains__(self, key):
+		return key in self.config
+
+	def keys(self):
+		return self.config.keys()
+
+	def values(self):
+		return self.config.values()
+
+	def items(self):
+		return self.config.items()
+
+	def _asdict(self):
+		return dict(self.config)
+
+	def get(self, variable, section = None, dataType = None, default_values = None, raw = False):
+		"""Returns a setting from the given section.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		dataType (type) - What type the data should be in
+		default_values (dict) - Local default values; overrides the global default values temporarily
+		raw (bool) - Determines if the value should be returned without applying interpolation
+
+		___________________ BASIC INTERPOLATION ___________________
+		Variables are denoted with a single '%', followed by closed paren
+			Example: scanDelay = %(delay) %(units)
+
+		To use an escaped %: %%
+			Example: units = %%
+
+		___________________ EXTENDED INTERPOLATION ___________________
+		Variables are denoted with a '$', followed by braces
+			Example: scanDelay = ${delay} ${units}
+
+		Variables from other sections can be used with a ':'
+			Example: scanDelay = ${delay} ${general:units}
+
+
+		Example Input: get("startup_user")
+		Example Input: get("scanDelay", section = "AutoSave")
+		Example Input: get("scanDelay", section = "AutoSave", dataType = int)
+		Example Input: get("startup_window", defaults = {"startup_window": "inventory"})
+		"""
+
+		function = self.dataType_catalogue[dataType]
+
+		try:
+			return function(section or self.default_section, variable, vars = default_values or {}, raw = raw)
+
+		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
+			print("@get", error)
+			return function(section or self.default_section, variable, vars = default_values or {}, raw = True)
+
+	def set(self, variable, value = None, section = None):
+		"""Adds a setting to the given section.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: set("startup_user", "admin")
+		Example Input: set("scanDelay", 1000, section = "AutoSave")
+		"""
+
+		section = section or self.default_section
+
+		if (not self.config.has_section(section)):
+			self.config.add_section(section)
+
+		if (value is None):
+			self.config.set(section, variable, "")
+		else:
+			self.config.set(section, variable, f"{value}")
+
+	def load(self, filePath = None):
+		"""Loads the configuration file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load()
+		Example Input: load("database/user_settings.ini")
+		"""
+
+		self.config.read(filePath or self.default_filePath)
+
+	def save(self, filePath = None):
+		"""Saves changes to config file.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		Example Input: save()
+		Example Input: save("database/user_settings.ini")
+		"""
+
+		with open(filePath or self.default_filePath, "w") as config_file:
+			self.config.write(config_file)
+
+	def has_section(self, section = None):
+		"""Returns True if the section exists in the config file, otherwise returns False.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: has_section()
+		Example Input: has_section(section = "AutoSave")
+		"""
+
+		return self.config.has_section(section or self.default_section)
+
+	def has_setting(self, variable, section = None):
+		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: has_setting("startup_user")
+		Example Input: has_setting("scanDelay", section = "AutoSave")
+		"""
+
+		return self.config.has_option(variable, section or self.default_section)
+
+	def remove_section(self, section = None):
+		"""Removes a section.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: remove_section("startup_user")
+		Example Input: remove_section("scanDelay", section = "AutoSave")
+		"""
+
+		self.config.remove_section(section or self.default_section)
+
+	def remove_setting(self, variable, section = None):
+		"""Removes a setting from the given section.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: remove_setting("startup_user")
+		Example Input: remove_setting("scanDelay", section = "AutoSave")
+		"""
+
+		self.config.remove_option(section or self.default_section, variable)
+
+	def getSections(self):
+		"""Returns a list of existing sections.
+
+		Example Input: getSections()
+		"""
+
+		return self.config.sections()
+
+	def getDefaults(self):
+		"""Returns the defaults that will be used if a setting does not exist.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: getDefaults()
+		"""
+
+		return self.config.defaults()
+
+	def extraBool(self, value, state):
+		"""Adds a value as an extra possible bool.
+		Default cases (case-insensative): yes/no, on/off, true/false, 1/0
+
+		Example Input: extraBool("sure", True)
+		Example Input: extraBool("nope", False)
+		"""
+
+		self.ConfigParser.BOOLEAN_STATES.update({value: state})
+
+	#Converters
+	@staticmethod
+	def convert_datetime(value):
+		return datetime.datetime.strptime(s, "%Y/%m/%d %H:%M:%S.%f")
+
+	converters = {
+		"datetime": convert_datetime
+	}
+
+class JSON_Aid(Base):
+	"""Utility API for json scripts.
+
+	Use: https://martin-thoma.com/configuration-files-in-python/#json
+	"""
+
+	def __init__(self, default_filePath = None):
+		"""
+		Example Input: JSON_Aid()
+		"""
+
+		self.default_filePath = default_filePath or "settings.json"
+
+		self.dirty = None
+		self.contents = {}
+
+		if (default_filePath):
+			self.load(default_filePath)
+
+	def __repr__(self):
+		representation = f"{type(self).__name__}(id = {id(self)})"
+		return representation
+
+	def __str__(self):
+		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
+		return output
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		if (traceback is not None):
+			print(exc_type, exc_value)
+			return False
+
+	def __getitem__(self, key):
+		return self.output[key]
+
+	def __setitem__(self, key, value):
+		self.output[key] = value
+
+	def __delitem__(self, key):
+		del self.output[key]
+
+	def __contains__(self, key):
+		return key in self.output
+
+	def load(self, filePath = None):
+		"""Loads the json file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load()
+		Example Input: load("database/user_settings.json")
+		"""
+
+		with open(filePath or self.default_filePath) as fileHandle:
+			self.contents = json.load(fileHandle)
+		
+		self.dirty = False
+		return self.contents
+
+	def save(self, filePath = None, ifDirty = True):
+		"""Saves changes to json file.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		ifDirty (bool) - Determines if the file should be saved only if changes have been made
+
+		Example Input: save()
+		Example Input: save("database/user_settings.json")
+		"""
+
+		_filePath = filePath or self.default_filePath
+
+		if (ifDirty and (not self.dirty) and (os.path.exists(_filePath))):
+			# print("@save", f"No changes to save to {_filePath}")
+			return
+
+		with open(_filePath, "w") as fileHandle:
+			json.dump(self.contents, fileHandle, indent = "\t")
+
+		self.dirty = False
+
+	def set(self, contents = None, update = True):
+		"""Adds a section to the internal contents.
+
+		contents (dict) - What to add
+		update (bool) - Determines what happens if a key already exists for the given 'contents'
+			- If True: Will update nested dictionaries
+			- If False: Will replace nested dictionaries
+			- If None: Will replace entire self.contents
+
+		Example Input: setContents()
+		Example Input: setContents({"lorem": 1})
+		Example Input: setContents({"ipsum": {"dolor": 4}})
+		Example Input: setContents({"ipsum": {"dolor": 5}}, update = False)
+		Example Input: setContents({"lorem": 1, "ipsum": {"dolor": 2, "sit": 3}}, update = None)
+		"""
+
+		contents = contents or {}
+
+		def nestedUpdate(target, catalogue):
+			"""Modified code from Alex Martelli on https://stackoverflow.com/questions/3232943/update-value-of-a-nested-dictionary-of-varying-depth/3233356#3233356"""
+
+			for key, value in catalogue.items():
+				if (isinstance(value, dict)):
+					target[key] = nestedUpdate(target.get(key, {}), value)
+				else:
+					if ((key in target) and (isinstance(target[key], dict))):
+						target[key]["value"] = value
+					else:
+						target[key] = value
+			return target
+
+		################################
+
+		assert isinstance(contents, dict)
+
+		if (update is None):
+			self.contents = contents
+		elif (not update):
+			self.contents.update(contents)
+		else:
+			nestedUpdate(self.contents, contents)
+
+		self.dirty = True
+
+	def ensure(self, section, variable, value = None, comment = None):
+		"""Makes sure that the given variable exists in the given section.
+
+		section (str) - Which section to ensure 'variable' for
+			- If list: Will ensure all given sections have 'variable'
+
+		variable (str) - Which variable to ensure
+			- If list: Will ensure all given variables
+
+		value (any) - The default value that 'variable' should have if it does not exist
+		comment (str) - Optional comment string for 'variable'
+
+		Example Input: ensure("containers", "label", value = False)
+		"""
+
+		for _section in self.ensure_container(section):
+			if (not self.has_section(_section)):
+				self.contents[_section] = {}
+
+			for _variable in self.ensure_container(variable):
+				if (not self.has_setting(_variable, _section)):
+					self.dirty = True
+					if (comment):
+						self.contents[_section][_variable] = {"value": value, "comment": comment}
+					else:
+						self.contents[_section][_variable] = value
+
+	def apply(self, handle, section, variable = None, handleTypes = None):
+		"""Places default values into the supplied handle.
+
+		___________________ REQUIRED FORMAT ___________________
+
+		self.contents = {
+			section (str): {
+				variable (str): value (any),
+
+				variable (str): {
+					"value": value (any),
+					"comment": docstring (str), #optional
+				},
+			},
+		}
+		_______________________________________________________
+
+		section (str) - Which section to apply variables for
+			- If list: Will apply all given sections
+
+		handle (object) - What to apply the given sections to
+			- If list: will apply to all
+
+		variable (str) - Which variables to apply
+			- If list: Will apply all variables in the section
+
+		handleTypes (list) - Place the type for 'section' here
+
+		Example Input: apply(test_1, "GUI_Manager", handleTypes = Test)
+		Example Input: apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
+		Example Input: apply((test1, test_2), "Settings", variable = ("debugging_default", "debugging_enabled"), handleTypes = Test)
+		"""
+
+		variableList = self.ensure_container(variable)
+
+		for _handle in self.ensure_container(handle, elementTypes = handleTypes):
+			for _section in self.ensure_container(section):
+				if (_section not in self.contents):
+					print("@apply", f"{_section} does not exist in self.contents\n  -- keys: {tuple(self.contents.keys())}")
+					return
+
+				for variable, catalogue in self.contents[_section].items():
+					if (variableList and (variable not in variableList)):
+						continue
+
+					if (not isinstance(catalogue, dict)):
+						setattr(_handle, variable, catalogue)
+					else:
+						setattr(_handle, variable, catalogue["value"])
+
+	def has_section(self, section = None):
+		"""Returns True if the section exists in the config file, otherwise returns False.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: has_section()
+		Example Input: has_section(section = "AutoSave")
+		"""
+
+		return (section or self.default_section) in self.contents
+
+	def has_setting(self, variable, section = None):
+		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
+
+		section (str) - What section to write this setting in
+			- If None: Will use the default section
+
+		Example Input: has_setting("startup_user")
+		Example Input: has_setting("scanDelay", section = "AutoSave")
+		"""
+
+		return variable in self.contents.get(section or self.default_section, {})
+
+	def is_dirty(self):
+		"""Returns True if changes have been made that are not yet saved, otherwise returns False.
+
+		Example Input: is_dirty()
+		"""
+
+		return self.dirty
+
+	def getSections(self, variable = None):
+		"""Returns a list of existing sections.
+
+		variable (str) - What variable must exist in the section
+			- If None: Will not search for sections by variable
+
+		Example Input: getSections()
+		Example Input: getSections(variable = "debugging_default")
+		"""
+
+		if (variable is None):
+			return tuple(self.contents.keys())
+
+		return tuple(key for key, catalogue in self.contents.items() if (variable in catalogue.keys()))
+
+	def getSettings(self, section = None):
+		"""Returns a list of existing settings for the given section.
+
+		section (str) - What section to write this setting in
+			- If list: Will use all in list
+			- If None: Will use all existing sections
+
+		Example Input: getSettings()
+		Example Input: getSettings("AutoSave")
+		"""
+
+		return tuple(variable for key in (self.ensure_container(section) or self.contents.keys()) for variable in self.contents[key].keys())
+
 def quiet(*args):
 	pass
 	print(*args)
 
 def sandbox():
+	def test_json():
+		class Test(): pass
+		test_1 = Test()
+		test_2 = Test()
 
-	database_API = build()
-	database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") # database_API.openDatabase("test_map_example.db", "test_map")
-	database_API.removeRelation()
-	database_API.createRelation()
-	database_API.resetRelation()
+		json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json")
+		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
+		json_API.apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
+		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
 
-	#Add Items
-	database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
-	database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-	database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
-	
-	# #Get Items
-	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
-	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = None))
-	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = True))
-	# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+		quiet(vars(test_1))
+		quiet(vars(test_2))
+		quiet(json_API.getSettings("Users"))
+		quiet(json_API.getSections(variable = "debugging_default"))
 
-	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
-	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignAsDict = True))
-	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label"))
-	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
-	# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
+	def test_config():
+		config_API = build_configuration()
+		# config_API.set("startup_user", "admin")
+		# config_API.save("test.ini")
 
-	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
-	# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
+		config_API.load("test.ini")
+		# quiet(config_API.get("startup_user"))
+		
+		with config_API as config:
+			for section, sectionHandle in config.items():
+				for key, value in sectionHandle.items():
+					quiet(section, key, value)
 
-	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
-	# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = None))
+	def test_sqlite():
+		database_API = build()
+		database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") # database_API.openDatabase("test_map_example.db", "test_map")
+		database_API.removeRelation()
+		database_API.createRelation()
+		database_API.resetRelation()
 
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+		#Add Items
+		database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+		database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+		database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+		
+		# #Get Items
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = None))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = True))
+		# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
 
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True, forceTuple = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True))
-	# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignAsDict = True))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label"))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
 
-	# quiet(database_API.getAllValues("Containers"))
-	# quiet(database_API.getAllValues("Containers", fromSchema = None))
-	# quiet(database_API.getAllValues("Containers", fromSchema = True))
-	# quiet(database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived")))
-	# quiet(database_API.getAllValues("Containers", foreignDefault = ("label", "archived")))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
+		# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
 
-	# #Change Items
-	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
-	# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
-	# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
-	
-	# #Remove Items
-	# database_API.removeTuple({"Containers": {"label": "dolor"}})
-	# database_API.removeTuple({"Containers": {"label": "sit"}})
-	# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
+		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = None))
 
-	# #Etc
-	# quiet(database_API.getInfo("Containers", "id"))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
 
-	# #Update Schema
-	# database_API.openDatabase("test_map_example.db", "test_map_2")
-	# database_API.checkSchema()
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None))
+
+		# quiet(database_API.getAllValues("Containers"))
+		# quiet(database_API.getAllValues("Containers", fromSchema = None))
+		# quiet(database_API.getAllValues("Containers", fromSchema = True))
+		# quiet(database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived")))
+		# quiet(database_API.getAllValues("Containers", foreignDefault = ("label", "archived")))
+
+		# #Change Items
+		# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+		# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+		
+		# #Remove Items
+		# database_API.removeTuple({"Containers": {"label": "dolor"}})
+		# database_API.removeTuple({"Containers": {"label": "sit"}})
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+
+		# #Etc
+		# quiet(database_API.getInfo("Containers", "databaseId"))
+		# quiet(database_API.getInfo("Containers", "databaseId", forceAttribute = True))
+		# quiet(database_API.getInfo("Containers", ("databaseId", "archived")))
+		# quiet(database_API.getInfo("Containers", "job", forceAttribute = True))
+
+		quiet(database_API.getInfo("Users", forceAttribute = True))
+
+
+		# #Update Schema
+		# database_API.openDatabase("test_map_example.db", "test_map_2")
+		# database_API.checkSchema()
+
+	test_json()
+	# test_config()
+	# test_sqlite()
 
 def main():
 	"""The main program controller."""
