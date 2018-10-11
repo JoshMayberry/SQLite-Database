@@ -15,6 +15,7 @@ import decimal
 
 #Utility Modules
 import inspect
+import operator
 import datetime
 import warnings
 import traceback
@@ -603,7 +604,7 @@ class Schema_AutoForeign():
 
 			if (handle is None):
 				#I have no foreign key, so I will make a new one
-				child = handle.__class__(**catalogue)
+				child = self.foreignKeys[variable](**catalogue)
 				session.add(child)
 				setattr(self, variable, child)
 
@@ -613,7 +614,7 @@ class Schema_AutoForeign():
 					setattr(handle, subVariable, newValue)
 			else:
 				#Someone else is using that foreign key, so I will make a new one; I was told to force no change on this foreign key
-				child = handle.__class__(**catalogue)
+				child = self.foreignKeys[variable](**catalogue)
 				session.add(child)
 				setattr(self, variable, child)
 
@@ -986,7 +987,7 @@ class Database(Utility_Base):
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 	"""
 
-	def __init__(self, fileName = None, schemaPath = None, alembicPath = None, **kwargs):
+	def __init__(self, fileName = None, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
@@ -1018,7 +1019,7 @@ class Database(Utility_Base):
 
 		#Initialization functions
 		if (fileName is not None):
-			self.openDatabase(fileName = fileName, schemaPath = schemaPath, alembicPath = alembicPath, **kwargs)
+			self.openDatabase(fileName = fileName, **kwargs)
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -1218,6 +1219,36 @@ class Database(Utility_Base):
 		else:
 			return next(iter(answer.values()), ())
 
+	@wrap_errorCheck()
+	def getForeignSchema(self, relation, foreignKey = None, forceAttribute = False):
+		"""Returns the schema handle for the given foreign key in the given relation.
+
+		relation (str) - The name of the relation
+		foreignKey (str) - The name of the foreignKey to get the default for. Can be a list of foreign keys
+			- If None: Will get the schema handle for all foreign keys
+
+		forceAttribute (bool) - Determines if the attribute is returned in the answer
+			- If True: Answers will always contain the attribute
+			- If False: Answers will omit the attribute if there is only one in the answer
+
+		Example Input: getForeignSchema("Users")
+		Example Input: getForeignSchema("Users", ["age", "height"])
+		Example Input: getForeignSchema("Users", exclude = ["databaseId"])
+		"""
+		
+		catalogue = getattr(self.schema, relation).foreignKeys
+
+		if (foreignKey is None):
+			return catalogue
+
+		answer = {key: catalogue.get(key, None) for key in self.ensure_container(foreignKey)}
+		if (not answer):
+			return
+		elif (forceAttribute or (len(answer) > 1)):
+			return answer
+		else:
+			return next(iter(answer.values()), ())
+
 	def executeCommand(self, command):
 		"""Executes raw SQL to the engine.
 		Yields each row returned from the command.
@@ -1238,7 +1269,7 @@ class Database(Utility_Base):
 		isIn = None, isNotIn = None, isAny = None, isNotAny = None, isAll = None, isNotAll = None, 
 		isBetween = None, isNotBetween = None, between_symetric = False, exclude = None,
 		greaterThan = None, lessThan = None, greaterThanOrEqualTo = None, lessThanOrEqualTo = None):
-		"""Sets up the location portion of the SQL message.
+		"""Sets up the WHERE portion of the SQL message.
 
 		Example Input: configureLocation("Users", like = {"name": "or"})
 		Example Input: configureLocation("Users", like = {"name": ["or", "em"]})
@@ -1247,72 +1278,103 @@ class Database(Utility_Base):
 		Example Input: configureLocation("Users", isIn = {"name": ["Lorem", "Ipsum"]})
 		"""
 
+		def yieldValue(_schema, key, value, function, mode = 1):
+			if (isinstance(value, dict)):
+				for _key, _value in value.items():
+					for answer in yieldValue(_schema.foreignKeys[key], _key, _value, function, mode = mode):
+						yield answer
+				return
+			if (mode is 1):
+				yield function(getattr(_schema, key), value)
+			else:
+				yield getattr(getattr(_schema, key), function)(value)
+
 		def yieldLocation():
 			if (nextTo):
 				for key, value in nextTo.items():
-					yield getattr(schema, key) == value
+					for answer in yieldValue(schema, key, value, operator.eq): # yield getattr(schema, key) == value
+						yield answer
 			if (notNextTo):
 				for key, value in notNextTo.items():
-					yield getattr(schema, key) != value
+					for answer in yieldValue(schema, key, value, operator.ne): # yield getattr(schema, key) != value
+						yield answer
 			if (isNull):
 				for key, value in isNull.items():
-					yield getattr(schema, key) == None
+					for answer in yieldValue(key, None, operator.is_): # yield getattr(schema, key) is None
+						yield answer
 			if (isNotNull):
 				for key, value in isNotNull.items():
-					yield getattr(schema, key) != None
+					for answer in yieldValue(schema, key, value, operator.is_not): # yield getattr(schema, key) is not None
+						yield answer
 			if (greaterThan):
 				for key, value in greaterThan.items():
-					yield getattr(schema, key) > value
+					for answer in yieldValue(schema, key, value, operator.gt): # yield getattr(schema, key) > value
+						yield answer
 			if (greaterThanOrEqualTo):
 				for key, value in greaterThanOrEqualTo.items():
-					yield getattr(schema, key) >= value
+					for answer in yieldValue(schema, key, value, operator.ge): # yield getattr(schema, key) >= value
+						yield answer
 			if (lessThan):
 				for key, value in lessThan.items():
-					yield getattr(schema, key) < value
+					for answer in yieldValue(schema, key, value, operator.lt): # yield getattr(schema, key) < value
+						yield answer
 			if (lessThanOrEqualTo):
 				for key, value in lessThanOrEqualTo.items():
-					yield getattr(schema, key) <= value
+					for answer in yieldValue(schema, key, value, operator.le): # yield getattr(schema, key) <= value
+						yield answer
 
 			if (isIn):
 				for key, value in isIn.items():
-					yield getattr(schema, key).in_(value)
+					for answer in yieldValue(schema, key, value, "in_", mode = 2): # yield getattr(schema, key).in_(value)
+						yield answer
 			if (isNotIn):
 				for key, value in isNotIn.items():
-					yield ~(getattr(schema, key).in_(value))
+					for answer in yieldValue(schema, key, value, "in_", mode = 2): # yield ~(getattr(schema, key).in_(value))
+						yield ~answer
 			if (isAll):
 				for key, value in isAll.items():
-					yield getattr(schema, key).all_(value)
+					for answer in yieldValue(schema, key, value, "all_", mode = 2): # yield getattr(schema, key).all_(value)
+						yield answer
 			if (isNotAll):
 				for key, value in isNotAll.items():
-					yield ~(getattr(schema, key).all_(value))
+					for answer in yieldValue(schema, key, value, "all_", mode = 2): # yield ~(getattr(schema, key).all_(value))
+						yield ~answer
 			if (isAny):
 				for key, value in isAny.items():
-					yield getattr(schema, key).any_(value)
+					for answer in yieldValue(schema, key, value, "any_", mode = 2): # yield getattr(schema, key).any_(value)
+						yield answer
 			if (isNotAny):
 				for key, value in isNotAny.items():
-					yield ~(getattr(schema, key).any_(value))
+					for answer in yieldValue(schema, key, value, "any_", mode = 2): # yield ~(getattr(schema, key).any_(value))
+						yield ~answer
 
 			if (like):
 				if (like_caseSensative):
 					for key, value in like.items():
-						yield getattr(schema, key).like(value)
+						for answer in yieldValue(schema, key, value, "like", mode = 2): # yield getattr(schema, key).like(value)
+							yield answer
 				else:
 					for key, value in like.items():
-						yield getattr(schema, key).ilike(value)
+						for answer in yieldValue(schema, key, value, "ilike", mode = 2): # yield getattr(schema, key).ilike(value)
+							yield answer
 			if (notLike):
 				if (like_caseSensative):
 					for key, value in notLike.items():
-						yield ~(getattr(schema, key).like(value))
+						for answer in yieldValue(schema, key, value, "like", mode = 2): # yield ~(getattr(schema, key).like(value))
+							yield ~answer
 				else:
 					for key, value in notLike.items():
-						yield ~(getattr(schema, key).ilike(value))
+						for answer in yieldValue(schema, key, value, "ilike", mode = 2): # yield ~(getattr(schema, key).ilike(value))
+							yield ~answer
 
 			if (isBetween):
 				for key, (left, right) in isBetween.items():
-					yield getattr(schema, key).between(left, right, symetric = between_symetric)
+					for answer in yieldValue(schema, key, value, "between", mode = 2): # yield getattr(schema, key).between(left, right, symetric = between_symetric)
+						yield answer
 			if (isNotBetween):
 				for key, (left, right) in isNotBetween.items():
-					yield ~(getattr(schema, key).between(left, right, symetric = between_symetric))
+					for answer in yieldValue(schema, key, value, "between", mode = 2): # yield ~(getattr(schema, key).between(left, right, symetric = between_symetric))
+						yield ~answer
 
 
 		######################################################
@@ -1328,6 +1390,7 @@ class Database(Utility_Base):
 			return locationFunction(sqlalchemy.or_(*yieldLocation()))
 
 	def configureOrder(self, handle, relation, schema, orderBy = None, direction = None, nullFirst = None):
+		"""Sets up the ORDER BY portion of the SQL message."""
 
 		_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
 		if (direction is not None):
@@ -1344,7 +1407,21 @@ class Database(Utility_Base):
 
 		return handle.order_by(_orderBy)
 
-	def configureJoin(self, query, relation, schema, attributeList, fromSchema = False):
+	def configureJoin(self, query, relation, schema, attribute, fromSchema = False):
+		"""Sets up the JOIN portion of the SQL message."""
+
+		def augmentHandle(_handle, attributeList):
+			for variable in self.ensure_container(attributeList):
+				if (isinstance(variable, dict)):
+					_handle = augmentHandle(_handle, variable.keys())
+					continue
+				if (variable not in schema.foreignKeys):
+					continue
+
+				_handle = _handle.join(schema.foreignKeys[variable])
+			return _handle
+
+		###############################################
 
 		if (fromSchema or (not schema.foreignKeys)):
 			return query
@@ -1354,14 +1431,10 @@ class Database(Utility_Base):
 		else:
 			handle = query
 
-		for attribute in attributeList:
-			if (attribute not in schema.foreignKeys):
-				continue
-			handle = handle.join(schema.foreignKeys[attribute])
-
+		handle = augmentHandle(handle, attribute)
+		
 		if (fromSchema is None):
 			return query.select_from(handle)
-		
 		return handle
 	
 	#Interaction Functions
@@ -1384,7 +1457,7 @@ class Database(Utility_Base):
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
-		password = None, readOnly = False, keepOpen = None, multiProcess = -1, multiProcess_delay = 100,
+		openAlembic = None, password = None, readOnly = False, keepOpen = None, multiProcess = -1, multiProcess_delay = 100,
 		resultError_replacement = None, aliasError_replacement = None):
 
 		"""Opens a database.If it does not exist, then one is created.
@@ -1407,6 +1480,11 @@ class Database(Utility_Base):
 			- If 0 or None: Do not retry
 			- If -1: Retry forever
 		multiProcess_delay (int) - How many milli-seconds to wait before trying to to execute a command again
+
+		openAlembic(bool) - Determines if the alembicPath should be used
+			- If True: Will start alembic
+			- If False: Will not start alembic
+			- If None: Will start alembic if fileName is not None
 
 		Example Input: openDatabase()
 		Example Input: openDatabase("emaildb")
@@ -1460,7 +1538,7 @@ class Database(Utility_Base):
 		if (schemaPath):
 			self.loadSchema(schemaPath)
 
-		if (not fileName):
+		if (openAlembic or ((openAlembic is None) and fileName)):
 			self.loadAlembic(alembicPath)
 
 		if (reset):
@@ -1762,6 +1840,8 @@ class Database(Utility_Base):
 		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
 
+		# print("@changeTuple.1", self.getValue({_relation: tuple(_catalogue.keys()) for _relation, _catalogue in myTuple.items()}))
+
 		if (fromSchema is None):
 			with self.makeConnection(asTransaction = True) as connection:
 				for relation, rows in myTuple.items():
@@ -1781,6 +1861,7 @@ class Database(Utility_Base):
 						for row in query.all():
 							row.change(session, values = attributeDict, updateForeign = updateForeign)
 
+		# print("@changeTuple.2", self.getValue({_relation: tuple(_catalogue.keys()) for _relation, _catalogue in myTuple.items()}))
 
 	@wrap_errorCheck()
 	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
@@ -1878,7 +1959,7 @@ class Database(Utility_Base):
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
 		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
 		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True, rowsAsList = False, 
-		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False,
+		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
 		foreignAsDict = False, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
@@ -1991,7 +2072,12 @@ class Database(Utility_Base):
 				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
 
 			def yieldRow(query):
-				for result in connection.execute(query).fetchall():
+				if (onlyOne):
+					answer = connection.execute(query).first()
+				else:
+					answer = connection.execute(query).fetchall()
+
+				for result in answer:
 					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
@@ -2020,9 +2106,12 @@ class Database(Utility_Base):
 					yield (query.count(),)
 					return
 
+				if (onlyOne):
+					yield query.first()
+					return
+
 				for result in query.all():
 					yield result
-				return
 
 		else:
 			contextmanager = self.makeSession()
@@ -2038,7 +2127,12 @@ class Database(Utility_Base):
 					yield (query.count(),)
 					return
 
-				for result in query.all():
+				if (onlyOne):
+					answer = (query.first(),)
+				else:
+					answer = query.all()
+
+				for result in answer:
 					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
@@ -2793,7 +2887,8 @@ def sandbox():
 
 	def test_sqlite():
 		database_API = build()
-		database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") # database_API.openDatabase("test_map_example.db", "test_map")
+		# database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") 
+		database_API.openDatabase("test_map_example.db", "H:\Python\Material_Tracker\database\schema.py", openAlembic = False)
 		database_API.removeRelation()
 		database_API.createRelation()
 		database_API.resetRelation()
@@ -2816,7 +2911,6 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
 
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
-		# quiet(database_API.getValue({"Containers": ("job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}}))
 
 		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
 		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = None))
@@ -2831,16 +2925,31 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True))
 		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None))
 
+		# quiet(database_API.getValue({"Containers": "job"}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}))
+		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}, alias = {"job": {"label": "jobNumber"}}))
+
+		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}))
+		quiet(database_API.getValue({"Containers": {"job": ("databaseId", "label")}}))
+		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, {"job": {"label": 1234}}))
+		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, onlyOne = True))
+
 		# quiet(database_API.getAllValues("Containers"))
 		# quiet(database_API.getAllValues("Containers", fromSchema = None))
 		# quiet(database_API.getAllValues("Containers", fromSchema = True))
 		# quiet(database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived")))
 		# quiet(database_API.getAllValues("Containers", foreignDefault = ("label", "archived")))
 
-		# #Change Items
-		# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+		#Change Items
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
 		# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
-		# quiet(database_API.getValue({"Containers": ("label", "job", "location")}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": 90, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": {"label": 5678, "progress": 10}, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": ("label", "progress")}))
+		# database_API.changeTuple({"Containers": {"job": {"progress": 20}, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": ("label", "progress")}))
 		
 		# #Remove Items
 		# database_API.removeTuple({"Containers": {"label": "dolor"}})
@@ -2852,17 +2961,18 @@ def sandbox():
 		# quiet(database_API.getInfo("Containers", "databaseId", forceAttribute = True))
 		# quiet(database_API.getInfo("Containers", ("databaseId", "archived")))
 		# quiet(database_API.getInfo("Containers", "job", forceAttribute = True))
+		# quiet(database_API.getInfo("Users", forceAttribute = True))
 
-		quiet(database_API.getInfo("Users", forceAttribute = True))
+		# quiet(database_API.getForeignSchema("Containers", "job"))
 
 
 		# #Update Schema
 		# database_API.openDatabase("test_map_example.db", "test_map_2")
 		# database_API.checkSchema()
 
-	test_json()
+	# test_json()
 	# test_config()
-	# test_sqlite()
+	test_sqlite()
 
 def main():
 	"""The main program controller."""
