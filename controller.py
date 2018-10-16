@@ -14,25 +14,30 @@ import types
 import decimal
 
 #Utility Modules
-import inspect
+import warnings
 import operator
 import datetime
-import warnings
 import traceback
-import importlib
+
 import itertools
 import functools
-import cachetools
 import contextlib
 import collections
+
+import inspect
+import unidecode
+import importlib
+import cachetools
 
 #Database Modules
 import json
 import pyodbc
 import sqlite3
-import sqlalchemy
-import sqlalchemy.ext.declarative
 import configparser
+
+import sqlalchemy
+import sqlalchemy_utils
+import sqlalchemy.ext.declarative
 
 import alembic
 import alembic.config
@@ -43,14 +48,22 @@ from alembic.config import Config as alembic_config_Config
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
-sessionMaker = sqlalchemy.orm.sessionmaker()
+sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
 #Required Modules
 ##py -m pip install
-	# sqlite3
 	# pyodbc
-	# sqlalchemy
 	# alembic
+	# unidecode
+	# sqlalchemy
+	# cachetools
+
+	# pynsist
+	# wxPython
+
+##MySQL Installer #https://dev.mysql.com/downloads/installer/
+	# MySQL Server
+	# Connector/Python (3.6)
 
 #Debugging functions
 def printCurrentTrace(printout = True, quitAfter = False):
@@ -237,27 +250,22 @@ class Base():
 		return item
 
 class Base_Database(Base):
-	@classmethod
-	def getSchema(cls):
-		"""Returns the functions needed to migrate the data from the old schema to the new one."""
+	# @classmethod
+	# def getSchemaClass(cls, relation):
+	# 	"""Returns the schema class for the given relation.
+	# 	Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
 
-		return []
+	# 	relation (str) - What relation to return the schema class for
 
-	@classmethod
-	def getSchemaClass(cls, relation):
-		"""Returns the schema class for the given relation.
-		Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
+	# 	Example Input: getSchemaClass("Customer")
+	# 	"""
 
-		relation (str) - What relation to return the schema class for
-
-		Example Input: getSchemaClass("Customer")
-		"""
-
-		# # table = Mapper.metadata.tables.get("Customer")
-		# # column = table.columns["name"]
-		# return Mapper._decl_class_registry[column.table.name]
+	# 	# # table = Mapper.metadata.tables.get("Customer")
+	# 	# # column = table.columns["name"]
+	# 	# return Mapper._decl_class_registry[column.table.name]
 
 	#Schema Factory Functions
+	#https://stackoverflow.com/questions/1827063/mysql-error-key-specification-without-a-key-length/1827099#1827099
 	dataType_catalogue = {
 		int: sqlalchemy.Integer, "int": sqlalchemy.Integer,
 		"bigint": sqlalchemy.types.BigInteger, "int+": sqlalchemy.types.BigInteger,
@@ -268,7 +276,7 @@ class Base_Database(Base):
 		
 		bool: sqlalchemy.Boolean(), "bool": sqlalchemy.Boolean(),
 
-		str: sqlalchemy.Text(), "str": sqlalchemy.String(256), "text": sqlalchemy.Text(), 
+		str: sqlalchemy.String(256), "str": sqlalchemy.String(256), "text": sqlalchemy.Text(), 
 		"unicode": sqlalchemy.Unicode(), "utext": sqlalchemy.UnicodeText(),
 		"json": sqlalchemy.JSON(),
 		
@@ -336,8 +344,8 @@ class Base_Database(Base):
 		columnItems = [] #https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.*args
 		if (foreignKey):
 			columnItems.append(sqlalchemy.ForeignKey(foreignKey, 
-				onupdate = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_update], 
-				ondelete = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_delete],
+				# onupdate = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_update], 
+				# ondelete = {True: 'CASCADE', False: 'SET DEFAULT', None: 'RESTRICT'}[foreign_delete],
 				info = foreign_info or {}))
 
 		columnKwargs = {"info": info or {}}
@@ -382,6 +390,7 @@ class Utility_Base(Base_Database):
 			session.rollback()
 			raise
 		finally:
+			session.flush()
 			session.close()
 
 	@contextlib.contextmanager
@@ -405,6 +414,55 @@ class Utility_Base(Base_Database):
 				raise
 			finally:
 				connection.close()
+
+	def yieldColumn_fromTable(self, relation, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
+		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+
+		def formatAttribute(foreignKey, attribute):
+			assert False #Untested
+			if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
+				if (foreignAsDict):
+					return f"zfk_{foreignKey}_zfk_{alias[foreignKey][attribute]}"
+				else:
+					return alias[foreignKey][attribute]
+			else:
+				if (foreignAsDict):
+					return f"zfk_{foreignKey}_zfk_{attribute}"
+				else:
+					return f"{foreignKey}_{attribute}"
+
+		######################################################
+
+		exclude = self.ensure_container(exclude)
+
+		if (isinstance(relation, str)):
+			table = self.metadata.tables[relation]
+		else:
+			table = relation
+
+		for catalogue in catalogueList:
+			if (not isinstance(catalogue, dict)):
+				if (catalogue in exclude):
+					continue
+
+				columnHandle = getattr(table.columns, catalogue)
+				if (not columnHandle.foreign_keys):
+					if (alias and (catalogue in alias)):
+						yield columnHandle.label(alias[catalogue])
+					else:
+						yield columnHandle
+					continue
+
+				assert False #Untested
+				if (foreignDefault is None):
+					catalogue = {catalogue: tuple(attribute for attribute in columnHandle.foreign_keys[catalogue].__mapper__.columns.keys() if (attribute not in exclude))}
+				else:
+					catalogue = {catalogue: foreignDefault}
+
+			assert False #Untested
+			for foreignKey, attributeList in catalogue.items():
+				for attribute in cls.ensure_container(attributeList):
+					yield getattr(table.columns, attribute).label(formatAttribute(foreignKey, attribute))
 
 class Schema_Base(Base_Database):
 	foreignKeys = {}
@@ -480,11 +538,12 @@ class Schema_Base(Base_Database):
 			columnHandle = columnHandle.label(alias[attribute])
 		yield columnHandle
 
-	def change(self, values = {}, **kwargs):
+	def change(self, session, values = {}, **kwargs):
+		print("@4")
 		for variable, newValue in values.items():
 			setattr(self, variable, newValue)
 
-class Schema_AutoForeign():
+class Schema_AutoForeign(Base_Database):
 	_foreignInfo = {}
 
 	def __init__(self, kwargs = {}):
@@ -492,6 +551,7 @@ class Schema_AutoForeign():
 		Special thanks to van for how to automatically add children on https://stackoverflow.com/questions/8839211/sqlalchemy-add-child-in-one-to-many-relationship
 		"""
 
+		forcedCatalogue = {}
 		for variable, relationHandle in self.foreignKeys.items():
 			catalogue = kwargs.pop(variable, None)
 			if (not catalogue):
@@ -504,9 +564,12 @@ class Schema_AutoForeign():
 				if (child is None):
 					child = relationHandle(**catalogue)
 					session.add(child)
+					forcedCatalogue[variable] = child
 					session.commit()
-					setattr(self, variable, child)
-				kwargs[f"{variable}_id"] = child.databaseId
+				kwargs[f"{variable}_id"] = getattr(child, sqlalchemy.inspection.inspect(relationHandle).primary_key[0].name)
+
+		for variable, child in forcedCatalogue.items():
+			setattr(self, variable, child)
 
 	@classmethod
 	def formatForeign(cls, schema):
@@ -593,30 +656,66 @@ class Schema_AutoForeign():
 		if (not checkForeign):
 			super().change(session, values = values)
 
+		forcedCatalogue = {}
 		for variable, catalogue in values.items():
 			if (variable not in self.foreignKeys):
 				setattr(self, variable, catalogue)
 				continue
 
-			handle = getattr(self, variable)
 			if (not isinstance(catalogue, dict)):
 				catalogue = {"label": catalogue}
+			elif (not catalogue):
+				continue
 
-			if (handle is None):
-				#I have no foreign key, so I will make a new one
-				child = self.foreignKeys[variable](**catalogue)
-				session.add(child)
-				setattr(self, variable, child)
+			relationHandle = self.foreignKeys[variable]
+			if ("label" in catalogue):
+				existing = session.query(relationHandle).filter(relationHandle.label == catalogue["label"]).one_or_none()
+				if (existing is None):
+					current = getattr(self, variable, None)
+					if ((current is not None) and (len(getattr(current, self.__class__.__name__.lower())) is 1)):
+						#Change current
+						for key, value in catalogue.items():
+							setattr(current, key, value)
+						continue
 
-			elif (updateForeign or ((updateForeign is None) and (len(getattr(handle, self.__class__.__name__.lower())) is 1))):
-				#I am the only one using this foreign key, so I can change it; I was told to force the change on this foreign key
-				for subVariable, newValue in catalogue.items():
-					setattr(handle, subVariable, newValue)
-			else:
-				#Someone else is using that foreign key, so I will make a new one; I was told to force no change on this foreign key
-				child = self.foreignKeys[variable](**catalogue)
-				session.add(child)
-				setattr(self, variable, child)
+					#Create new
+					child = self.foreignKeys[variable](**catalogue)
+					session.add(child)
+					setattr(self, variable, child)
+					forcedCatalogue[variable] = child
+					continue
+
+				if (len(catalogue) is 1):
+					#Use existing
+					setattr(self, variable, existing)
+					continue
+
+				for key, value in catalogue.items():
+					if (getattr(existing, key) != value):
+						break
+				else:
+					#Use existing
+					setattr(self, variable, existing)
+					continue
+
+				if (len(getattr(existing, self.__class__.__name__.lower())) is 0):
+					#Change existing
+					setattr(self, variable, existing)
+					for key, value in catalogue.items():
+						setattr(existing, key, value)
+					continue
+
+			#Create new unique
+
+			n = 1
+			title = catalogue.get('label', variable.title())
+			while f"{title}_{n}" in {row.label for row in session.query(relationHandle).all()}:
+				n += 1
+
+			child = self.foreignKeys[variable](**{**catalogue, "label": f"{title}_{n}"})
+			session.add(child)
+			setattr(self, variable, child)
+			forcedCatalogue[variable] = child
 
 migrationCatalogue = {}
 class CustomMetaData(sqlalchemy.MetaData, Base):
@@ -632,6 +731,11 @@ class CustomBase(Base_Database):
 
 def makeBase():
 	return sqlalchemy.ext.declarative.declarative_base(cls = CustomBase, metadata = CustomMetaData())
+
+class EmptySchema():
+	Mapper = makeBase()
+	relationCatalogue = {}
+	hasForeignCatalogue = {}
 
 #Controllers
 def build(*args, **kwargs):
@@ -665,6 +769,9 @@ class Singleton():
 
 NULL = Singleton("NULL")
 FLAG = Singleton("FLAG")
+
+#Dialects
+sqlalchemy.dialects.registry.register("access.fixed", "forks.sqlalchemy.dialects.access.base", "AccessDialect")
 
 #Main API
 class Alembic(Base):
@@ -1019,7 +1126,10 @@ class Database(Utility_Base):
 
 		#Initialization functions
 		if (fileName is not None):
-			self.openDatabase(fileName = fileName, **kwargs)
+			if (fileName.endswith(".ini")):
+				self.openDatabase_fromConfig(filePath = fileName, **kwargs)
+			else:
+				self.openDatabase(fileName = fileName, **kwargs)
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -1128,7 +1238,9 @@ class Database(Utility_Base):
 		inspector = sqlalchemy.inspect(self.engine)
 
 		if (foreignAsDict is not None):
-			relationHandle = self.schema.relationCatalogue[relation]
+			relationHandle = self.schema.relationCatalogue.get(relation)
+			if (relationHandle is None):
+				foreignAsDict = None
 
 		def yieldAttribute():
 			nonlocal self, relation, exclude, foreignAsDict
@@ -1179,7 +1291,7 @@ class Database(Utility_Base):
 		"""Returns the info dict for the given columns in 'relation' in the form: {attribute (str): info (dict)}
 
 		relation (str) - The name of the relation
-		attribute (str) - The name of the attribute to get the default for. Can be a list of attributes
+		attribute (str) - The name of the attribute to get the info for. Can be a list of attributes
 			- If None: Will get the info for all attributes
 		exclude (list) - A list of which attributes to excude from the returned result
 
@@ -1209,15 +1321,81 @@ class Database(Utility_Base):
 		###########################
 
 		exclude = self.ensure_container(exclude, convertNone = True)
-		relationHandle = getattr(self.schema, relation)
+		relationHandle = self.schema.relationCatalogue[relation]
 
 		answer = {key: value for key, value in yieldInfo()}
-		if (not answer):
-			return
-		elif (forceAttribute or (len(answer) > 1)):
+		if (forceAttribute or (len(answer) is not 1)):
 			return answer
 		else:
 			return next(iter(answer.values()), ())
+
+	@wrap_errorCheck()
+	def getCreationOrder(self, relation, attribute = None, exclude = None, forceAttribute = False):
+		"""Returns the order that the columns were created in the schema in the form: {attribute (str): order (int)}
+
+		relation (str) - The name of the relation
+		attribute (str) - The name of the attribute to get the creation order for. Can be a list of attributes
+			- If None: Will get the creation order for all attributes
+		exclude (list) - A list of which attributes to excude from the returned result
+
+		forceAttribute (bool) - Determines if the attribute is returned in the answer
+			- If True: Answers will always contain the attribute
+			- If False: Answers will omit the attribute if there is only one in the answer
+
+		Example Input: getCreationOrder("Users")
+		Example Input: getCreationOrder("Users", ["age", "height"])
+		Example Input: getCreationOrder("Users", exclude = ["databaseId"])
+		"""
+
+		def yieldOrder():
+			nonlocal exclude, relationHandle
+
+			for item in self.ensure_container(attribute, convertNone = False):
+				if (item in exclude):
+					continue
+
+				if (item is not None):
+					yield item, getattr(relationHandle, item)._creation_order
+					continue
+
+				for subItem in self.getAttributeNames(relation, exclude = exclude):
+					if (subItem in relationHandle.foreignKeys):
+						subItem = f"{subItem}_id"
+					yield subItem, getattr(relationHandle, subItem)._creation_order
+
+		###########################
+
+		exclude = self.ensure_container(exclude, convertNone = True)
+		relationHandle = self.schema.relationCatalogue[relation]
+
+		answer = {key: value for key, value in yieldOrder()}
+		if (forceAttribute or (len(answer) is not 1)):
+			return answer
+		else:
+			return next(iter(answer.values()), ())
+
+	@wrap_errorCheck()
+	def getSchema(self, relation, forceMatch = False):
+		"""Returns the schema handle for the given relation"""
+
+		if (relation in self.schema.relationCatalogue):
+			return self.schema.relationCatalogue[relation]
+		
+		elif (not forceMatch):
+			return
+
+		table = self.metadata.tables[relation]
+
+		# schema = type("Facsimile_Schema", (EmptySchema.Mapper, Schema_Base,), {"__tablename__": relation, **{column.name: column for column in table.columns}})()
+		
+		# for column in table.columns:
+		# 	print(column.name, column.__class__)
+		# print(dir(column))
+
+		# sys.exit()
+
+		
+		return schema
 
 	@wrap_errorCheck()
 	def getForeignSchema(self, relation, foreignKey = None, forceAttribute = False):
@@ -1236,7 +1414,7 @@ class Database(Utility_Base):
 		Example Input: getForeignSchema("Users", exclude = ["databaseId"])
 		"""
 		
-		catalogue = getattr(self.schema, relation).foreignKeys
+		catalogue = self.schema.relationCatalogue[relation].foreignKeys
 
 		if (foreignKey is None):
 			return catalogue
@@ -1249,7 +1427,7 @@ class Database(Utility_Base):
 		else:
 			return next(iter(answer.values()), ())
 
-	def executeCommand(self, command):
+	def executeCommand(self, command, valueList = None):
 		"""Executes raw SQL to the engine.
 		Yields each row returned from the command.
 
@@ -1258,13 +1436,18 @@ class Database(Utility_Base):
 		Example Input: executeCommand("SELECT * FROM Users")
 		"""
 
-		with self.makeConnection() as connection:
-			result = connection.execute(command)
+		def yieldResult(result):
 			for row in result:
 				yield row
 
+		##############################
+
+		with self.makeConnection() as connection:
+			return yieldResult(connection.execute(command, valueList or ()))
+			
+
 	#Configure SQL functions
-	def configureLocation(self, handle, schema, fromSchema = False, nextToCondition = True, nextToCondition_None = None, checkForeign = True, forceMatch = True, 
+	def configureLocation(self, handle, schema, table, fromSchema = False, nextToCondition = True, nextToCondition_None = None, checkForeign = True, forceMatch = True, 
 		nextTo = None, notNextTo = None, like = None, notLike = None, isNull = None, isNotNull = None, extra = None, like_caseSensative = False,
 		isIn = None, isNotIn = None, isAny = None, isNotAny = None, isAll = None, isNotAll = None, 
 		isBetween = None, isNotBetween = None, between_symetric = False, exclude = None,
@@ -1389,10 +1572,14 @@ class Database(Utility_Base):
 		else:
 			return locationFunction(sqlalchemy.or_(*yieldLocation()))
 
-	def configureOrder(self, handle, relation, schema, orderBy = None, direction = None, nullFirst = None):
+	def configureOrder(self, handle, relation, schema, table, orderBy = None, direction = None, nullFirst = None):
 		"""Sets up the ORDER BY portion of the SQL message."""
 
-		_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
+		if (schema is None):
+			_orderBy = getattr(table.columns, orderBy or self.getPrimaryKey(relation))
+		else:
+			_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
+
 		if (direction is not None):
 			if (direction):
 				_orderBy = sqlalchemy.asc(_orderBy)
@@ -1407,7 +1594,7 @@ class Database(Utility_Base):
 
 		return handle.order_by(_orderBy)
 
-	def configureJoin(self, query, relation, schema, attribute, fromSchema = False):
+	def configureJoin(self, query, relation, schema, table, attribute, fromSchema = False):
 		"""Sets up the JOIN portion of the SQL message."""
 
 		def augmentHandle(_handle, attributeList):
@@ -1423,7 +1610,12 @@ class Database(Utility_Base):
 
 		###############################################
 
-		if (fromSchema or (not schema.foreignKeys)):
+		if (schema is None):
+			if (not table.foreign_keys):
+				return query
+			assert False #Untested
+
+		elif (fromSchema or (not schema.foreignKeys)):
 			return query
 
 		if (fromSchema is None):
@@ -1456,17 +1648,48 @@ class Database(Utility_Base):
 		self.metadata.reflect()
 
 	@wrap_errorCheck()
+	def openDatabase_fromConfig(self, filePath, section = None, **kwargs):
+		"""Opens a database as directed to from the given config file.
+
+		___________________ REQUIRED FORMAT ___________________
+
+		[{section}]
+		port = {}
+		host = {}
+		user = {}
+		password = {}
+		fileName = {}
+
+		readOnly = {} #Optional
+		schemaPath = {} #Optional
+		alembicPath = {} #Optional
+		openAlembic = {} #Optional
+		connectionType = {} #Optional
+		_______________________________________________________
+
+		filePath (str) - Where the config file is located
+		section (str) - What section in the config file to use
+
+		Example Input: openDatabase_fromConfig("settings.ini")
+		"""
+
+		config = build_configuration(default_filePath = filePath, default_section = section)
+		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", 
+			"readOnly", "schemaPath", "alembicPath", "openAlembic", "connectionType")}, fallback = None), **kwargs})
+
+	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
-		openAlembic = None, password = None, readOnly = False, keepOpen = None, multiProcess = -1, multiProcess_delay = 100,
+		openAlembic = None, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False,
+		port = None, host = None, user = None, password = None, echo = False,
 		resultError_replacement = None, aliasError_replacement = None):
 
 		"""Opens a database.If it does not exist, then one is created.
 		Note: If a database is already opened, then that database will first be closed.
 		Use: toLarry Lustig for help with multi-threading on http://stackoverflow.com/questions/22739590/how-to-share-single-sqlite-connection-in-multi-threaded-python-application
 		Use: to culix for help with multi-threading on http://stackoverflow.com/questions/6297404/multi-threaded-use-of-sqlalchemy
-		use: https://stackoverflow.com/questions/9233912/connecting-sqlalchemy-to-msaccess
-
-		Use: https://stackoverflow.com/questions/31164610/connect-to-sqlite3-server-using-pyodbc-python
+		
+		Use: https://stackoverflow.com/questions/9233912/connecting-sqlalchemy-to-msaccess/13849359#13849359
+		Use: https://docs.sqlalchemy.org/en/latest/core/connections.html#registering-new-dialects
 		Use: http://www.blog.pythonlibrary.org/2010/10/10/sqlalchemy-and-microsoft-access/
 
 		fileName (str)      - The name of the database file
@@ -1495,12 +1718,72 @@ class Database(Utility_Base):
 		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
 		"""
 
+		@contextlib.contextmanager
+		def makeEngine():
+			global sessionMaker
+			nonlocal self, user, password, host, port, fileName, schemaPath, openAlembic, alembicPath
+
+			self.isAccess = self.connectionType == "access"
+			self.isSQLite = self.connectionType == "sqlite3"
+			self.isMySQL = self.connectionType == "mysql"
+			self.isMsSQL = self.connectionType == "mssql"
+
+			if (self.isMySQL):
+				engineKwargs = {"connect_args": {"time_zone": "+00:00"}, "pool_recycle": 3600}
+				self.fileName = f"mysql+mysqlconnector://{user}:{password}@{host or 'localhost'}:{port or 3306}/{fileName}"
+
+			elif (self.isSQLite):
+				engineKwargs = {}
+				self.fileName = f"sqlite:///{fileName}"
+			
+			elif (self.isAccess):
+				engineKwargs = {"encoding": "latin1", "convert_unicode": True}
+				self.fileName = f"access+fixed:///{fileName}?charset={engineKwargs['encoding']}"
+
+			elif (self.isMsSQL):
+				assert False
+				engineKwargs = {}
+				self.fileName = f"mssql+pyodbc://{user}:{password}@{host or localhost}:{port or 3306}/{fileName}?driver=SQL+Server+Native+Client+11.0"
+
+			else:
+				errorMessage = f"Unknown connection type {connectionType}"
+				raise KeyError(errorMessage)
+
+			if (self.isMySQL):
+				# reset = not sqlalchemy_utils.database_exists(self.fileName)
+				reset = False
+			else:
+				reset = not os.path.exists(fileName)
+
+			yield engineKwargs
+			sessionMaker.configure(bind = self.engine)
+
+			if (self.isSQLite):
+				sqlalchemy.event.listen(self.engine, 'connect', self._fk_pragma_on_connect)
+
+			self.loadSchema(schemaPath)
+
+			if (openAlembic or ((openAlembic is None) and fileName)):
+				self.loadAlembic(alembicPath)
+			else:
+				self.alembic = None
+
+			if (reset):
+				print(f"Creating Fresh Database for {fileName}")
+				self.createRelation()
+				self.resetRelation()
+
+				if (self.alembic):
+					self.alembic.stamp()
+
+		#########################
+
 		if (not fileName):
 			fileName = "" #":memory:"
 			connectionType = "sqlite3"
 		else:
 			#Check for file extension
-			if ("." not in fileName):
+			if (forceExtension and ("." not in fileName)):
 				fileName += self.defaultFileExtension
 
 			if (connectionType is None):
@@ -1519,35 +1802,8 @@ class Database(Utility_Base):
 		# if (self.resultError_replacement is None):
 		# 	self.resultError_replacement = "!!! SELECT ERROR !!!"
 
-		self.isAccess = self.connectionType == "access"
-		self.isSQLite = self.connectionType == "sqlite3"
-		self.isMySQL = self.connectionType == "mysql"
-
-		reset = not os.path.exists(fileName)
-
-		if (self.isSQLite):
-			self.fileName = f"sqlite:///{fileName}"
-			self.engine = sqlalchemy.create_engine(self.fileName)
-			sqlalchemy.event.listen(self.engine, 'connect', self._fk_pragma_on_connect)
-		else:
-			errorMessage = f"Unknown connection type {connectionType}"
-			raise KeyError(errorMessage)
-
-		sessionMaker.configure(bind = self.engine)
-		
-		if (schemaPath):
-			self.loadSchema(schemaPath)
-
-		if (openAlembic or ((openAlembic is None) and fileName)):
-			self.loadAlembic(alembicPath)
-
-		if (reset):
-			print(f"Creating Fresh Database for {fileName}")
-			self.createRelation()
-			self.resetRelation()
-
-			if (self.alembic):
-				self.alembic.stamp()
+		with makeEngine() as engineKwargs:
+			self.engine = sqlalchemy.create_engine(self.fileName, **engineKwargs, echo = echo)
 
 	def _fk_pragma_on_connect(self, connection, record):
 		"""Turns foreign keys on for SQLite.
@@ -1580,19 +1836,26 @@ class Database(Utility_Base):
 		if (applyChanges or ((applyChanges is None) and self.defaultCommit)):
 			self.saveDatabase()
 
-	def loadSchema(self, schemaPath):
+	def loadSchema(self, schemaPath = None):
 		"""Loads in a schema from the given schemaPath.
 
 		Example Input: loadSchema(schemaPath)
 		"""
 
+		if (not schemaPath):
+			self.schema = EmptySchema
+			# self.metadata = sqlalchemy.MetaData(bind = self.engine)
+			# self.refresh()
+			# return
 
-		if (os.path.isfile(schemaPath)):
+		elif (os.path.isfile(schemaPath)):
 			sys.path.append(os.path.dirname(schemaPath))
 			schemaPath = os.path.splitext(os.path.basename(schemaPath))[0]
+			self.schema = importlib.import_module(schemaPath)
+		else:
+			self.schema = importlib.import_module(schemaPath)
 
 		self.schemaPath = schemaPath
-		self.schema = importlib.import_module(self.schemaPath)
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
 		self.refresh()
@@ -1802,9 +2065,9 @@ class Database(Utility_Base):
 		else:
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
-					parent = self.schema.relationCatalogue[relation]
+					schema = self.schema.relationCatalogue[relation]
 					for attributeDict in self.ensure_container(rows):
-						handle = session.add(parent(**attributeDict))
+						session.add(schema(**attributeDict))
 
 	@wrap_errorCheck()
 	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, fromSchema = False, **locationKwargs):
@@ -1821,7 +2084,7 @@ class Database(Utility_Base):
 		forceMatch (any) - Determines what will happen in the case where 'nextTo' is not found
 			- If True: Create a new row that contains the default values
 			- If False: Do nothing
-			- If None: Do nothing
+			- If None: Raise error
 
 		nextToCondition (bool) - Determines how to handle multiple nextTo criteria
 			- If True: All of the criteria given must match
@@ -1840,8 +2103,6 @@ class Database(Utility_Base):
 		Example Input: changeTuple({"Users": {"name": "Amet", "extra_data": 2}, {"age": 26})
 		"""
 
-		# print("@changeTuple.1", self.getValue({_relation: tuple(_catalogue.keys()) for _relation, _catalogue in myTuple.items()}))
-
 		if (fromSchema is None):
 			with self.makeConnection(asTransaction = True) as connection:
 				for relation, rows in myTuple.items():
@@ -1849,19 +2110,37 @@ class Database(Utility_Base):
 					for attributeDict in self.ensure_container(rows):
 						#Does not handle foreign keys
 						query = table.update(values = attributeDict)
-						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						query = self.configureLocation(query, table.columns, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 						connection.execute(query)
 		else:
+			forcedList = []
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
-					parent = self.schema.relationCatalogue[relation]
+					schema = self.schema.relationCatalogue[relation]
 					for attributeDict in self.ensure_container(rows):
-						query = session.query(parent)
-						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
-						for row in query.all():
-							row.change(session, values = attributeDict, updateForeign = updateForeign)
+						query = session.query(schema)
+						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						
+						if ((forceMatch is not False) and (query.count() is 0)):
+							if (forceMatch is None):
+								errorMessage = f"There is no row in {relation} that matches the criteria {attributeDict}, {nextTo}, and {locationKwargs}"
+								raise KeyError(errorMessage)
 
-		# print("@changeTuple.2", self.getValue({_relation: tuple(_catalogue.keys()) for _relation, _catalogue in myTuple.items()}))
+							forcedList.append(schema(**{**attributeDict, **(nextTo or {})}))
+							continue
+
+						for row in query.all():
+							try:
+								row.change(session, values = attributeDict, updateForeign = updateForeign)
+
+							except Exception as error:
+								print("--", attributeDict, updateForeign)
+								traceback.print_exc()
+								continue
+
+			if (forcedList):
+				with self.makeSession() as session:
+					session.add_all(forcedList)
 
 	@wrap_errorCheck()
 	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
@@ -1898,15 +2177,15 @@ class Database(Utility_Base):
 					table = self.metadata.tables[relation]
 					for nextTo in self.ensure_container(rows):
 						query = table.delete()
-						query = self.configureLocation(query, table.columns, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						query = self.configureLocation(query, table.columns, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 						connection.execute(query)
 		else:
 			with self.makeSession() as session:
 				for relation, rows in myTuple.items():
-					parent = self.schema.relationCatalogue[relation]
+					schema = self.schema.relationCatalogue[relation]
 					for nextTo in self.ensure_container(rows):
-						query = session.query(parent)
-						query = self.configureLocation(query, parent, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+						query = session.query(schema)
+						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 						query.delete()
 
 	@wrap_errorCheck()
@@ -2063,21 +2342,62 @@ class Database(Utility_Base):
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
 		# startTime = time.perf_counter()
-		
+
 		if (fromSchema is None):
 			contextmanager = self.makeConnection(asTransaction = True)
-			def startQuery(relation, attributeList, schema):
+			def startQuery(relation, attributeList, schema, table):
 				nonlocal self, excludeList, alias
 
-				return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
-
+				if (schema is not None):
+					return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
+				return sqlalchemy.select(columns = self.yieldColumn_fromTable(table, attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
+					
 			def yieldRow(query):
-				if (onlyOne):
-					answer = connection.execute(query).first()
-				else:
-					answer = connection.execute(query).fetchall()
+				nonlocal connection
 
-				for result in answer:
+				catalogue = self.engine.url.query
+				if (("charset" in catalogue) and (catalogue["charset"] != "utf8")):
+					def yieldResult():
+						nonlocal connection, query
+
+						def _yieldResult():
+							nonlocal connection, query
+							if (onlyOne):
+								yield connection.execute(query).first()
+								return
+
+							for item in connection.execute(query).fetchall():
+								yield item
+
+						##############################
+
+						#Search for invalid strings, and fix them
+						for result in _yieldResult():
+							replacement_catalogue = {}
+							for key, value in result.items():
+								if (isinstance(value, str)):
+									try:
+										value.encode('ascii')
+									except UnicodeEncodeError as error:
+										replacement_catalogue[key] = unidecode.unidecode_expect_nonascii(value)
+							if (replacement_catalogue):
+								result = dict(result)
+								result.update(replacement_catalogue)
+
+							yield result
+				else:
+					def yieldResult():
+						nonlocal connection, query
+						if (onlyOne):
+							yield connection.execute(query).first()
+							return
+
+						for item in connection.execute(query).fetchall():
+							yield item
+
+				###################################
+
+				for result in yieldResult():
 					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
@@ -2096,7 +2416,9 @@ class Database(Utility_Base):
 
 		elif (fromSchema):
 			contextmanager = self.makeSession()
-			def startQuery(relation, attributeList, schema):
+			def startQuery(relation, attributeList, schema, table):
+				assert connection, schema is not None
+
 				return connection.query(schema)
 
 			def yieldRow(query):
@@ -2115,8 +2437,9 @@ class Database(Utility_Base):
 
 		else:
 			contextmanager = self.makeSession()
-			def startQuery(relation, attributeList, schema):
-				nonlocal excludeList, alias
+			def startQuery(relation, attributeList, schema, table):
+				nonlocal connection, excludeList, alias
+				assert schema is not None
 
 				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
 
@@ -2149,7 +2472,7 @@ class Database(Utility_Base):
 								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
 						yield dict(catalogue)
 
-		def getResult(query, connection):
+		def getResult(query):
 			nonlocal forceTuple
 
 			answer = tuple(yieldRow(query))
@@ -2175,12 +2498,14 @@ class Database(Utility_Base):
 						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
 					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict is None)
 
-				schema = self.schema.relationCatalogue[relation]
+				schema = self.getSchema(relation)#, forceMatch = True)
+				table = self.metadata.tables[relation]
+
 				
-				query = startQuery(relation, attributeList, schema)
-				query = self.configureJoin(query, relation, schema, attributeList, fromSchema = fromSchema)
-				query = self.configureOrder(query, relation, schema, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
-				query = self.configureLocation(query, schema, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+				query = startQuery(relation, attributeList, schema, table)
+				query = self.configureJoin(query, relation, schema, table, attributeList, fromSchema = fromSchema)
+				query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+				query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
 				if (limit is not None):
 					query = query.limit(limit)
@@ -2189,7 +2514,7 @@ class Database(Utility_Base):
 				if (count and (fromSchema is None)):
 					query = query.count()
 
-				results_catalogue[relation] = getResult(query, connection)
+				results_catalogue[relation] = getResult(query)
 		
 		# print(f"@getValue.9", fromSchema, f"{time.perf_counter() - startTime:.6f}")
 
@@ -2414,14 +2739,20 @@ class Configuration(Base):
 	def _asdict(self):
 		return dict(self.config)
 
-	def get(self, variable, section = None, dataType = None, default_values = None, raw = False):
+	def get(self, variable = None, section = None, dataType = None, default_values = None, include_defaults = True,
+		fallback = configparser._UNSET, raw = False, forceAttribute = False, forceTuple = False):
 		"""Returns a setting from the given section.
+
+		variable (str) - What setting to get
+			- If list: Will return a dictionary of all settings in the list
+			- If None: Will return a dictionary of all settings in the section
 
 		section (str) - What section to write this setting in
 			- If None: Will use the default section
 
 		dataType (type) - What type the data should be in
 		default_values (dict) - Local default values; overrides the global default values temporarily
+		include_defaults (bool) - Determines if the default section should be used as a fallback
 		raw (bool) - Determines if the value should be returned without applying interpolation
 
 		___________________ BASIC INTERPOLATION ___________________
@@ -2439,30 +2770,86 @@ class Configuration(Base):
 			Example: scanDelay = ${delay} ${general:units}
 
 
+		Example Input: get()
 		Example Input: get("startup_user")
 		Example Input: get("scanDelay", section = "AutoSave")
 		Example Input: get("scanDelay", section = "AutoSave", dataType = int)
 		Example Input: get("startup_window", defaults = {"startup_window": "inventory"})
+		
+		Example Input: get(("user", "password", "port"), section = "Database_Admin")
+		Example Input: get({"Database_Admin": ("user", "password", "port")})
+		Example Input: get(include_defaults = False)
 		"""
+
+		section = section or self.default_section
+
+		if (variable is None):
+			if (include_defaults):
+				variableList = tuple(self[section].keys())
+			else:
+				variableList = tuple(self.config._sections[section].keys())
+			return self.get(variableList, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
+				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults)
+
+		if (isinstance(variable, dict)):
+			answer = {_section: self.get(_variable, section = _section, dataType = dataType, default_values = default_values, fallback = fallback,
+				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults) for _section, _variable in variable.items()}
+
+			if (forceAttribute or len(answer) > 1):
+				return answer
+			elif (not answer):
+				return
+			return next(iter(answer.values()))
+
+		if (not isinstance(variable, (str, int, float))):
+			answer = {_variable: self.get(_variable, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
+				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults) for _variable in variable}
+
+			if (forceTuple or len(answer) > 1):
+				return answer
+			elif (not answer):
+				return
+			return next(iter(answer.values()))
 
 		function = self.dataType_catalogue[dataType]
 
 		try:
-			return function(section or self.default_section, variable, vars = default_values or {}, raw = raw)
+			return function(section, variable, vars = default_values or {}, raw = raw, fallback = fallback)
 
 		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
 			print("@get", error)
-			return function(section or self.default_section, variable, vars = default_values or {}, raw = True)
+			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
 
 	def set(self, variable, value = None, section = None):
 		"""Adds a setting to the given section.
+
+		variable (str) - What setting to get
+			- If list: Wil set each variable in the list to 'value'
+			- If dict: Will ignore 'value' and set each key to it's given value
 
 		section (str) - What section to write this setting in
 			- If None: Will use the default section
 
 		Example Input: set("startup_user", "admin")
 		Example Input: set("scanDelay", 1000, section = "AutoSave")
+
+		Example Input: set({"startup_user": "admin"})
+		Example Input: set({"AutoSave": {"scanDelay": 1000}})
 		"""
+
+		if (isinstance(variable, dict)):
+			for _variable, _value in variable.items():
+				if (isinstance(_value, dict)):
+					for __variable, __value in _value.items():
+						self.set(__variable, value = __value, section = _variable)
+				else:
+					self.set(_variable, value = _value, section = section)
+			return
+
+		if (not isinstance(variable, (str, int, float))):
+			for _variable in variable:
+				self.set(_variable, value = value, section = section)
+			return
 
 		section = section or self.default_section
 
@@ -2484,7 +2871,10 @@ class Configuration(Base):
 		Example Input: load("database/user_settings.ini")
 		"""
 
-		self.config.read(filePath or self.default_filePath)
+		filePath = filePath or self.default_filePath
+
+		assert os.path.exists(filePath)
+		self.config.read(filePath)
 
 	def save(self, filePath = None):
 		"""Saves changes to config file.
@@ -2621,16 +3011,16 @@ class JSON_Aid(Base):
 			return False
 
 	def __getitem__(self, key):
-		return self.output[key]
+		return self.contents[key]
 
 	def __setitem__(self, key, value):
-		self.output[key] = value
+		self.contents[key] = value
 
 	def __delitem__(self, key):
-		del self.output[key]
+		del self.contents[key]
 
 	def __contains__(self, key):
-		return key in self.output
+		return key in self.contents
 
 	def load(self, filePath = None):
 		"""Loads the json file.
@@ -2875,7 +3265,7 @@ def sandbox():
 	def test_config():
 		config_API = build_configuration()
 		# config_API.set("startup_user", "admin")
-		# config_API.save("test.ini")
+		# config_API.save("test/test.ini")
 
 		config_API.load("test.ini")
 		# quiet(config_API.get("startup_user"))
@@ -2887,16 +3277,17 @@ def sandbox():
 
 	def test_sqlite():
 		database_API = build()
-		# database_API.openDatabase(None, "H:\Python\Material_Tracker\database\schema.py") 
-		database_API.openDatabase("test_map_example.db", "H:\Python\Material_Tracker\database\schema.py", openAlembic = False)
-		database_API.removeRelation()
-		database_API.createRelation()
-		database_API.resetRelation()
+		# database_API.openDatabase(None, "H:/Python/Material_Tracker/database/schema.py") 
+		# database_API.openDatabase("test/test_map_example.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
+		database_API.openDatabase("H:/Python/Material_Tracker/database/data.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
+		# database_API.removeRelation()
+		# database_API.createRelation()
+		# database_API.resetRelation()
 
 		#Add Items
-		database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
-		database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-		database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678}})
+		# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+		# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+		# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678, "color": "red"}})
 		
 		# #Get Items
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
@@ -2929,10 +3320,10 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}))
 		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}, alias = {"job": {"label": "jobNumber"}}))
 
-		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}))
-		quiet(database_API.getValue({"Containers": {"job": ("databaseId", "label")}}))
-		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, {"job": {"label": 1234}}))
-		quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, onlyOne = True))
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}))
+		# quiet(database_API.getValue({"Containers": {"job": ("databaseId", "label")}}))
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, {"job": {"label": 1234}}))
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, onlyOne = True))
 
 		# quiet(database_API.getAllValues("Containers"))
 		# quiet(database_API.getAllValues("Containers", fromSchema = None))
@@ -2950,6 +3341,28 @@ def sandbox():
 		# quiet(database_API.getValue({"Choices_Job": ("label", "progress")}))
 		# database_API.changeTuple({"Containers": {"job": {"progress": 20}, "location": "A2"}}, {"label": "lorem"})
 		# quiet(database_API.getValue({"Choices_Job": ("label", "progress")}))
+
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": 90, "location": "A2"}}, {"label": "amet"}, forceMatch = True)
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+
+
+		quiet(database_API.getValue({"Containers": "label"}))
+		database_API.changeTuple({"Containers": {"job": "09109", "label": "1272"}}, {"label": "1272"}, forceMatch = True)
+		database_API.changeTuple({"Containers": {"type": "Bags"}}, {"label": "1272"}, forceMatch = True)
+		database_API.changeTuple({"Containers": {"job": "09109", "type": "Bags", "color": "red"}}, {"label": "amet"}, forceMatch = True)
+		database_API.changeTuple({"Containers": {"job": "09109", "type": "Bags", "color": "red"}}, {"label": "lorem"}, forceMatch = True)
+
+
+		database_API.changeTuple({"Containers": {'job': '09109', 'label': '1272', 'poNumber': 'Cust Supplied', 'weight_total': 386.0, 'location': 'AA-5', 'type': 'Bags', 'material': 'TPE SANTOPRENE 123-50', 'color': 'BK Phe303', 'item_type': 'Resin', 'customer': 'Remotec', 'dmte_contact': 'ROGER R', 'dmte_owned': False, 'comments': '( 6 @ 55# EACH ) ( 1 @ 17# ) ( 1 @ 39# ) WEIGHT CONFIRMED 6/5/17 LOT#N/A', 'createdOn': datetime.datetime(2007, 7, 19, 0, 0), 'lastModified': datetime.datetime(2017, 9, 29, 15, 4, 42)}}, {'label': '1272'}, forceMatch = True)
+		database_API.changeTuple({"Containers": {'job': 'S4692 - 86592 - 86593', 'label': '1498', 'poNumber': 'Cust Supplied', 'weight_total': 144.0, 'location': 'F-7', 'type': 'BARREL - T', 'material': 'VYDYNE M344-01', 'color': 'Grey', 'item_type': 'Resin', 'customer': 'FAURECIA INTERIORS', 'dmte_contact': 'ALAN M', 'dmte_owned': False, 'comments': 'WEIGHT CONFIRMED 6/5/17', 'createdOn': datetime.datetime(2006, 6, 9, 0, 0), 'lastModified': datetime.datetime(2018, 7, 2, 9, 12, 31)}}, {'label': '1498'}, forceMatch = True)
+		quiet(database_API.getValue({"Containers": "label"}))
+
+
+
+
+
+
 		
 		# #Remove Items
 		# database_API.removeTuple({"Containers": {"label": "dolor"}})
@@ -2970,9 +3383,151 @@ def sandbox():
 		# database_API.openDatabase("test_map_example.db", "test_map_2")
 		# database_API.checkSchema()
 
+	def test_access():
+		database_API = build()
+		database_API.openDatabase("R:/Material Log - Database/Users/Josh Mayberry/User Database.mdb", openAlembic = False)
+
+		quiet(database_API.getRelationNames())
+		# quiet(database_API.getAllValues("tblMaterialLog", fromSchema = None))
+
+		#Create tables from the bottom up
+		# database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
+		# database_API.createRelation("Address", {"street": str}, unique = {"street": True})
+
+		# database_API.addTuple({"Names": {"first_name": "Lorem", "extra_data": 4}}, unique = None)
+		# database_API.addTuple({"Names": {"first_name": "Ipsum", "extra_data": 7}}, unique = None)
+		# database_API.addTuple({"Names": {"first_name": "Dolor", "extra_data": 3}}, unique = None)
+		# database_API.addTuple({"Names": {"first_name": "Sit",   "extra_data": 1}}, unique = None)
+		# database_API.addTuple({"Names": {"first_name": "Amet",  "extra_data": 10}}, unique = None)
+		
+		# #Simple Actions
+		# quiet("Simple Actions")
+		# quiet(database_API.getValue({"Names": "first_name"}))
+		# quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True))
+		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}))
+		# quiet(database_API.getValue({"Names": "first_name"}, rowsAsList = True))
+		# quiet()
+
+		# #Ordering Data
+		# quiet("Ordering Data")
+		# quiet(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
+		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
+		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
+		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = False))
+		# quiet()
+
+		# #Changing Attributes
+		# quiet("Changing Attributes")
+		# quiet(database_API.getValue({"Names": "first_name"}))
+		# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
+		# quiet(database_API.getValue({"Names": "first_name"}))
+		# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
+		# quiet(database_API.getValue({"Names": "first_name"}))
+		# quiet()
+
+		# database_API.saveDatabase()
+
+	def test_mysql():
+		database_API = build(fileName = "H:/Python/Material_Tracker/database/mysql_settings.ini", section = os.environ.get('username'), openAlembic = False, echo = False)
+		database_API.removeRelation()
+		database_API.createRelation()
+		database_API.resetRelation()
+
+		# quiet(database_API.getRelationNames())
+
+		# #Add Items
+		# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+		# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678, "color": "red"}})
+		# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+
+		# #Get Items
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = None))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = True))
+		# quiet(database_API.getValue({"Containers": None}, {"weight_total": 123, "poNumber": 123456}))
+
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignAsDict = True))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label"))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
+		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
+
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
+
+		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
+		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = None))
+
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, fromSchema = None))
+
+		# quiet(database_API.getValue({"Containers": "job"}, {"weight_total": 123, "poNumber": 123456}))
+		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}))
+		# quiet(database_API.getValue({"Containers": "job"}, {"job": {"label": 1234}}, alias = {"job": {"label": "jobNumber"}}))
+
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}))
+		# quiet(database_API.getValue({"Containers": {"job": ("databaseId", "label")}}))
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, {"job": {"label": 1234}}))
+		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, onlyOne = True))
+
+		# quiet(database_API.getAllValues("Containers"))
+		# quiet(database_API.getAllValues("Containers", fromSchema = None))
+		# quiet(database_API.getAllValues("Containers", fromSchema = True))
+		# quiet(database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived")))
+		# quiet(database_API.getAllValues("Containers", foreignDefault = ("label", "archived")))
+
+		# #Change Items
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": 5678, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": 90, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": {"label": 5678, "progress": 10}, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": {"progress": 20}, "location": "A2"}}, {"label": "lorem"})
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+		# database_API.changeTuple({"Containers": {"job": 90, "location": "A2"}}, {"label": "amet"}, forceMatch = True)
+		# quiet(database_API.getValue({"Choices_Job": "label"}))
+
+		# quiet(database_API.getValue({"Containers": "label"}))
+		# database_API.changeTuple({"Containers": {"job": "09109", "label": "1272"}}, {"label": "1272"}, forceMatch = True)
+		# database_API.changeTuple({"Containers": {"type": "Bags"}}, {"label": "1272"}, forceMatch = True)
+		# database_API.changeTuple({"Containers": {"job": "09109", "type": "Bags", "color": "red"}}, {"label": "amet"}, forceMatch = True)
+		# database_API.changeTuple({"Containers": {"job": "09109", "type": "Bags", "color": "red"}}, {"label": "lorem"}, forceMatch = True)
+		# quiet(database_API.getValue({"Containers": "label"}))
+
+		# #Remove Items
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+		# database_API.removeTuple({"Containers": {"label": "dolor"}})
+		# database_API.removeTuple({"Containers": {"label": "sit"}})
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}))
+
+		# #Etc
+		# quiet(database_API.getInfo("Containers", "databaseId"))
+		# quiet(database_API.getInfo("Containers", "databaseId", forceAttribute = True))
+		# quiet(database_API.getInfo("Containers", ("databaseId", "archived")))
+		# quiet(database_API.getInfo("Containers", "job", forceAttribute = True))
+		# quiet(database_API.getInfo("Users", forceAttribute = True))
+
+		# quiet(database_API.getForeignSchema("Containers", "job"))
+
+
+		# #Update Schema
+		# database_API.openDatabase("test_map_example.db", "test_map_2")
+		# database_API.checkSchema()
+
 	# test_json()
 	# test_config()
-	test_sqlite()
+	# test_sqlite()
+	# test_access()
+	test_mysql()
 
 def main():
 	"""The main program controller."""
