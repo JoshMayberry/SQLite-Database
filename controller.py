@@ -289,6 +289,12 @@ class Base_Database(Base):
 	}
 
 	@classmethod
+	def getPrimaryKey(cls, relationHandle = None):
+		if (relationHandle is None):
+			return sqlalchemy.inspection.inspect(cls).primary_key[0].name
+		return sqlalchemy.inspection.inspect(relationHandle).primary_key[0].name
+
+	@classmethod
 	def schema_column(cls, dataType = int, default = None, 
 		system = False, quote = None, docstring = None, comment = None, info = None, 
 		foreignKey = None, foreign_update = True, foreign_delete = False, foreign_info = None,
@@ -350,7 +356,12 @@ class Base_Database(Base):
 
 		columnKwargs = {"info": info or {}}
 		if (primary):
-			columnKwargs.update({"primary_key": True, "nullable": (notNull, False)[notNull is None], "unique": (unique, True)[unique is None]})
+			columnKwargs.update({
+				"primary_key": True, 
+				"nullable": (notNull, False)[notNull is None], 
+				"unique": (unique, True)[unique is None], 
+				"autoincrement": (False, False)[autoIncrement is None],
+			})
 		else:
 			if (unique):
 				columnKwargs["unique"] = True
@@ -360,8 +371,9 @@ class Base_Database(Base):
 			elif (notNull is not None):
 				columnKwargs["nullable"] = True
 
-		# if (autoIncrement):
-		# 	columnKwargs["autoIncrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+			# if (autoIncrement):
+			# 	columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+
 		if (default is not None):
 			columnKwargs["default"] = default
 		if (system):
@@ -468,6 +480,23 @@ class Schema_Base(Base_Database):
 	foreignKeys = {}
 	defaultRows = ()
 
+	def __init__(self, kwargs = {}):
+		"""Automatically creates tuples for the provided relations if one does not exist.
+		Special thanks to shamittomar for how to do custom auto-incrementing on https://stackoverflow.com/questions/5016907/mysql-find-smallest-unique-id-available/5016969#5016969
+		"""
+
+		session = kwargs.pop("session", None)
+
+		#Increment primary key to lowest unique value
+		index = self.getPrimaryKey()
+		if (index not in kwargs):
+			if (session is not None):
+				#Changes must be applied to increment the primary key properly
+				session.commit()
+
+			answer = self.metadata.bind.execute(f"SELECT MIN(t1.{index} + 1) FROM {self.__tablename__} as t1 LEFT JOIN {self.__tablename__} as t2 ON t1.{index} + 1 = t2.{index} WHERE t2.{index} is NULL").first() or (None,)
+			kwargs[index] = answer[0] or 1
+
 	#Context Managers
 	@classmethod
 	@contextlib.contextmanager
@@ -518,7 +547,8 @@ class Schema_Base(Base_Database):
 		with cls.makeSession() as session:
 			session.query(cls).delete()
 			for catalogue in cls.defaultRows:
-				session.add(cls(**catalogue))
+				child = cls(**catalogue, session = session)
+				session.add(child)
 
 	@classmethod
 	def yieldColumn(cls, attributeList, exclude, alias, **kwargs):
@@ -543,7 +573,7 @@ class Schema_Base(Base_Database):
 		for variable, newValue in values.items():
 			setattr(self, variable, newValue)
 
-class Schema_AutoForeign(Base_Database):
+class Schema_AutoForeign(Schema_Base):
 	_foreignInfo = {}
 
 	def __init__(self, kwargs = {}):
@@ -562,14 +592,15 @@ class Schema_AutoForeign(Base_Database):
 			with self.makeSession() as session:
 				child = session.query(relationHandle).filter(sqlalchemy.and_(getattr(relationHandle, key) == value for key, value in catalogue.items())).one_or_none()
 				if (child is None):
-					child = relationHandle(**catalogue)
+					child = relationHandle(**catalogue, session = session)
 					session.add(child)
 					forcedCatalogue[variable] = child
 					session.commit()
-				kwargs[f"{variable}_id"] = getattr(child, sqlalchemy.inspection.inspect(relationHandle).primary_key[0].name)
+				kwargs[f"{variable}_id"] = getattr(child, self.getPrimaryKey(relationHandle))
 
 		for variable, child in forcedCatalogue.items():
 			setattr(self, variable, child)
+
 
 	@classmethod
 	def formatForeign(cls, schema):
@@ -679,7 +710,7 @@ class Schema_AutoForeign(Base_Database):
 						continue
 
 					#Create new
-					child = self.foreignKeys[variable](**catalogue)
+					child = self.foreignKeys[variable](**catalogue, session = session)
 					session.add(child)
 					setattr(self, variable, child)
 					forcedCatalogue[variable] = child
@@ -712,7 +743,7 @@ class Schema_AutoForeign(Base_Database):
 			while f"{title}_{n}" in {row.label for row in session.query(relationHandle).all()}:
 				n += 1
 
-			child = self.foreignKeys[variable](**{**catalogue, "label": f"{title}_{n}"})
+			child = self.foreignKeys[variable](**{**catalogue, "label": f"{title}_{n}"}, session = session)
 			session.add(child)
 			setattr(self, variable, child)
 			forcedCatalogue[variable] = child
@@ -1467,10 +1498,16 @@ class Database(Utility_Base):
 					for answer in yieldValue(_schema.foreignKeys[key], _key, _value, function, mode = mode):
 						yield answer
 				return
-			if (mode is 1):
-				yield function(getattr(_schema, key), value)
+
+			if (_schema is None):
+				handle = getattr(table.columns, key)
 			else:
-				yield getattr(getattr(_schema, key), function)(value)
+				handle = getattr(_schema, key)
+
+			if (mode is 1):
+				yield function(handle, value)
+			else:
+				yield getattr(handle, function)(value)
 
 		def yieldLocation():
 			if (nextTo):
@@ -1648,7 +1685,7 @@ class Database(Utility_Base):
 		self.metadata.reflect()
 
 	@wrap_errorCheck()
-	def openDatabase_fromConfig(self, filePath, section = None, **kwargs):
+	def openDatabase_fromConfig(self, filePath, section = None, settingsKwargs = None, **kwargs):
 		"""Opens a database as directed to from the given config file.
 
 		___________________ REQUIRED FORMAT ___________________
@@ -1674,12 +1711,12 @@ class Database(Utility_Base):
 		"""
 
 		config = build_configuration(default_filePath = filePath, default_section = section)
-		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", 
-			"readOnly", "schemaPath", "alembicPath", "openAlembic", "connectionType")}, fallback = None), **kwargs})
+		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
+			"alembicPath", "openAlembic", "connectionType", "reset")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
-		openAlembic = None, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False,
+		openAlembic = None, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None,
 		port = None, host = None, user = None, password = None, echo = False,
 		resultError_replacement = None, aliasError_replacement = None):
 
@@ -1749,17 +1786,26 @@ class Database(Utility_Base):
 				errorMessage = f"Unknown connection type {connectionType}"
 				raise KeyError(errorMessage)
 
-			if (self.isMySQL):
-				# reset = not sqlalchemy_utils.database_exists(self.fileName)
-				reset = False
+			if (reset is False):
+				_reset = False
 			else:
-				reset = not os.path.exists(fileName)
+				if (self.isMySQL):
+					_reset = not sqlalchemy_utils.database_exists(self.fileName)
+				else:
+					_reset = not os.path.exists(fileName)
 
 			yield engineKwargs
 			sessionMaker.configure(bind = self.engine)
 
 			if (self.isSQLite):
 				sqlalchemy.event.listen(self.engine, 'connect', self._fk_pragma_on_connect)
+
+			if (_reset):
+				self.createDatabase()
+			elif (reset):
+				self.removeDatabase()
+				self.createDatabase()
+				_reset = True
 
 			self.loadSchema(schemaPath)
 
@@ -1768,7 +1814,7 @@ class Database(Utility_Base):
 			else:
 				self.alembic = None
 
-			if (reset):
+			if (_reset):
 				print(f"Creating Fresh Database for {fileName}")
 				self.createRelation()
 				self.resetRelation()
@@ -1811,6 +1857,37 @@ class Database(Utility_Base):
 		"""
 
 		connection.execute('pragma foreign_keys=ON')
+
+	@wrap_errorCheck()
+	def removeDatabase(self, filePath = None):
+		"""Removes an entire database file
+		filePath (str) - Where the database is located
+			- If None: will use the current database's file path
+
+		Example Input: removeDatabase()
+		Example Input: removeDatabase("material_database")
+		"""
+
+		if (filePath is None):
+			sqlalchemy_utils.drop_database(self.engine.url)
+		else:
+			sqlalchemy_utils.drop_database(filePath)
+
+	@wrap_errorCheck()
+	def createDatabase(self, filePath = None, encoding = "utf8"):
+		"""Creates a new database file
+		filePath (str) - Where the database will be located
+			- If None: will use the current database's file path
+
+		Example Input: createDatabase()
+		Example Input: createDatabase("material_database")
+		Example Input: createDatabase("material_database", encoding = "latin1")
+		"""
+
+		if (filePath is None):
+			sqlalchemy_utils.create_database(self.engine.url, encoding = encoding)
+		else:
+			sqlalchemy_utils.create_database(filePath, encoding = encoding)
 
 	@wrap_errorCheck()
 	def closeDatabase(self):
@@ -1914,7 +1991,7 @@ class Database(Utility_Base):
 		"""
 
 		if (relation is None):
-			for relationHandle in self.schema.relationCatalogue.values():
+			for relationHandle in sorted(self.schema.relationCatalogue.values(), key = lambda relationHandle: relationHandle.__tablename__ not in self.schema.hasForeignCatalogue):
 				relationHandle.reset()
 		else:
 			relationHandle = self.schema.relationCatalogue[relation]
@@ -2067,7 +2144,7 @@ class Database(Utility_Base):
 				for relation, rows in myTuple.items():
 					schema = self.schema.relationCatalogue[relation]
 					for attributeDict in self.ensure_container(rows):
-						session.add(schema(**attributeDict))
+						session.add(schema(**attributeDict, session = session))
 
 	@wrap_errorCheck()
 	def changeTuple(self, myTuple, nextTo, value = None, forceMatch = None, applyChanges = None, checkForeign = True, updateForeign = None, fromSchema = False, **locationKwargs):
@@ -2126,7 +2203,7 @@ class Database(Utility_Base):
 								errorMessage = f"There is no row in {relation} that matches the criteria {attributeDict}, {nextTo}, and {locationKwargs}"
 								raise KeyError(errorMessage)
 
-							forcedList.append(schema(**{**attributeDict, **(nextTo or {})}))
+							forcedList.append({**attributeDict, **(nextTo or {})})
 							continue
 
 						for row in query.all():
@@ -2140,7 +2217,7 @@ class Database(Utility_Base):
 
 			if (forcedList):
 				with self.makeSession() as session:
-					session.add_all(forcedList)
+					session.add_all(schema(**catalogue, session = session) for catalogue in forcedList)
 
 	@wrap_errorCheck()
 	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
@@ -3387,54 +3464,14 @@ def sandbox():
 		database_API = build()
 		database_API.openDatabase("R:/Material Log - Database/Users/Josh Mayberry/User Database.mdb", openAlembic = False)
 
-		quiet(database_API.getRelationNames())
+		# quiet(database_API.getRelationNames())
 		# quiet(database_API.getAllValues("tblMaterialLog", fromSchema = None))
 
-		#Create tables from the bottom up
-		# database_API.createRelation("Names", [{"first_name": str}, {"extra_data": str}], unique = {"first_name": True})
-		# database_API.createRelation("Address", {"street": str}, unique = {"street": True})
-
-		# database_API.addTuple({"Names": {"first_name": "Lorem", "extra_data": 4}}, unique = None)
-		# database_API.addTuple({"Names": {"first_name": "Ipsum", "extra_data": 7}}, unique = None)
-		# database_API.addTuple({"Names": {"first_name": "Dolor", "extra_data": 3}}, unique = None)
-		# database_API.addTuple({"Names": {"first_name": "Sit",   "extra_data": 1}}, unique = None)
-		# database_API.addTuple({"Names": {"first_name": "Amet",  "extra_data": 10}}, unique = None)
-		
-		# #Simple Actions
-		# quiet("Simple Actions")
-		# quiet(database_API.getValue({"Names": "first_name"}))
-		# quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True, forceAttribute = True))
-		# quiet(database_API.getValue({"Names": "first_name"}, forceRelation = True))
-		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}))
-		# quiet(database_API.getValue({"Names": "first_name"}, rowsAsList = True))
-		# quiet()
-
-		# #Ordering Data
-		# quiet("Ordering Data")
-		# quiet(database_API.getValue({"Names": "first_name"}, orderBy = "first_name"))
-		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", limit = 2))
-		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = True))
-		# quiet(database_API.getValue({"Names": ["first_name", "extra_data"]}, orderBy = "extra_data", direction = False))
-		# quiet()
-
-		# #Changing Attributes
-		# quiet("Changing Attributes")
-		# quiet(database_API.getValue({"Names": "first_name"}))
-		# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Lorem"}, "Consectetur")
-		# quiet(database_API.getValue({"Names": "first_name"}))
-		# database_API.changeTuple({"Names": "first_name"}, {"first_name": "Adipiscing"}, "Elit", forceMatch = True)
-		# quiet(database_API.getValue({"Names": "first_name"}))
-		# quiet()
-
-		# database_API.saveDatabase()
+		quiet(database_API.getValue({"tblMaterialLog": "ContainerID"}, isIn = {"ContainerID": ("1272", "1498", "2047")}, fromSchema = None))
 
 	def test_mysql():
-		database_API = build(fileName = "H:/Python/Material_Tracker/database/mysql_settings.ini", section = os.environ.get('username'), openAlembic = False, echo = False)
-		database_API.removeRelation()
-		database_API.createRelation()
-		database_API.resetRelation()
-
-		# quiet(database_API.getRelationNames())
+		database_API = build(fileName = "H:/Python/Material_Tracker/database/mysql_settings.ini", section = "testing", settingsKwargs = {"database_fileLocation": "H:/Python/Material_Tracker/database"})
+		quiet(database_API.getRelationNames())
 
 		# #Add Items
 		# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
