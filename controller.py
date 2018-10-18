@@ -93,6 +93,13 @@ def printCurrentTrace(printout = True, quitAfter = False):
 		if (quitAfter):
 			sys.exit()
 
+#Exceptions
+class ReadOnlyError(Exception):
+	pass
+
+class InvalidSectionError(Exception):
+	pass
+
 #Iterators
 class Iterator(object):
 	"""Used by handle objects to iterate over their nested objects."""
@@ -385,6 +392,10 @@ class Base_Database(Base):
 
 		return sqlalchemy.Column(dataType, *columnItems, **columnKwargs)
 
+	@classmethod
+	def printSQL(cls, query):
+		print(sqlalchemy_utils.functions.render_statement(query))
+
 class Utility_Base(Base_Database):
 	#Context Managers
 	@contextlib.contextmanager
@@ -431,7 +442,7 @@ class Utility_Base(Base_Database):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
 
 		def formatAttribute(foreignKey, attribute):
-			assert False #Untested
+			raise NotImplementedError() #Untested
 			if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
 				if (foreignAsDict):
 					return f"zfk_{foreignKey}_zfk_{alias[foreignKey][attribute]}"
@@ -465,13 +476,13 @@ class Utility_Base(Base_Database):
 						yield columnHandle
 					continue
 
-				assert False #Untested
+				raise NotImplementedError() #Untested
 				if (foreignDefault is None):
 					catalogue = {catalogue: tuple(attribute for attribute in columnHandle.foreign_keys[catalogue].__mapper__.columns.keys() if (attribute not in exclude))}
 				else:
 					catalogue = {catalogue: foreignDefault}
 
-			assert False #Untested
+			raise NotImplementedError() #Untested
 			for foreignKey, attributeList in catalogue.items():
 				for attribute in cls.ensure_container(attributeList):
 					yield getattr(table.columns, attribute).label(formatAttribute(foreignKey, attribute))
@@ -755,7 +766,7 @@ class CustomMetaData(sqlalchemy.MetaData, Base):
 	@classmethod
 	def getAlembic(cls):
 
-		assert False
+		raise NotImplementedError()
 
 class CustomBase(Base_Database):
 	pass
@@ -816,7 +827,7 @@ class Alembic(Base):
 	Modified code from: https://www.youtube.com/watch?v=xzsbHMHYI5c
 	"""
 
-	def __init__(self, parent, ensureCompatability = False, **kwargs):
+	def __init__(self, parent, assertCompatability = False, **kwargs):
 		"""Loads in the alembic directory and creates an alembic handler.
 
 		Example Input: Alembic(self)
@@ -828,7 +839,7 @@ class Alembic(Base):
 		self._applyMonkeyPatches()
 		self.loadConfig(**kwargs)
 
-		if (ensureCompatability):
+		if (assertCompatability):
 			assert self.check()
 
 	def __repr__(self):
@@ -1492,10 +1503,20 @@ class Database(Utility_Base):
 		Example Input: configureLocation("Users", isIn = {"name": ["Lorem", "Ipsum"]})
 		"""
 
-		def yieldValue(_schema, key, value, function, mode = 1):
+		def yieldValue(_schema, key, value, function, mode = 1, asList = False):
+
 			if (isinstance(value, dict)):
 				for _key, _value in value.items():
-					for answer in yieldValue(_schema.foreignKeys[key], _key, _value, function, mode = mode):
+					for answer in yieldValue(_schema.foreignKeys[key], _key, _value, function, mode = mode, asList = asList):
+						yield answer
+				return
+			
+			if (asList):
+				value = self.ensure_container(value)
+
+			elif (not isinstance(value, (str, int, float))):
+				for _value in value:
+					for answer in yieldValue(_schema, key, _value, function, mode = mode, asList = asList):
 						yield answer
 				return
 
@@ -1545,27 +1566,27 @@ class Database(Utility_Base):
 
 			if (isIn):
 				for key, value in isIn.items():
-					for answer in yieldValue(schema, key, value, "in_", mode = 2): # yield getattr(schema, key).in_(value)
+					for answer in yieldValue(schema, key, value, "in_", mode = 2, asList = True): # yield getattr(schema, key).in_(value)
 						yield answer
 			if (isNotIn):
 				for key, value in isNotIn.items():
-					for answer in yieldValue(schema, key, value, "in_", mode = 2): # yield ~(getattr(schema, key).in_(value))
+					for answer in yieldValue(schema, key, value, "in_", mode = 2, asList = True): # yield ~(getattr(schema, key).in_(value))
 						yield ~answer
 			if (isAll):
 				for key, value in isAll.items():
-					for answer in yieldValue(schema, key, value, "all_", mode = 2): # yield getattr(schema, key).all_(value)
+					for answer in yieldValue(schema, key, value, "all_", mode = 2, asList = True): # yield getattr(schema, key).all_(value)
 						yield answer
 			if (isNotAll):
 				for key, value in isNotAll.items():
-					for answer in yieldValue(schema, key, value, "all_", mode = 2): # yield ~(getattr(schema, key).all_(value))
+					for answer in yieldValue(schema, key, value, "all_", mode = 2, asList = True): # yield ~(getattr(schema, key).all_(value))
 						yield ~answer
 			if (isAny):
 				for key, value in isAny.items():
-					for answer in yieldValue(schema, key, value, "any_", mode = 2): # yield getattr(schema, key).any_(value)
+					for answer in yieldValue(schema, key, value, "any_", mode = 2, asList = True): # yield getattr(schema, key).any_(value)
 						yield answer
 			if (isNotAny):
 				for key, value in isNotAny.items():
-					for answer in yieldValue(schema, key, value, "any_", mode = 2): # yield ~(getattr(schema, key).any_(value))
+					for answer in yieldValue(schema, key, value, "any_", mode = 2, asList = True): # yield ~(getattr(schema, key).any_(value))
 						yield ~answer
 
 			if (like):
@@ -1650,7 +1671,7 @@ class Database(Utility_Base):
 		if (schema is None):
 			if (not table.foreign_keys):
 				return query
-			assert False #Untested
+			raise NotImplementedError() #Untested
 
 		elif (fromSchema or (not schema.foreignKeys)):
 			return query
@@ -1778,7 +1799,7 @@ class Database(Utility_Base):
 				self.fileName = f"access+fixed:///{fileName}?charset={engineKwargs['encoding']}"
 
 			elif (self.isMsSQL):
-				assert False
+				raise NotImplementedError()
 				engineKwargs = {}
 				self.fileName = f"mssql+pyodbc://{user}:{password}@{host or localhost}:{port or 3306}/{fileName}?driver=SQL+Server+Native+Client+11.0"
 
@@ -1940,7 +1961,7 @@ class Database(Utility_Base):
 	def checkSchema(self):
 		"""Checks the loaded schema against what is in the meta data."""
 
-		assert False
+		raise NotImplementedError()
 
 	def loadAlembic(self, alembicPath = None, **kwargs):
 		"""Loads in the alembic directory and creates an alembic handler.
@@ -2736,7 +2757,7 @@ class Configuration(Base):
 	"""
 
 	def __init__(self, default_filePath = None, default_values = None, default_section = None, 
-		allowNone = True, interpolation = True):
+		allowNone = True, interpolation = True, valid_section = None, readOnly = False, knownTypes = None, knownTypesSection = "knownTypes"):
 		"""
 
 		allowNone (bool) - Determines what happens if a setting does not have a set value
@@ -2747,6 +2768,14 @@ class Configuration(Base):
 			- If True: Extended Interpolation
 			- If False: Basic Interpolation
 			- If None: No Interpolation
+
+		valid_section (list) - Which sections (excluding DEFAULT) to load
+			- If str: Will load only that section
+			- If None: Will load all sections
+			~ Optionally, variables can be defined in the section given to 'knownTypesSection'
+
+		knownTypesSection (str) - Which section is used to store knownTypes
+			- If None: Will not use a section to get knownTypes from
 
 		Example Input: Configuration(self)
 		Example Input: Configuration(self, source_directory = "database")
@@ -2766,12 +2795,19 @@ class Configuration(Base):
 
 		self.dataType_catalogue = {
 			None: self.config.get,
-			str: self.config.get,
-			int: self.config.getint,
-			float: self.config.getfloat,
-			bool: self.config.getboolean,
-			datetime.datetime: self.config.getdatetime,
+			str: self.config.get, "str": self.config.get,
+			int: self.config.getint, "int": self.config.getint,
+			float: self.config.getfloat, "float": self.config.getfloat,
+			bool: self.config.getboolean, "bool": self.config.getboolean,
+			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
 		}
+
+		self.config.optionxform = str
+
+		self.knownTypesSection = knownTypesSection or None
+		self.knownTypes = knownTypes or {}
+
+		self.set_validSection(valid_section)
 
 		if (default_filePath):
 			self.load()
@@ -2793,28 +2829,52 @@ class Configuration(Base):
 			return False
 
 	def __getitem__(self, key):
+		if ((self.valid_section is not None) and (not self.has_section(key))):
+			raise InvalidSectionError(self, key)
+
 		return self.config[key]
 
 	def __setitem__(self, key, value):
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+		if ((self.valid_section is not None) and (not self.has_section(key))):
+			raise InvalidSectionError(self, key)
+
 		self.config[key] = value
 
 	def __delitem__(self, key):
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+		if ((self.valid_section is not None) and (not self.has_section(key))):
+			raise InvalidSectionError(self, key)
+
 		del self.config[key]
 
 	def __contains__(self, key):
+		if ((self.valid_section is not None) and (not self.has_section(key))):
+			return False
+
 		return key in self.config
 
 	def keys(self):
-		return self.config.keys()
+		if (self.valid_section is None):
+			return self.config.keys()
+		return tuple(section for section in self.config.keys() if (section in self.valid_section))
 
 	def values(self):
-		return self.config.values()
+		if (self.valid_section is None):
+			return self.config.values()
+		return tuple(handle for section, handle in self.config.items() if (section in self.valid_section))
 
 	def items(self):
-		return self.config.items()
+		if (self.valid_section is None):
+			return self.config.items()
+		return tuple((section, handle) for section, handle in self.config.items() if (section in self.valid_section))
 
 	def _asdict(self):
-		return dict(self.config)
+		if (self.valid_section is None):
+			return dict(self.config)
+		return {key: value for key, value in self.items()}
 
 	def get(self, variable = None, section = None, dataType = None, default_values = None, include_defaults = True,
 		fallback = configparser._UNSET, raw = False, forceAttribute = False, forceTuple = False):
@@ -2828,6 +2888,8 @@ class Configuration(Base):
 			- If None: Will use the default section
 
 		dataType (type) - What type the data should be in
+			- If None: Will read as str, unless the variable is logged in self.knownTypes under 'section' or DEFAULT
+
 		default_values (dict) - Local default values; overrides the global default values temporarily
 		include_defaults (bool) - Determines if the default section should be used as a fallback
 		raw (bool) - Determines if the value should be returned without applying interpolation
@@ -2858,7 +2920,34 @@ class Configuration(Base):
 		Example Input: get(include_defaults = False)
 		"""
 
+		def getFunction(section, variable):
+			nonlocal self, dataType
+
+			if (dataType is None):
+				if ((self.knownTypesSection is not None) and (self.knownTypesSection in self.config.sections())):
+					if (self.has_setting(variable, self.knownTypesSection)):
+						function = self.dataType_catalogue.get(self.config[self.knownTypesSection][variable], None)
+						if (function is not None):
+							return function
+
+				if ((section in self.knownTypes) and (variable in self.knownTypes[section])):
+					return self.dataType_catalogue[self.knownTypes[section][variable]]
+
+				default_section = self.config.default_section
+				if ((default_section in self.knownTypes) and (variable in self.knownTypes[default_section])):
+					return self.dataType_catalogue[self.knownTypes[default_section][variable]]
+
+				if (variable in self.knownTypes):
+					return self.dataType_catalogue[self.knownTypes[variable]]
+
+			return self.dataType_catalogue[dataType]
+
+		##################################
+
 		section = section or self.default_section
+
+		if ((self.valid_section is not None) and (not self.has_section(section))):
+			raise InvalidSectionError(self, section)
 
 		if (variable is None):
 			if (include_defaults):
@@ -2888,13 +2977,13 @@ class Configuration(Base):
 				return
 			return next(iter(answer.values()))
 
-		function = self.dataType_catalogue[dataType]
+		function = getFunction(section, variable)
 
 		try:
 			return function(section, variable, vars = default_values or {}, raw = raw, fallback = fallback)
 
 		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
-			print("@get", error)
+			print("@Configuration.get", error)
 			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
 
 	def set(self, variable, value = None, section = None):
@@ -2913,6 +3002,10 @@ class Configuration(Base):
 		Example Input: set({"startup_user": "admin"})
 		Example Input: set({"AutoSave": {"scanDelay": 1000}})
 		"""
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+		if ((self.valid_section is not None) and (not self.has_section(section))):
+			raise InvalidSectionError(self, section)
 
 		if (isinstance(variable, dict)):
 			for _variable, _value in variable.items():
@@ -2938,15 +3031,21 @@ class Configuration(Base):
 		else:
 			self.config.set(section, variable, f"{value}")
 
-	def load(self, filePath = None):
+	def load(self, filePath = None, valid_section = NULL):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
 			- If None: Will use the default file path
 
+		valid_section (list) - Updates self.valid_section if not NULL
+
 		Example Input: load()
-		Example Input: load("database/user_settings.ini")
+		Example Input: load("database/settings_user.ini")
+		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
 		"""
+
+		if (valid_section is not NULL):
+			self.set_validSection(valid_section)
 
 		filePath = filePath or self.default_filePath
 
@@ -2960,9 +3059,12 @@ class Configuration(Base):
 			- If None: Will use the default file path
 
 		Example Input: save()
-		Example Input: save("database/user_settings.ini")
+		Example Input: save("database/settings_user.ini")
 		"""
 
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+			
 		with open(filePath or self.default_filePath, "w") as config_file:
 			self.config.write(config_file)
 
@@ -2976,19 +3078,38 @@ class Configuration(Base):
 		Example Input: has_section(section = "AutoSave")
 		"""
 
-		return self.config.has_section(section or self.default_section)
+		section = section or self.default_section
 
-	def has_setting(self, variable, section = None):
+		if (section == self.config.default_section):
+			return True
+
+		if (self.valid_section is None):
+			return self.config.has_section(section)
+		return section in self.getSections()
+
+	def has_setting(self, variable, section = None, checkDefault = False):
 		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
 
 		section (str) - What section to write this setting in
 			- If None: Will use the default section
 
+		checkDefault (bool) - Determines if the section DEFAULT is taken into account
+
 		Example Input: has_setting("startup_user")
 		Example Input: has_setting("scanDelay", section = "AutoSave")
+
+		Example Input: has_setting("startup_user", checkDefault = True)
 		"""
 
-		return self.config.has_option(variable, section or self.default_section)
+		section = section or self.default_section
+
+		if ((self.valid_section is not None) and (not self.has_section(section))):
+			raise InvalidSectionError(self, section)
+
+		if (checkDefault):
+			return self.config.has_option(section, variable)
+		else:
+			return variable in self.config._sections.get(section, ())
 
 	def remove_section(self, section = None):
 		"""Removes a section.
@@ -2999,6 +3120,11 @@ class Configuration(Base):
 		Example Input: remove_section("startup_user")
 		Example Input: remove_section("scanDelay", section = "AutoSave")
 		"""
+
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+		if ((self.valid_section is not None) and (not self.has_section(section))):
+			raise InvalidSectionError(self, section)
 
 		self.config.remove_section(section or self.default_section)
 
@@ -3012,6 +3138,11 @@ class Configuration(Base):
 		Example Input: remove_setting("scanDelay", section = "AutoSave")
 		"""
 
+		if (self.readOnly):
+			raise ReadOnlyError(self)
+		if ((self.valid_section is not None) and (not self.has_section(section))):
+			raise InvalidSectionError(self, section)
+
 		self.config.remove_option(section or self.default_section, variable)
 
 	def getSections(self):
@@ -3020,7 +3151,9 @@ class Configuration(Base):
 		Example Input: getSections()
 		"""
 
-		return self.config.sections()
+		if (self.valid_section is None):
+			return self.config.sections()
+		return (section for section in self.config.sections() if (section in self.valid_section))
 
 	def getDefaults(self):
 		"""Returns the defaults that will be used if a setting does not exist.
@@ -3042,6 +3175,12 @@ class Configuration(Base):
 		"""
 
 		self.ConfigParser.BOOLEAN_STATES.update({value: state})
+
+	def set_validSection(self, valid_section):
+		if (valid_section is None):
+			self.valid_section = None
+		else:
+			self.valid_section = (self.config.default_section, *((self.knownTypesSection,) if (self.knownTypesSection is not None) else ()), *self.ensure_container(valid_section))
 
 	#Converters
 	@staticmethod
@@ -3106,7 +3245,7 @@ class JSON_Aid(Base):
 			- If None: Will use the default file path
 
 		Example Input: load()
-		Example Input: load("database/user_settings.json")
+		Example Input: load("database/settings_user.json")
 		"""
 
 		with open(filePath or self.default_filePath) as fileHandle:
@@ -3124,7 +3263,7 @@ class JSON_Aid(Base):
 		ifDirty (bool) - Determines if the file should be saved only if changes have been made
 
 		Example Input: save()
-		Example Input: save("database/user_settings.json")
+		Example Input: save("database/settings_user.json")
 		"""
 
 		_filePath = filePath or self.default_filePath
@@ -3340,17 +3479,29 @@ def sandbox():
 		quiet(json_API.getSections(variable = "debugging_default"))
 
 	def test_config():
-		config_API = build_configuration()
-		# config_API.set("startup_user", "admin")
-		# config_API.save("test/test.ini")
+		# config_API = build_configuration()
+		# # config_API.set("startup_user", "admin")
+		# # config_API.save("test/test.ini")
 
-		config_API.load("test.ini")
-		# quiet(config_API.get("startup_user"))
+		# config_API.load("test/test.ini")
+		# # quiet(config_API.get("startup_user"))
 		
-		with config_API as config:
-			for section, sectionHandle in config.items():
-				for key, value in sectionHandle.items():
-					quiet(section, key, value)
+		# with config_API as config:
+		# 	for section, sectionHandle in config.items():
+		# 		for key, value in sectionHandle.items():
+		# 			quiet(section, key, value)
+
+		user = os.environ.get('username')
+		config_API = build_configuration("H:/Python/Material_Tracker/database/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
+
+		value = config_API.get("startup_user")
+		print(value, type(value))
+
+		# value = config_API.get("x")
+		# print(value, type(value))
+
+		# value = config_API.get("y")
+		# print(value, type(value))
 
 	def test_sqlite():
 		database_API = build()
@@ -3561,10 +3712,10 @@ def sandbox():
 		# database_API.checkSchema()
 
 	# test_json()
-	# test_config()
+	test_config()
 	# test_sqlite()
 	# test_access()
-	test_mysql()
+	# test_mysql()
 
 def main():
 	"""The main program controller."""
