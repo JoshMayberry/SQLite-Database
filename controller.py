@@ -1272,8 +1272,8 @@ class Database(Utility_Base):
 		Example Input: getAttributeNames("Users")
 		Example Input: getAttributeNames("Users", exclude = ["age", "height"])
 
-		Example Input: getAttributeNames("Containers", foreignAsDict = True)
 		Example Input: getAttributeNames("Containers", foreignAsDict = None)
+		Example Input: getAttributeNames("Containers", foreignAsDict = True)
 		"""
 
 		exclude = self.ensure_container(exclude)
@@ -1296,7 +1296,7 @@ class Database(Utility_Base):
 					foreignKey = key.rstrip('_id')
 					if (foreignKey in relationHandle.foreignKeys):
 						if (foreignAsDict):
-							yield {foreignKey: tuple(self.getAttributeNames(relationHandle.foreignKeys[foreignKey]).__name__)} 
+							yield {foreignKey: tuple(self.getAttributeNames(relationHandle.foreignKeys[foreignKey].__name__))} 
 						else:
 							yield foreignKey
 						continue
@@ -2335,7 +2335,7 @@ class Database(Utility_Base):
 	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
 		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
-		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = True, rowsAsList = False, 
+		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False,  
 		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
 		foreignAsDict = False, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
@@ -2395,9 +2395,6 @@ class Database(Utility_Base):
 		attributeFirst (bool) - Determines if the attribute is first in the answer
 			- If True: {relation: {attribute: {row: value}}}
 			- If False: {relation: {row: {attribute: value}}}
-		rowsAsList (bool)     - Determines how rows are separated
-			- If True: Rows are a tuple of dictionaries
-			- If False: Rows are dictionary keys that hold dictionaries as values
 
 		fromSchema (bool)     - Determines from what source the query is compiled
 			- If True: Uses the schema and returns a schema item
@@ -2574,10 +2571,19 @@ class Database(Utility_Base):
 			nonlocal forceTuple
 
 			answer = tuple(yieldRow(query))
+
 			if (not answer):
 				return ()
 			elif (forceTuple or (len(answer) > 1)):
-				return answer
+				if ((not attributeFirst) or (not isinstance(answer[-1], dict))):
+					return answer
+
+				catalogue = collections.defaultdict(list)
+				for row in answer:
+					for key, value in row.items():
+						catalogue[key].append(value)
+				return {key: tuple(value) for key, value in catalogue.items()}
+
 			else:
 				return answer[0]
 
@@ -2594,7 +2600,7 @@ class Database(Utility_Base):
 				else:
 					if (isinstance(exclude, dict)):
 						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict is None)
+					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
 
 				schema = self.getSchema(relation)#, forceMatch = True)
 				table = self.metadata.tables[relation]
@@ -3622,14 +3628,14 @@ def sandbox():
 
 	def test_mysql():
 		database_API = build(fileName = "H:/Python/Material_Tracker/database/mysql_settings.ini", section = "testing", settingsKwargs = {"database_fileLocation": "H:/Python/Material_Tracker/database"})
-		quiet(database_API.getRelationNames())
+		# quiet(database_API.getRelationNames())
 
-		# #Add Items
-		# database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-		# database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678, "color": "red"}})
-		# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+		#Add Items
+		database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
+		database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678, "color": "red"}})
+		database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
 
-		# #Get Items
+		#Get Items
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = None))
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, fromSchema = True))
@@ -3640,11 +3646,36 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label"))
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
+		
+		quiet(database_API.getAttributeNames("Containers", foreignAsDict = None))
+		quiet(database_API.getAttributeNames("Containers", foreignAsDict = False))
+		quiet(database_API.getAttributeNames("Containers", foreignAsDict = True))
+		quiet(database_API.getAllValues("Containers", foreignAsDict = None))
+		quiet(database_API.getAllValues("Containers", foreignAsDict = False))
+		quiet(database_API.getAllValues("Containers", foreignAsDict = True))
 
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
 
 		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}))
 		# quiet(database_API.getValue({"Containers": ("job", "label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"job": {"label": "jobNumber"}, "label": "containerNumber"}, fromSchema = None))
+
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}, attributeFirst = True, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, attributeFirst = True, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, attributeFirst = True, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, attributeFirst = True, forceRelation = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, attributeFirst = True, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, attributeFirst = True))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, attributeFirst = True))
+		# quiet()
+
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceTuple = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True))
+		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}))
+		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}))
+		# quiet()
 
 		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True, forceTuple = True))
 		# quiet(database_API.getValue({"Containers": "label"}, {"label": "dolor"}, forceRelation = True, forceAttribute = True))
@@ -3712,10 +3743,10 @@ def sandbox():
 		# database_API.checkSchema()
 
 	# test_json()
-	test_config()
+	# test_config()
 	# test_sqlite()
 	# test_access()
-	# test_mysql()
+	test_mysql()
 
 def main():
 	"""The main program controller."""
