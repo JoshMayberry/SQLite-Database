@@ -3203,15 +3203,18 @@ class JSON_Aid(Base):
 	Use: https://martin-thoma.com/configuration-files-in-python/#json
 	"""
 
-	def __init__(self, default_filePath = None):
+	def __init__(self, default_filePath = None, *, override = None, overrideIsSave = None):
 		"""
 		Example Input: JSON_Aid()
 		"""
 
 		self.default_filePath = default_filePath or "settings.json"
+		self.filePath_lastLoad = self.default_filePath
 
 		self.dirty = None
 		self.contents = {}
+
+		self.setOverride(override = override, overrideIsSave = overrideIsSave)
 
 		if (default_filePath):
 			self.load(default_filePath)
@@ -3244,7 +3247,47 @@ class JSON_Aid(Base):
 	def __contains__(self, key):
 		return key in self.contents
 
-	def load(self, filePath = None):
+	def setOverride(self, override = None, overrideIsSave = None):
+		"""Applies override settings for advanced save and load managment.
+
+		override (str) - A .json file that will override sections in the given filePath
+			- If None: Will ignore all override conditions
+			- If dict: Will use the given dictionary instead of a .json file for saving and loading; can be empty
+			- If str: Will use the .json file located there (it will be created if neccissary)
+
+		overrideIsSave (bool) - Determines what happens when no file path is given to save()
+			- If True: Saves any changes to 'override', unless that value exists in 'default_filePath' in which case it will be removed from 'override'
+			- If False: Saves any changes to 'override'
+			- If None: Saves any changes to 'default_filePath'
+			~ Removed sections or settings are ignored
+
+		Example Input: setOverride()
+		Example Input: setOverride(override = "")
+		Example Input: setOverride(override = "settings_user_override.json")
+		Example Input: setOverride(override = {"Lorem": {"ipsum": 1}})
+		Example Input: setOverride(override = {}, overrideIsSave = True)
+		Example Input: setOverride(override = {}, overrideIsSave = False)
+		"""
+
+		if (override is None):
+			self.override = None
+			self.overrideIsSave = None
+			self.contents_override = {}
+			self.default_filePath_override = None
+			return
+
+		self.overrideIsSave = overrideIsSave
+		if (isinstance(override, dict)):
+			self.override = False
+			self.contents_override = override
+			self.default_filePath_override = None
+			return
+
+		self.override = True
+		self.default_filePath_override = override or "settings_override.json"
+		self.contents_override = {}
+
+	def load(self, filePath = None, removeDirty = True, applyOverride = True):
 		"""Loads the json file.
 
 		filePath (str) - Where to load the config file from
@@ -3254,13 +3297,42 @@ class JSON_Aid(Base):
 		Example Input: load("database/settings_user.json")
 		"""
 
-		with open(filePath or self.default_filePath) as fileHandle:
+		filePath = filePath or self.default_filePath
+		self.filePath_lastLoad = filePath
+
+		with open(filePath) as fileHandle:
 			self.contents = json.load(fileHandle)
 		
-		self.dirty = False
+		if (removeDirty):
+			self.dirty = False
+
+		if (applyOverride):
+			self.load_override()
+			
 		return self.contents
 
-	def save(self, filePath = None, ifDirty = True):
+	def load_override(self, filePath = None):
+		"""Loads the override json file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load_override()
+		Example Input: load("database/settings_user_override.json")
+		"""
+
+		if (self.override is None):
+			return
+
+		filePath = filePath or self.default_filePath_override
+
+		if (self.override and (os.path.exists(filePath))):
+			with open(filePath) as fileHandle:
+				self.contents_override = json.load(fileHandle)
+
+		self.contents.update(self.contents_override)
+
+	def save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True):
 		"""Saves changes to json file.
 
 		filePath (str) - Where to save the config file to
@@ -3272,18 +3344,74 @@ class JSON_Aid(Base):
 		Example Input: save("database/settings_user.json")
 		"""
 
-		_filePath = filePath or self.default_filePath
+		filePath = filePath or self.default_filePath
 
-		if (ifDirty and (not self.dirty) and (os.path.exists(_filePath))):
-			# print("@save", f"No changes to save to {_filePath}")
+		if (ifDirty and (not self.dirty) and (os.path.exists(filePath))):
+			# print("@save", f"No changes to save to {filePath}")
 			return
 
-		with open(_filePath, "w") as fileHandle:
-			json.dump(self.contents, fileHandle, indent = "\t")
+		try:
+			if (applyOverride and self.save_override()):
+				return
 
-		self.dirty = False
+			with open(filePath, "w") as fileHandle:
+				json.dump(self.contents, fileHandle, indent = "\t")
 
-	def set(self, contents = None, update = True):
+		except Exception as error:
+			raise error
+
+		finally:
+			if (removeDirty):
+				self.dirty = False
+
+	def save_override(self, filePath = None):
+		"""Saves changes to json file.
+		Note: Only looks at changes and additions, not removals.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		Example Input: save()
+		Example Input: save("database/settings_user_override.json")
+		"""
+
+		def formatCatalogue(catalogue):
+			if (not isinstance(catalogue, dict)):
+				return {"value": catalogue}
+			return catalogue
+
+		#######################################
+
+		if (self.overrideIsSave is None):
+			return
+
+		with open(self.filePath_lastLoad) as fileHandle:
+			base = json.load(fileHandle)
+
+		changes = collections.defaultdict(lambda: collections.defaultdict(dict))
+		for section, new in self.contents.items():
+			old = base.get(section, {})
+
+			for setting, new_catalogue in new.items():
+				new_catalogue = formatCatalogue(new_catalogue)
+				old_catalogue = formatCatalogue(old.get(setting, {}))
+
+				for option, new_value in new_catalogue.items():
+					old_value = old_catalogue.get(option, NULL)
+
+					if ((new_value or (option != "comment")) and ((old_value is NULL) or (new_value != old_value))):
+						changes[section][setting][option] = new_value
+
+		if (self.override):
+			with open(filePath or self.default_filePath_override, "w") as fileHandle:
+				json.dump(changes, fileHandle, indent = "\t")
+
+		self.contents_override.clear()
+		self.contents_override.update(changes)
+
+		return True
+
+	def set(self, contents = None, update = True, makeDirty = True):
 		"""Adds a section to the internal contents.
 
 		contents (dict) - What to add
@@ -3325,9 +3453,10 @@ class JSON_Aid(Base):
 		else:
 			nestedUpdate(self.contents, contents)
 
-		self.dirty = True
+		if (makeDirty):
+			self.dirty = True
 
-	def ensure(self, section, variable, value = None, comment = None):
+	def ensure(self, section, variable, value = None, comment = None, makeDirty = True):
 		"""Makes sure that the given variable exists in the given section.
 
 		section (str) - Which section to ensure 'variable' for
@@ -3348,7 +3477,8 @@ class JSON_Aid(Base):
 
 			for _variable in self.ensure_container(variable):
 				if (not self.has_setting(_variable, _section)):
-					self.dirty = True
+					if (makeDirty):
+						self.dirty = True
 					if (comment):
 						self.contents[_section][_variable] = {"value": value, "comment": comment}
 					else:
@@ -3474,7 +3604,8 @@ def sandbox():
 		test_1 = Test()
 		test_2 = Test()
 
-		json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json")
+		# json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json", override = {"GUI_Manager": {"startup_window": "settings"}})
+		json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json", override = "H:\Python\Material_Tracker\database\settings_user.json", overrideIsSave = True)
 		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
 		json_API.apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
 		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
@@ -3483,6 +3614,9 @@ def sandbox():
 		quiet(vars(test_2))
 		quiet(json_API.getSettings("Users"))
 		quiet(json_API.getSections(variable = "debugging_default"))
+
+		json_API.set({"GUI_Manager": {"startup_window": "main"}})
+		json_API.save()
 
 	def test_config():
 		# config_API = build_configuration()
@@ -3742,11 +3876,11 @@ def sandbox():
 		# database_API.openDatabase("test_map_example.db", "test_map_2")
 		# database_API.checkSchema()
 
-	# test_json()
+	test_json()
 	# test_config()
 	# test_sqlite()
 	# test_access()
-	test_mysql()
+	# test_mysql()
 
 def main():
 	"""The main program controller."""
