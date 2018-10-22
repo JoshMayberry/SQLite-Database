@@ -10,6 +10,7 @@ import sys
 import time
 import shutil
 
+import enum
 import types
 import decimal
 
@@ -353,6 +354,8 @@ class Base_Database(Base):
 
 		if (dataType in cls.dataType_catalogue):
 			dataType = cls.dataType_catalogue[dataType]
+		elif (dataType.__class__ is enum.EnumMeta):
+			dataType = sqlalchemy.Enum(dataType)
 		
 		columnItems = [] #https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.*args
 		if (foreignKey):
@@ -1240,6 +1243,9 @@ class Database(Utility_Base):
 		Example Input: getPrimaryKey()
 		"""
 
+		## TO DO ##
+		#Account for composite primary keys
+
 		inspector = sqlalchemy.inspect(self.engine)
 		catalogue = inspector.get_pk_constraint(relation)
 		return catalogue["constrained_columns"][0]
@@ -1634,23 +1640,45 @@ class Database(Utility_Base):
 		"""Sets up the ORDER BY portion of the SQL message."""
 
 		if (schema is None):
-			_orderBy = getattr(table.columns, orderBy or self.getPrimaryKey(relation))
+			def getBase(_orderBy):
+				return getattr(table.columns, _orderBy or self.getPrimaryKey(relation))
 		else:
-			_orderBy = getattr(schema, orderBy or self.getPrimaryKey(relation))
+			def getBase(_orderBy):
+				return getattr(schema, _orderBy or self.getPrimaryKey(relation))
 
-		if (direction is not None):
-			if (direction):
-				_orderBy = sqlalchemy.asc(_orderBy)
-			else:
-				_orderBy = sqlalchemy.desc(_orderBy)
-		
-			# if (nullFirst is not None):
-			# 	if (nullFirst):
-			# 		_orderBy = _orderBy.nullsfirst()
-			# 	else:
-			# 		_orderBy = _orderBy.nullslast()
+		if (isinstance(direction, dict)):
+			def getDirection(criteria, attribute):
+				if (attribute in direction):
+					if (direction[attribute]):
+						criteria = sqlalchemy.asc(criteria)
+					else:
+						criteria = sqlalchemy.desc(criteria)
+				return criteria
+		else:
+			def getDirection(criteria, attribute):
+				if (direction):
+					return sqlalchemy.asc(criteria)
+				else:
+					return sqlalchemy.desc(criteria)
 
-		return handle.order_by(_orderBy)
+				# if (nullFirst is not None):
+				# 	if (nullFirst):
+				# 		criteria = criteria.nullsfirst()
+				# 	else:
+				# 		criteria = criteria.nullslast()
+
+		def yieldOrder():
+			for _orderBy in self.ensure_container(orderBy):
+				criteria = getBase(_orderBy)
+
+				if (direction is not None):
+					criteria = getDirection(criteria, _orderBy)
+
+				yield criteria
+
+		###############################################
+
+		return handle.order_by(*yieldOrder())
 
 	def configureJoin(self, query, relation, schema, table, attribute, fromSchema = False):
 		"""Sets up the JOIN portion of the SQL message."""
@@ -1737,7 +1765,7 @@ class Database(Utility_Base):
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
-		openAlembic = None, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None,
+		openAlembic = False, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None,
 		port = None, host = None, user = None, password = None, echo = False,
 		resultError_replacement = None, aliasError_replacement = None):
 
@@ -1941,7 +1969,7 @@ class Database(Utility_Base):
 		"""
 
 		if (not schemaPath):
-			self.schema = EmptySchema
+			self.schema = EmptySchema()
 			# self.metadata = sqlalchemy.MetaData(bind = self.engine)
 			# self.refresh()
 			# return
@@ -2312,7 +2340,10 @@ class Database(Utility_Base):
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
 
-		relation = self.ensure_container(relation)
+		if (relation is None):
+			relation = self.getRelationNames()
+		else:
+			relation = self.ensure_container(relation)
 
 		if (isinstance(exclude, dict)):
 			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
@@ -2437,6 +2468,9 @@ class Database(Utility_Base):
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
 		# startTime = time.perf_counter()
+
+		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
+			fromSchema = None
 
 		if (fromSchema is None):
 			contextmanager = self.makeConnection(asTransaction = True)
@@ -2592,6 +2626,7 @@ class Database(Utility_Base):
 		if (not isinstance(exclude, dict)):
 			excludeList = self.ensure_container(exclude, convertNone = True)
 
+		assert myTuple
 		results_catalogue = {}
 		with contextmanager as connection:
 			for relation, attributeList in myTuple.items():
@@ -2603,6 +2638,7 @@ class Database(Utility_Base):
 					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
 
 				schema = self.getSchema(relation)#, forceMatch = True)
+
 				table = self.metadata.tables[relation]
 
 				
@@ -2725,6 +2761,9 @@ class Database(Utility_Base):
 	def removeIndex(self, relation = None, attribute = None, name = None, noReplication = False):
 		"""Removes an index for the given attribute."""
 
+#Monkey Patches
+configparser.ConfigParser.optionxform = str
+
 class Configuration(Base):
 	"""Used to handle .ini files.
 
@@ -2762,7 +2801,7 @@ class Configuration(Base):
 	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
 	"""
 
-	def __init__(self, default_filePath = None, default_values = None, default_section = None, 
+	def __init__(self, default_filePath = None, default_values = None, default_section = None, forceExists = False,
 		allowNone = True, interpolation = True, valid_section = None, readOnly = False, knownTypes = None, knownTypesSection = "knownTypes"):
 		"""
 
@@ -2808,15 +2847,16 @@ class Configuration(Base):
 			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
 		}
 
-		self.config.optionxform = str
+		# self.config.optionxform = str
 
 		self.knownTypesSection = knownTypesSection or None
 		self.knownTypes = knownTypes or {}
+		self.readOnly = readOnly
 
 		self.set_validSection(valid_section)
 
 		if (default_filePath):
-			self.load()
+			self.load(forceExists = forceExists)
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -2835,46 +2875,43 @@ class Configuration(Base):
 			return False
 
 	def __getitem__(self, key):
-		if ((self.valid_section is not None) and (not self.has_section(key))):
-			raise InvalidSectionError(self, key)
+		self.check_invalidSection(key)
 
 		return self.config[key]
 
 	def __setitem__(self, key, value):
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		if ((self.valid_section is not None) and (not self.has_section(key))):
-			raise InvalidSectionError(self, key)
+		self.check_invalidSection(key)
 
 		self.config[key] = value
 
 	def __delitem__(self, key):
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		if ((self.valid_section is not None) and (not self.has_section(key))):
-			raise InvalidSectionError(self, key)
+		self.check_invalidSection(key)
 
 		del self.config[key]
 
 	def __contains__(self, key):
-		if ((self.valid_section is not None) and (not self.has_section(key))):
+		if (self.check_invalidSection(key, raiseError = False)):
 			return False
 
 		return key in self.config
 
 	def keys(self):
 		if (self.valid_section is None):
-			return self.config.keys()
+			return tuple(self.config.keys())
 		return tuple(section for section in self.config.keys() if (section in self.valid_section))
 
 	def values(self):
 		if (self.valid_section is None):
-			return self.config.values()
+			return tuple(self.config.values())
 		return tuple(handle for section, handle in self.config.items() if (section in self.valid_section))
 
 	def items(self):
 		if (self.valid_section is None):
-			return self.config.items()
+			return tuple(self.config.items())
 		return tuple((section, handle) for section, handle in self.config.items() if (section in self.valid_section))
 
 	def _asdict(self):
@@ -2882,8 +2919,16 @@ class Configuration(Base):
 			return dict(self.config)
 		return {key: value for key, value in self.items()}
 
+	def check_invalidSection(self, section, raiseError = True, valid_section = NULL):
+		if (valid_section is NULL):
+			valid_section = self.valid_section
+		if ((valid_section is not None) and (section not in valid_section) and (not self.has_section(section))):
+			if (raiseError):
+				raise InvalidSectionError(self, section)
+			return True
+
 	def get(self, variable = None, section = None, dataType = None, default_values = None, include_defaults = True,
-		fallback = configparser._UNSET, raw = False, forceAttribute = False, forceTuple = False):
+		fallback = configparser._UNSET, raw = False, forceSection = False, forceSetting = False, valid_section = NULL):
 		"""Returns a setting from the given section.
 
 		variable (str) - What setting to get
@@ -2951,9 +2996,9 @@ class Configuration(Base):
 		##################################
 
 		section = section or self.default_section
-
-		if ((self.valid_section is not None) and (not self.has_section(section))):
-			raise InvalidSectionError(self, section)
+		self.check_invalidSection(section, valid_section = valid_section)
+		if (not self.has_section(section)):
+			section = self.config.default_section
 
 		if (variable is None):
 			if (include_defaults):
@@ -2961,13 +3006,13 @@ class Configuration(Base):
 			else:
 				variableList = tuple(self.config._sections[section].keys())
 			return self.get(variableList, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults)
+				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section)
 
 		if (isinstance(variable, dict)):
 			answer = {_section: self.get(_variable, section = _section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults) for _section, _variable in variable.items()}
+				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _section, _variable in variable.items()}
 
-			if (forceAttribute or len(answer) > 1):
+			if (forceSection or len(answer) > 1):
 				return answer
 			elif (not answer):
 				return
@@ -2975,9 +3020,9 @@ class Configuration(Base):
 
 		if (not isinstance(variable, (str, int, float))):
 			answer = {_variable: self.get(_variable, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceAttribute = forceAttribute, forceTuple = forceTuple, include_defaults = include_defaults) for _variable in variable}
+				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _variable in variable}
 
-			if (forceTuple or len(answer) > 1):
+			if (forceSetting or len(answer) > 1):
 				return answer
 			elif (not answer):
 				return
@@ -2992,7 +3037,7 @@ class Configuration(Base):
 			print("@Configuration.get", error)
 			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
 
-	def set(self, variable, value = None, section = None):
+	def set(self, variable, value = None, section = None, valid_section = NULL):
 		"""Adds a setting to the given section.
 
 		variable (str) - What setting to get
@@ -3010,21 +3055,20 @@ class Configuration(Base):
 		"""
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		if ((self.valid_section is not None) and (not self.has_section(section))):
-			raise InvalidSectionError(self, section)
+		self.check_invalidSection(section, valid_section = valid_section)
 
 		if (isinstance(variable, dict)):
 			for _variable, _value in variable.items():
 				if (isinstance(_value, dict)):
 					for __variable, __value in _value.items():
-						self.set(__variable, value = __value, section = _variable)
+						self.set(__variable, value = __value, section = _variable, valid_section = valid_section)
 				else:
-					self.set(_variable, value = _value, section = section)
+					self.set(_variable, value = _value, section = section, valid_section = valid_section)
 			return
 
 		if (not isinstance(variable, (str, int, float))):
 			for _variable in variable:
-				self.set(_variable, value = value, section = section)
+				self.set(_variable, value = value, section = section, valid_section = valid_section)
 			return
 
 		section = section or self.default_section
@@ -3037,7 +3081,7 @@ class Configuration(Base):
 		else:
 			self.config.set(section, variable, f"{value}")
 
-	def load(self, filePath = None, valid_section = NULL):
+	def load(self, filePath = None, valid_section = NULL, forceExists = False):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
@@ -3054,8 +3098,17 @@ class Configuration(Base):
 			self.set_validSection(valid_section)
 
 		filePath = filePath or self.default_filePath
+		if (not os.path.exists(filePath)):
+			if (not forceExists):
+				raise FileExistsError(filePath)
 
-		assert os.path.exists(filePath)
+			if (isinstance(forceExists, dict)):
+				self.set(forceExists, valid_section = None)
+
+			os.makedirs(os.path.dirname(filePath), exist_ok = True)
+			with open(filePath, "w") as config_file:
+				self.config.write(config_file)
+
 		self.config.read(filePath)
 
 	def save(self, filePath = None):
@@ -3070,11 +3123,13 @@ class Configuration(Base):
 
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-			
+		
+		filePath = filePath or self.default_filePath
+		os.makedirs(os.path.dirname(filePath), exist_ok = True)
 		with open(filePath or self.default_filePath, "w") as config_file:
 			self.config.write(config_file)
 
-	def has_section(self, section = None):
+	def has_section(self, section = None, valid_section = NULL):
 		"""Returns True if the section exists in the config file, otherwise returns False.
 
 		section (str) - What section to write this setting in
@@ -3089,11 +3144,13 @@ class Configuration(Base):
 		if (section == self.config.default_section):
 			return True
 
-		if (self.valid_section is None):
+		if (valid_section is NULL):
+			valid_section = self.valid_section
+		if (valid_section is None):
 			return self.config.has_section(section)
-		return section in self.getSections()
+		return section in self.getSections(valid_section = valid_section)
 
-	def has_setting(self, variable, section = None, checkDefault = False):
+	def has_setting(self, variable, section = None, checkDefault = False, valid_section = NULL):
 		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
 
 		section (str) - What section to write this setting in
@@ -3108,16 +3165,14 @@ class Configuration(Base):
 		"""
 
 		section = section or self.default_section
-
-		if ((self.valid_section is not None) and (not self.has_section(section))):
-			raise InvalidSectionError(self, section)
+		self.check_invalidSection(section, valid_section = valid_section)
 
 		if (checkDefault):
 			return self.config.has_option(section, variable)
 		else:
 			return variable in self.config._sections.get(section, ())
 
-	def remove_section(self, section = None):
+	def remove_section(self, section = None, valid_section = NULL):
 		"""Removes a section.
 
 		section (str) - What section to write this setting in
@@ -3129,12 +3184,11 @@ class Configuration(Base):
 
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		if ((self.valid_section is not None) and (not self.has_section(section))):
-			raise InvalidSectionError(self, section)
+		self.check_invalidSection(section, valid_section = valid_section)
 
 		self.config.remove_section(section or self.default_section)
 
-	def remove_setting(self, variable, section = None):
+	def remove_setting(self, variable, section = None, valid_section = NULL):
 		"""Removes a setting from the given section.
 
 		section (str) - What section to write this setting in
@@ -3146,20 +3200,22 @@ class Configuration(Base):
 
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		if ((self.valid_section is not None) and (not self.has_section(section))):
-			raise InvalidSectionError(self, section)
+		self.check_invalidSection(section, valid_section = valid_section)
 
 		self.config.remove_option(section or self.default_section, variable)
 
-	def getSections(self):
+	def getSections(self, valid_section = NULL):
 		"""Returns a list of existing sections.
 
 		Example Input: getSections()
 		"""
 
-		if (self.valid_section is None):
+		if (valid_section is NULL):
+			valid_section = self.valid_section
+
+		if (valid_section is None):
 			return self.config.sections()
-		return (section for section in self.config.sections() if (section in self.valid_section))
+		return (section for section in self.config.sections() if (section in valid_section))
 
 	def getDefaults(self):
 		"""Returns the defaults that will be used if a setting does not exist.
@@ -3321,6 +3377,21 @@ class JSON_Aid(Base):
 		Example Input: load("database/settings_user_override.json")
 		"""
 
+		def nestedUpdate(target, catalogue):
+			"""Modified code from Alex Martelli on https://stackoverflow.com/questions/3232943/update-value-of-a-nested-dictionary-of-varying-depth/3233356#3233356"""
+
+			for key, value in catalogue.items():
+				if (isinstance(value, dict)):
+					target[key] = nestedUpdate(target.get(key, {}), value)
+				else:
+					if ((key in target) and (isinstance(target[key], dict))):
+						target[key]["value"] = value
+					else:
+						target[key] = value
+			return target
+
+		################################################
+
 		if (self.override is None):
 			return
 
@@ -3330,7 +3401,7 @@ class JSON_Aid(Base):
 			with open(filePath) as fileHandle:
 				self.contents_override = json.load(fileHandle)
 
-		self.contents.update(self.contents_override)
+		nestedUpdate(self.contents, self.contents_override)
 
 	def save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True):
 		"""Saves changes to json file.
@@ -3354,6 +3425,7 @@ class JSON_Aid(Base):
 			if (applyOverride and self.save_override()):
 				return
 
+			os.makedirs(os.path.dirname(filePath), exist_ok = True)
 			with open(filePath, "w") as fileHandle:
 				json.dump(self.contents, fileHandle, indent = "\t")
 
@@ -3403,7 +3475,9 @@ class JSON_Aid(Base):
 						changes[section][setting][option] = new_value
 
 		if (self.override):
-			with open(filePath or self.default_filePath_override, "w") as fileHandle:
+			filePath = filePath or self.default_filePath_override
+			os.makedirs(os.path.dirname(filePath), exist_ok = True)
+			with open(filePath, "w") as fileHandle:
 				json.dump(changes, fileHandle, indent = "\t")
 
 		self.contents_override.clear()
@@ -3604,8 +3678,8 @@ def sandbox():
 		test_1 = Test()
 		test_2 = Test()
 
-		# json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json", override = {"GUI_Manager": {"startup_window": "settings"}})
-		json_API = build_json(default_filePath = "H:\Python\Material_Tracker\database\settings_default.json", override = "H:\Python\Material_Tracker\database\settings_user.json", overrideIsSave = True)
+		# json_API = build_json(default_filePath = "H:/Python/Material_Tracker/database/settings_default.json", override = {"GUI_Manager": {"startup_window": "settings"}})
+		json_API = build_json(default_filePath = "H:/Python/Material_Tracker/database/settings_default.json", override = "H:/Python/Material_Tracker/database/temp_settings_user.json", overrideIsSave = True)
 		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
 		json_API.apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
 		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
@@ -3647,10 +3721,11 @@ def sandbox():
 		database_API = build()
 		# database_API.openDatabase(None, "H:/Python/Material_Tracker/database/schema.py") 
 		# database_API.openDatabase("test/test_map_example.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
-		database_API.openDatabase("H:/Python/Material_Tracker/database/data.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
-		# database_API.removeRelation()
-		# database_API.createRelation()
-		# database_API.resetRelation()
+		# database_API.openDatabase("H:/Python/Material_Tracker/database/data.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
+		database_API.openDatabase(None, "M:/Schema/main/schema_main.py", openAlembic = False)
+		database_API.removeRelation()
+		database_API.createRelation()
+		database_API.resetRelation()
 
 		#Add Items
 		# database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
@@ -3761,13 +3836,13 @@ def sandbox():
 		quiet(database_API.getValue({"tblMaterialLog": "ContainerID"}, isIn = {"ContainerID": ("1272", "1498", "2047")}, fromSchema = None))
 
 	def test_mysql():
-		database_API = build(fileName = "H:/Python/Material_Tracker/database/mysql_settings.ini", section = "testing", settingsKwargs = {"database_fileLocation": "H:/Python/Material_Tracker/database"})
+		database_API = build(fileName = "M:/Settings/config_mysql.ini", section = "testing", settingsKwargs = {"filePath_sharedDir": "M:"})
 		# quiet(database_API.getRelationNames())
 
 		#Add Items
-		database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "poNumber": 123456}})
-		database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "poNumber": 123456, "job": 678, "color": "red"}})
-		database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "job": 1234})})
+		database_API.addTuple({"Containers": {"label": "dolor", "weight_total": 123, "location": 5, "poNumber": 123456}})
+		database_API.addTuple({"Containers": {"label": "sit", "weight_total": 123, "location": 3, "poNumber": 123456, "job": 678, "color": "red"}})
+		database_API.addTuple({"Containers": ({"label": "lorem", "weight_total": 123, "location": 3, "poNumber": 123456, "job": {"label": 1234, "display_text": "12 34"}}, {"label": "ipsum", "location": 8, "job": 1234})})
 
 		#Get Items
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}))
@@ -3781,12 +3856,12 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True))
 		# quiet(database_API.getValue({"Containers": ("label", "job", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, foreignDefault = "label", foreignAsDict = True, fromSchema = None))
 		
-		quiet(database_API.getAttributeNames("Containers", foreignAsDict = None))
-		quiet(database_API.getAttributeNames("Containers", foreignAsDict = False))
-		quiet(database_API.getAttributeNames("Containers", foreignAsDict = True))
-		quiet(database_API.getAllValues("Containers", foreignAsDict = None))
-		quiet(database_API.getAllValues("Containers", foreignAsDict = False))
-		quiet(database_API.getAllValues("Containers", foreignAsDict = True))
+		# quiet(database_API.getAttributeNames("Containers", foreignAsDict = None))
+		# quiet(database_API.getAttributeNames("Containers", foreignAsDict = False))
+		# quiet(database_API.getAttributeNames("Containers", foreignAsDict = True))
+		# quiet(database_API.getAllValues("Containers", foreignAsDict = None))
+		# quiet(database_API.getAllValues("Containers", foreignAsDict = False))
+		# quiet(database_API.getAllValues("Containers", foreignAsDict = True))
 
 		# quiet(database_API.getValue({"Containers": ("label", "weight_total")}, {"weight_total": 123, "poNumber": 123456}, alias = {"label": "containerNumber"}))
 
@@ -3829,6 +3904,22 @@ def sandbox():
 		# quiet(database_API.getValue({"Containers": {"job": ("databaseId", "label")}}))
 		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, {"job": {"label": 1234}}))
 		# quiet(database_API.getValue({"Containers": {"job": "databaseId"}}, onlyOne = True))
+
+		quiet(database_API.getValue({"Containers": ("label", "location")}))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = "location"))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = "location", direction = False))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = ("location", "label")))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = ("location", "label"), direction = False))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = ("location", "label"), direction = {"label": True}))
+		quiet(database_API.getValue({"Containers": ("label", "location")}, orderBy = ("location", "label"), direction = {"label": False}))
+
+		# Example Input: getValue({"Users": "name"}, orderBy = "age")
+		# Example Input: getValue({"Users": ["name", "age"]}, orderBy = "age", limit = 2)
+		# Example Input: getValue({"Users": ["name", "age"]}, orderBy = "age", direction = True)
+
+		# Example Input: getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"])
+		# Example Input: getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = [None, False])
+		# Example Input: getValue({"Users": ["name", "age"]}, orderBy = ["age", "height"], direction = {"height": False})
 
 		# quiet(database_API.getAllValues("Containers"))
 		# quiet(database_API.getAllValues("Containers", fromSchema = None))
@@ -3876,11 +3967,11 @@ def sandbox():
 		# database_API.openDatabase("test_map_example.db", "test_map_2")
 		# database_API.checkSchema()
 
-	test_json()
+	# test_json()
 	# test_config()
 	# test_sqlite()
 	# test_access()
-	# test_mysql()
+	test_mysql()
 
 def main():
 	"""The main program controller."""
