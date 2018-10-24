@@ -49,6 +49,8 @@ from alembic.config import Config as alembic_config_Config
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
+import Utilities
+
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
 #Required Modules
@@ -65,34 +67,6 @@ sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 ##MySQL Installer #https://dev.mysql.com/downloads/installer/
 	# MySQL Server
 	# Connector/Python (3.6)
-
-#Debugging functions
-def printCurrentTrace(printout = True, quitAfter = False):
-	"""Prints out the stack trace for the current place in the program.
-	Modified Code from codeasone on https://stackoverflow.com/questions/1032813/dump-stacktraces-of-all-active-threads
-
-	Example Input: printCurrentTrace()
-	Example Input: printCurrentTrace(quitAfter = True)
-	"""
-
-	code = []
-	for threadId, stack in sys._current_frames().items():
-		code.append("\n# ThreadID: %s" % threadId)
-		for fileName, lineno, name, line in traceback.extract_stack(stack):
-			code.append('File: "%s", line %d, in %s' % (fileName,
-														lineno, name))
-			if (line):
-				code.append("  %s" % (line.strip()))
-
-	try:
-		if (printout):
-			for line in code:
-				print (line)
-		else:
-			return code
-	finally:
-		if (quitAfter):
-			sys.exit()
 
 #Exceptions
 class ReadOnlyError(Exception):
@@ -188,74 +162,9 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 		return wrapper
 	return decorator
 
-#Custom Types
-class _set(set):
-	def append(self, *args, **kwargs):
-		return self.add(*args, **kwargs)
-
 #Utility Classes
-class Base():
-	@classmethod
-	def ensure_set(cls, item, convertNone = False):
-		"""Makes sure the given item is a set.
-
-		Example Input: ensure_set(exclude)
-		Example Input: ensure_set(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return {item}
-			elif (not isinstance(item, set)):
-				return set(item)
-			return item
-
-		if (convertNone):
-			return set()
-
-	@classmethod
-	def ensure_list(cls, item, convertNone = False):
-		"""Makes sure the given item is a list.
-
-		Example Input: ensure_list(exclude)
-		Example Input: ensure_list(exclude, convertNone = True)
-		"""
-
-		if (item is not None):
-			if (isinstance(item, (str, int, float))):
-				return [item]
-			elif (not isinstance(item, list)):
-				return list(item)
-			return item
-
-		if (convertNone):
-			return []
-
-	@classmethod
-	def ensure_container(cls, item, evaluateGenerator = True, convertNone = True, elementTypes = None):
-		"""Makes sure the given item is a container.
-
-		elementTypes (list) - Extra types that are ok to be elements
-
-		Example Input: ensure_container(valueList)
-		Example Input: ensure_container(valueList, convertNone = False)
-		Example Input: ensure_container(valueList, evaluateGenerator = False)
-		Example Input: ensure_container(handle, elementTypes = (Base,))
-		"""
-
-		if (item is None):
-			if (convertNone):
-				return ()
-			return (None,)
-		
-		if (isinstance(item, (str, int, float, dict, type, *(cls.ensure_container(elementTypes, convertNone = True))))):
-			return (item,)
-
-		if (not isinstance(item, (list, tuple, set))):
-			if (evaluateGenerator):
-				return tuple(item)
-			return item
-		return item
+class Base(Utilities.common.Ensure):
+	pass
 
 class Base_Database(Base):
 	# @classmethod
@@ -751,7 +660,6 @@ class Schema_AutoForeign(Schema_Base):
 					continue
 
 			#Create new unique
-
 			n = 1
 			title = catalogue.get('label', variable.title())
 			while f"{title}_{n}" in {row.label for row in session.query(relationHandle).all()}:
@@ -1137,6 +1045,8 @@ class Alembic(Base):
 class Database(Utility_Base):
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
+
+	To backup database on schedule: https://www.redolive.com/utah-web-designers-blog/automated-mysql-backup-for-windows/
 	"""
 
 	def __init__(self, fileName = None, **kwargs):
@@ -1151,6 +1061,8 @@ class Database(Utility_Base):
 		Example Input: Database()
 		Example Input: Database("emaildb")
 		"""
+
+		self._applyMonkeyPatches()
 
 		self.threadLock = threading.RLock()
 		self.TableBase = sqlalchemy.ext.declarative.declarative_base()
@@ -1197,6 +1109,31 @@ class Database(Utility_Base):
 		if (traceback is not None):
 			print(exc_type, exc_value)
 			return False
+
+	def _applyMonkeyPatches(self):
+		#Ensure the MySQL dialect is imported
+		sqlalchemy.create_engine("mysql+mysqlconnector://")
+
+		def mp_mysql__show_create_table(mp_self, connection, table, charset = None, full_name = None):
+			"""Fixes the lowercase foreign key tables and references."""
+			sql = old_mysql__show_create_table(mp_self, connection, table, charset = charset, full_name = full_name)
+
+			if (self.schema is None):
+				return sql
+
+			relationHandle = self.schema.relationCatalogue.get(full_name.strip("`"))
+			if (relationHandle is None):
+				return sql
+
+			if (re.search("FOREIGN KEY.*REFERENCES", sql)):
+				for foreignKey, foreignHandle in relationHandle.foreignKeys.items():
+					sql = re.sub(f"FOREIGN KEY \(`?({foreignKey}_id)`?\) REFERENCES `?([^`]*)`? \(`?([^`]*)`?\)",
+						f"FOREIGN KEY (`{foreignKey}_id`) REFERENCES `{foreignHandle.__tablename__}` (`{foreignHandle._primaryKeys[0]}`)", sql)
+
+			return sql
+
+		old_mysql__show_create_table = sqlalchemy.dialects.mysql.base.MySQLDialect._show_create_table
+		sqlalchemy.dialects.mysql.base.MySQLDialect._show_create_table = mp_mysql__show_create_table
 
 	#Cache Functions
 	indexCache = cachetools.LFUCache(maxsize = 10)
@@ -1968,6 +1905,7 @@ class Database(Utility_Base):
 		Example Input: loadSchema(schemaPath)
 		"""
 
+		#Get Schema
 		if (not schemaPath):
 			self.schema = EmptySchema()
 			# self.metadata = sqlalchemy.MetaData(bind = self.engine)
@@ -1981,6 +1919,17 @@ class Database(Utility_Base):
 		else:
 			self.schema = importlib.import_module(schemaPath)
 
+		#Finish Schema
+		self.schema.relationCatalogue = {item.__name__: item for item in self.schema.Database.Schema_Base.__subclasses__() if (item not in {self.schema.Database.Schema_AutoForeign})}
+		self.schema.hasForeignCatalogue = {item.__name__: item for item in self.schema.Database.Schema_AutoForeign.__subclasses__()}
+
+		for module in self.schema.hasForeignCatalogue.values():
+			module.formatForeign(self.schema.relationCatalogue)
+
+		for module in self.schema.relationCatalogue.values():
+			module._primaryKeys = tuple(attribute for attribute, columnHandle in module.__mapper__.columns.items() if (columnHandle.primary_key))
+
+		#Bind Schema
 		self.schemaPath = schemaPath
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
@@ -3353,11 +3302,15 @@ class JSON_Aid(Base):
 		Example Input: load("database/settings_user.json")
 		"""
 
-		filePath = filePath or self.default_filePath
-		self.filePath_lastLoad = filePath
+		if (isinstance(filePath, dict)):
+			self.contents = {**filePath}
+			self.filePath_lastLoad = None
+		else:
+			filePath = filePath or self.default_filePath
+			self.filePath_lastLoad = filePath
 
-		with open(filePath) as fileHandle:
-			self.contents = json.load(fileHandle)
+			with open(filePath) as fileHandle:
+				self.contents = json.load(fileHandle)
 		
 		if (removeDirty):
 			self.dirty = False
@@ -3377,21 +3330,6 @@ class JSON_Aid(Base):
 		Example Input: load("database/settings_user_override.json")
 		"""
 
-		def nestedUpdate(target, catalogue):
-			"""Modified code from Alex Martelli on https://stackoverflow.com/questions/3232943/update-value-of-a-nested-dictionary-of-varying-depth/3233356#3233356"""
-
-			for key, value in catalogue.items():
-				if (isinstance(value, dict)):
-					target[key] = nestedUpdate(target.get(key, {}), value)
-				else:
-					if ((key in target) and (isinstance(target[key], dict))):
-						target[key]["value"] = value
-					else:
-						target[key] = value
-			return target
-
-		################################################
-
 		if (self.override is None):
 			return
 
@@ -3401,7 +3339,7 @@ class JSON_Aid(Base):
 			with open(filePath) as fileHandle:
 				self.contents_override = json.load(fileHandle)
 
-		nestedUpdate(self.contents, self.contents_override)
+		Utilities.common.nestedUpdate(self.contents, self.contents_override)
 
 	def save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True):
 		"""Saves changes to json file.
@@ -3503,21 +3441,6 @@ class JSON_Aid(Base):
 
 		contents = contents or {}
 
-		def nestedUpdate(target, catalogue):
-			"""Modified code from Alex Martelli on https://stackoverflow.com/questions/3232943/update-value-of-a-nested-dictionary-of-varying-depth/3233356#3233356"""
-
-			for key, value in catalogue.items():
-				if (isinstance(value, dict)):
-					target[key] = nestedUpdate(target.get(key, {}), value)
-				else:
-					if ((key in target) and (isinstance(target[key], dict))):
-						target[key]["value"] = value
-					else:
-						target[key] = value
-			return target
-
-		################################
-
 		assert isinstance(contents, dict)
 
 		if (update is None):
@@ -3525,7 +3448,7 @@ class JSON_Aid(Base):
 		elif (not update):
 			self.contents.update(contents)
 		else:
-			nestedUpdate(self.contents, contents)
+			Utilities.common.nestedUpdate(self.contents, contents)
 
 		if (makeDirty):
 			self.dirty = True
@@ -3558,7 +3481,7 @@ class JSON_Aid(Base):
 					else:
 						self.contents[_section][_variable] = value
 
-	def apply(self, handle, section, variable = None, handleTypes = None):
+	def apply(self, handle, section, include = None, exclude = None, handleTypes = None):
 		"""Places default values into the supplied handle.
 
 		___________________ REQUIRED FORMAT ___________________
@@ -3581,32 +3504,49 @@ class JSON_Aid(Base):
 		handle (object) - What to apply the given sections to
 			- If list: will apply to all
 
-		variable (str) - Which variables to apply
+		include (str) - What variable is allowed to be applied
 			- If list: Will apply all variables in the section
 
 		handleTypes (list) - Place the type for 'section' here
 
 		Example Input: apply(test_1, "GUI_Manager", handleTypes = Test)
 		Example Input: apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
-		Example Input: apply((test1, test_2), "Settings", variable = ("debugging_default", "debugging_enabled"), handleTypes = Test)
+		Example Input: apply(self, {"FrameSettings": self.label}, handleTypes = (self.__class__,))
+		Example Input: apply(self, {"FrameSettings": {self.label: "title"}}, handleTypes = (self.__class__,))
+		Example Input: apply((test1, test_2), {"Settings": ("debugging_default", "debugging_enabled")}, handleTypes = Test)
 		"""
 
-		variableList = self.ensure_container(variable)
+		def setValue(_handle, _section, catalogue):
+			nonlocal self, include, exclude
+
+			if (isinstance(_section, dict)):
+				for key, value in _section.items():
+					setValue(_handle, value, catalogue.get(key))
+				return
+			
+			if (_section not in catalogue):
+				print("@apply", f"{_section} does not exist in catalogue\n  -- keys: {tuple(catalogue.keys())}")
+				return
+
+			for variable, _catalogue in catalogue[_section].items():
+				if (include and (variable not in include)):
+					continue
+				if (exclude and (variable in exclude)):
+					continue
+
+				if (not isinstance(_catalogue, dict)):
+					setattr(_handle, variable, _catalogue)
+				else:
+					setattr(_handle, variable, _catalogue["value"])
+
+		#######################################################
+
+		include = self.ensure_container(include)
+		exclude = self.ensure_container(exclude)
 
 		for _handle in self.ensure_container(handle, elementTypes = handleTypes):
 			for _section in self.ensure_container(section):
-				if (_section not in self.contents):
-					print("@apply", f"{_section} does not exist in self.contents\n  -- keys: {tuple(self.contents.keys())}")
-					return
-
-				for variable, catalogue in self.contents[_section].items():
-					if (variableList and (variable not in variableList)):
-						continue
-
-					if (not isinstance(catalogue, dict)):
-						setattr(_handle, variable, catalogue)
-					else:
-						setattr(_handle, variable, catalogue["value"])
+				setValue(_handle, _section, self.contents)
 
 	def has_section(self, section = None):
 		"""Returns True if the section exists in the config file, otherwise returns False.
