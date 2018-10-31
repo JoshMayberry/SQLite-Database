@@ -7,6 +7,7 @@ __version__ = "3.4.0"
 import re
 import os
 import sys
+import abc
 import time
 import shutil
 
@@ -31,6 +32,7 @@ import importlib
 import cachetools
 
 #Database Modules
+import yaml
 import json
 import pyodbc
 import sqlite3
@@ -49,7 +51,7 @@ from alembic.config import Config as alembic_config_Config
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
-import Utilities
+import Utilities as MyUtilities
 
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
@@ -162,8 +164,57 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 		return wrapper
 	return decorator
 
+#Expand JSON
+class _JSONEncoder(json.JSONEncoder):
+	"""Allows sets to be saved in JSON files.
+	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
+
+	Example Use: 
+		json.dumps(["abc", {1, 2, 3}], cls = _JSONEncoder)
+
+		json._default_encoder = _JSONEncoder()
+		json.dumps(["abc", {1, 2, 3}])
+	"""
+
+	def __init__(self, *, tag_set = None, **kwargs):
+		super().__init__(**kwargs)
+		self.tag_set = tag_set or "_set"
+
+	def default(self, item):
+		if (isinstance(item, collections.Set)):
+			return {self.tag_set: list(item)}
+		else:
+			return super().default(self, item)
+
+class _JSONDecoder(json.JSONDecoder):
+	"""Allows sets to be loaded from JSON files.
+	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
+
+	Example Use: 
+		json.loads(encoded, cls = _JSONDecoder)
+
+		json._default_decoder = _JSONDecoder()
+		json.loads(encoded)
+	"""
+
+	def __init__(self, *, object_hook = None, tag_set = None, **kwargs):
+		super().__init__(object_hook = object_hook or self.myHook, **kwargs)
+
+		self.tag_set = tag_set or "_set"
+
+	def myHook(self, catalogue):
+		if (self.tag_set in catalogue):
+			return set(catalogue[self.tag_set])
+		return catalogue
+
+json._default_encoder = _JSONEncoder()
+json._default_decoder = _JSONDecoder()
+
+sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
+sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
+
 #Utility Classes
-class Base(Utilities.common.Ensure):
+class Base(MyUtilities.common.Ensure):
 	pass
 
 class Base_Database(Base):
@@ -492,7 +543,6 @@ class Schema_Base(Base_Database):
 		yield columnHandle
 
 	def change(self, session, values = {}, **kwargs):
-		print("@4")
 		for variable, newValue in values.items():
 			setattr(self, variable, newValue)
 
@@ -710,6 +760,11 @@ def build_json(*args, **kwargs):
 	"""Creates a JSON_Aid object."""
 
 	return JSON_Aid(*args, **kwargs)
+
+def build_yaml(*args, **kwargs):
+	"""Creates a YAML_Aid object with YAML notation."""
+
+	return YAML_Aid(*args, **kwargs)
 
 class Singleton():
 	"""Used to get values correctly."""
@@ -1907,7 +1962,7 @@ class Database(Utility_Base):
 
 		#Get Schema
 		if (not schemaPath):
-			self.schema = EmptySchema()
+			self.schema = EmptySchema
 			# self.metadata = sqlalchemy.MetaData(bind = self.engine)
 			# self.refresh()
 			# return
@@ -1920,8 +1975,8 @@ class Database(Utility_Base):
 			self.schema = importlib.import_module(schemaPath)
 
 		#Finish Schema
-		self.schema.relationCatalogue = {item.__name__: item for item in self.schema.Database.Schema_Base.__subclasses__() if (item not in {self.schema.Database.Schema_AutoForeign})}
-		self.schema.hasForeignCatalogue = {item.__name__: item for item in self.schema.Database.Schema_AutoForeign.__subclasses__()}
+		self.schema.relationCatalogue = {item.__name__: item for item in Schema_Base.__subclasses__() if ((item.__module__ == self.schema.__name__) and (item not in {Schema_AutoForeign}))}
+		self.schema.hasForeignCatalogue = {item.__name__: item for item in Schema_AutoForeign.__subclasses__() if (item.__module__ == self.schema.__name__)}
 
 		for module in self.schema.hasForeignCatalogue.values():
 			module.formatForeign(self.schema.relationCatalogue)
@@ -1982,7 +2037,7 @@ class Database(Utility_Base):
 		"""Resets the relation to factory default, as described in the schema.
 
 		relation (str) - What the relation is called in the .db
-			- If None: All tables will be removed from the .db
+			- If None: All tables will be reset from the .db
 
 		Example Input: resetRelation()
 		Example Input: resetRelation("Users")
@@ -2060,6 +2115,8 @@ class Database(Utility_Base):
 			if (self.alembic):
 				self.alembic.stamp()
 			return
+
+		raise NotImplementedError()
 
 		if (schemaPath is None):
 			schema = self.schema
@@ -2195,6 +2252,8 @@ class Database(Utility_Base):
 					for attributeDict in self.ensure_container(rows):
 						query = session.query(schema)
 						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+
+						# print("@3", self.printSQL(query))
 						
 						if ((forceMatch is not False) and (query.count() is 0)):
 							if (forceMatch is None):
@@ -2550,13 +2609,15 @@ class Database(Utility_Base):
 								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
 						yield dict(catalogue)
 
-		def getResult(query):
-			nonlocal forceTuple
+		container = (tuple, set)[valuesAsSet]
 
-			answer = tuple(yieldRow(query))
+		def getResult(query):
+			nonlocal forceTuple, container
+
+			answer = container(yieldRow(query))
 
 			if (not answer):
-				return ()
+				return container()
 			elif (forceTuple or (len(answer) > 1)):
 				if ((not attributeFirst) or (not isinstance(answer[-1], dict))):
 					return answer
@@ -2565,7 +2626,7 @@ class Database(Utility_Base):
 				for row in answer:
 					for key, value in row.items():
 						catalogue[key].append(value)
-				return {key: tuple(value) for key, value in catalogue.items()}
+				return {key: container(value) for key, value in catalogue.items()}
 
 			else:
 				return answer[0]
@@ -2712,6 +2773,14 @@ class Database(Utility_Base):
 
 #Monkey Patches
 configparser.ConfigParser.optionxform = str
+
+@contextlib.contextmanager
+def newOpen(filePath, flag = "w"):
+	directory = os.path.dirname(filePath)
+	if (directory):
+		os.makedirs(directory, exist_ok = True)
+	with open(filePath, flag) as fileHandle:
+		yield fileHandle
 
 class Configuration(Base):
 	"""Used to handle .ini files.
@@ -3042,6 +3111,7 @@ class Configuration(Base):
 		Example Input: load("database/settings_user.ini")
 		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
 		"""
+		global newOpen
 
 		if (valid_section is not NULL):
 			self.set_validSection(valid_section)
@@ -3054,8 +3124,7 @@ class Configuration(Base):
 			if (isinstance(forceExists, dict)):
 				self.set(forceExists, valid_section = None)
 
-			os.makedirs(os.path.dirname(filePath), exist_ok = True)
-			with open(filePath, "w") as config_file:
+			with newOpen(filePath) as config_file:
 				self.config.write(config_file)
 
 		self.config.read(filePath)
@@ -3069,13 +3138,13 @@ class Configuration(Base):
 		Example Input: save()
 		Example Input: save("database/settings_user.ini")
 		"""
+		global newOpen
 
 		if (self.readOnly):
 			raise ReadOnlyError(self)
 		
 		filePath = filePath or self.default_filePath
-		os.makedirs(os.path.dirname(filePath), exist_ok = True)
-		with open(filePath or self.default_filePath, "w") as config_file:
+		with newOpen(filePath or self.default_filePath) as config_file:
 			self.config.write(config_file)
 
 	def has_section(self, section = None, valid_section = NULL):
@@ -3199,30 +3268,30 @@ class Configuration(Base):
 		return datetime.datetime.strptime(s, "%Y/%m/%d %H:%M:%S.%f")
 
 	converters = {
-		"datetime": convert_datetime
+		"datetime": convert_datetime,
 	}
 
-class JSON_Aid(Base):
-	"""Utility API for json scripts.
+class Config_Base(Base, metaclass = abc.ABCMeta):
+	"""Utility API for json and yaml scripts."""
 
-	Use: https://martin-thoma.com/configuration-files-in-python/#json
-	"""
-
-	def __init__(self, default_filePath = None, *, override = None, overrideIsSave = None):
+	def __init__(self, default_filePath = None, *, defaultFileExtension = None, override = None, overrideIsSave = None, forceExists = False):
 		"""
 		Example Input: JSON_Aid()
+		Example Input: YAML_Aid()
 		"""
 
-		self.default_filePath = default_filePath or "settings.json"
+		self.defaultFileExtension = defaultFileExtension
+		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
 		self.filePath_lastLoad = self.default_filePath
 
 		self.dirty = None
 		self.contents = {}
+		self.contents_override = {}
 
 		self.setOverride(override = override, overrideIsSave = overrideIsSave)
 
 		if (default_filePath):
-			self.load(default_filePath)
+			self.load(default_filePath, forceExists = forceExists)
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -3251,6 +3320,14 @@ class JSON_Aid(Base):
 
 	def __contains__(self, key):
 		return key in self.contents
+
+	def read(self, default = None):
+		for section, catalogue in self.contents.items():
+			for setting, value in catalogue.items():
+				if (isinstance(value, dict)):
+					yield section, setting, value.get("value", default)
+				else:
+					yield section, setting, value
 
 	def setOverride(self, override = None, overrideIsSave = None):
 		"""Applies override settings for advanced save and load managment.
@@ -3289,10 +3366,11 @@ class JSON_Aid(Base):
 			return
 
 		self.override = True
-		self.default_filePath_override = override or "settings_override.json"
+		self.default_filePath_override = override or f"settings_override.{self.defaultFileExtension}"
 		self.contents_override = {}
 
-	def load(self, filePath = None, removeDirty = True, applyOverride = True):
+	@contextlib.contextmanager
+	def _load(self, filePath = None, removeDirty = True, applyOverride = True, forceExists = False):
 		"""Loads the json file.
 
 		filePath (str) - Where to load the config file from
@@ -3305,43 +3383,59 @@ class JSON_Aid(Base):
 		if (isinstance(filePath, dict)):
 			self.contents = {**filePath}
 			self.filePath_lastLoad = None
+			yield None
 		else:
 			filePath = filePath or self.default_filePath
 			self.filePath_lastLoad = filePath
 
+			if (not os.path.exists(filePath)):
+				if (not forceExists):
+					raise FileExistsError(filePath)
+
+				if (isinstance(forceExists, dict)):
+					self.set(forceExists, valid_section = None)
+
+				self.save(filePath = filePath, applyOverride = False, removeDirty = False)
+
 			with open(filePath) as fileHandle:
-				self.contents = json.load(fileHandle)
+				yield fileHandle
 		
 		if (removeDirty):
 			self.dirty = False
 
 		if (applyOverride):
 			self.load_override()
-			
-		return self.contents
 
-	def load_override(self, filePath = None):
+	@contextlib.contextmanager
+	def _load_override(self, filePath = None):
 		"""Loads the override json file.
 
 		filePath (str) - Where to load the config file from
 			- If None: Will use the default file path
 
 		Example Input: load_override()
-		Example Input: load("database/settings_user_override.json")
+		Example Input: load_override("database/settings_user_override.json")
 		"""
 
 		if (self.override is None):
+			yield None
 			return
 
 		filePath = filePath or self.default_filePath_override
+		if (isinstance(filePath, dict)):
+			self.contents_override = {**filePath}
+			yield None
+		else:
+			if (self.override and (os.path.exists(filePath))):
+				with open(filePath) as fileHandle:
+					yield fileHandle
+			else:
+				yield None
 
-		if (self.override and (os.path.exists(filePath))):
-			with open(filePath) as fileHandle:
-				self.contents_override = json.load(fileHandle)
+		MyUtilities.common.nestedUpdate(self.contents, self.contents_override, preserveNone = False)
 
-		Utilities.common.nestedUpdate(self.contents, self.contents_override)
-
-	def save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True):
+	@contextlib.contextmanager
+	def _save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True, overrideKwargs = None):
 		"""Saves changes to json file.
 
 		filePath (str) - Where to save the config file to
@@ -3352,20 +3446,20 @@ class JSON_Aid(Base):
 		Example Input: save()
 		Example Input: save("database/settings_user.json")
 		"""
+		global newOpen
 
 		filePath = filePath or self.default_filePath
-
 		if (ifDirty and (not self.dirty) and (os.path.exists(filePath))):
-			# print("@save", f"No changes to save to {filePath}")
+			yield None
 			return
 
 		try:
-			if (applyOverride and self.save_override()):
+			if (applyOverride and self.save_override(**(overrideKwargs or {}))):
+				yield None
 				return
 
-			os.makedirs(os.path.dirname(filePath), exist_ok = True)
-			with open(filePath, "w") as fileHandle:
-				json.dump(self.contents, fileHandle, indent = "\t")
+			with newOpen(filePath) as fileHandle:
+				yield fileHandle
 
 		except Exception as error:
 			raise error
@@ -3374,16 +3468,18 @@ class JSON_Aid(Base):
 			if (removeDirty):
 				self.dirty = False
 
-	def save_override(self, filePath = None):
+	@contextlib.contextmanager
+	def _save_override(self, filePath = None, *, base = None):
 		"""Saves changes to json file.
 		Note: Only looks at changes and additions, not removals.
 
 		filePath (str) - Where to save the config file to
 			- If None: Will use the default file path
 
-		Example Input: save()
-		Example Input: save("database/settings_user_override.json")
+		Example Input: save_override()
+		Example Input: save_override("database/settings_user_override.json")
 		"""
+		global newOpen
 
 		def formatCatalogue(catalogue):
 			if (not isinstance(catalogue, dict)):
@@ -3393,11 +3489,10 @@ class JSON_Aid(Base):
 		#######################################
 
 		if (self.overrideIsSave is None):
+			yield None
 			return
 
-		with open(self.filePath_lastLoad) as fileHandle:
-			base = json.load(fileHandle)
-
+		base = base or {}
 		changes = collections.defaultdict(lambda: collections.defaultdict(dict))
 		for section, new in self.contents.items():
 			old = base.get(section, {})
@@ -3412,16 +3507,83 @@ class JSON_Aid(Base):
 					if ((new_value or (option != "comment")) and ((old_value is NULL) or (new_value != old_value))):
 						changes[section][setting][option] = new_value
 
-		if (self.override):
-			filePath = filePath or self.default_filePath_override
-			os.makedirs(os.path.dirname(filePath), exist_ok = True)
-			with open(filePath, "w") as fileHandle:
-				json.dump(changes, fileHandle, indent = "\t")
-
 		self.contents_override.clear()
-		self.contents_override.update(changes)
+		MyUtilities.common.nestedUpdate(self.contents_override, changes) #Filter out defaultdict
 
-		return True
+		if (self.override):
+			with newOpen(filePath or self.default_filePath_override) as fileHandle:
+				yield fileHandle
+		else:
+			yield None
+
+	def _ensure(self, section, variable = None, value = None, *, comment = None, 
+		forceAttribute = False, makeDirty = True):
+		"""Makes sure that the given variable exists in the given section.
+
+		section (str) - Which section to ensure 'variable' for
+			- If list: Will ensure all given sections have 'variable'
+			- If dict: Will ignore 'variable' and 'value'
+
+		variable (str) - Which variable to ensure
+			- If list: Will ensure all given variables
+			- If dict: Will ignore 'value' and use the key as 'variable' and the value as 'value'
+
+		value (any) - The default value that 'variable' should have if it does not exist
+		comment (str) - Optional comment string for 'variable'
+
+		Example Input: ensure("containers", "label", value = False)
+		Example Input: ensure("containers", {"label": False})
+		Example Input: ensure({"containers": {"label": False}})
+		"""
+
+		for sectionCatalogue in self.ensure_container(section):
+			for _section, variableCatalogue in self.ensure_dict(sectionCatalogue, variable).items():
+				if (not self.has_section(_section)):
+					self.contents[_section] = {}
+
+				for _variableCatalogue in self.ensure_container(variableCatalogue):
+					for _variable, _value in self.ensure_dict(_variableCatalogue, value).items():
+
+						if (not self.has_setting(_variable, _section)):
+							if (makeDirty):
+								self.dirty = True
+							if (comment):
+								yield _section, _variable, {"value": _value, "comment": comment}
+							elif (forceAttribute):
+								yield _section, _variable, {"value": _value}
+							else:
+								yield _section, _variable, {_value}
+
+	@abc.abstractmethod
+	def load(self, *args, **kwargs):
+		pass
+
+	@abc.abstractmethod
+	def load_override(self, *args, **kwargs):
+		pass
+
+	@abc.abstractmethod
+	def save(self, *args, **kwargs):
+		pass
+
+	@abc.abstractmethod
+	def save_override(self, *args, **kwargs):
+		pass
+
+	@abc.abstractmethod
+	def ensure(self, *args, **kwargs):
+		pass
+
+	def get(self, section, setting, default = None):
+		"""Returns the value of the given setting in the given section.
+
+		Example Input: get("lorem", "ipsum")
+		"""
+
+		value = self.contents[section][setting]
+		if (isinstance(value, dict)):
+			return value.get("value", default)
+		return value
 
 	def set(self, contents = None, update = True, makeDirty = True):
 		"""Adds a section to the internal contents.
@@ -3432,11 +3594,11 @@ class JSON_Aid(Base):
 			- If False: Will replace nested dictionaries
 			- If None: Will replace entire self.contents
 
-		Example Input: setContents()
-		Example Input: setContents({"lorem": 1})
-		Example Input: setContents({"ipsum": {"dolor": 4}})
-		Example Input: setContents({"ipsum": {"dolor": 5}}, update = False)
-		Example Input: setContents({"lorem": 1, "ipsum": {"dolor": 2, "sit": 3}}, update = None)
+		Example Input: set()
+		Example Input: set({"lorem": 1})
+		Example Input: set({"ipsum": {"dolor": 4}})
+		Example Input: set({"ipsum": {"dolor": 5}}, update = False)
+		Example Input: set({"lorem": 1, "ipsum": {"dolor": 2, "sit": 3}}, update = None)
 		"""
 
 		contents = contents or {}
@@ -3448,38 +3610,10 @@ class JSON_Aid(Base):
 		elif (not update):
 			self.contents.update(contents)
 		else:
-			Utilities.common.nestedUpdate(self.contents, contents)
+			MyUtilities.common.nestedUpdate(self.contents, contents)
 
 		if (makeDirty):
 			self.dirty = True
-
-	def ensure(self, section, variable, value = None, comment = None, makeDirty = True):
-		"""Makes sure that the given variable exists in the given section.
-
-		section (str) - Which section to ensure 'variable' for
-			- If list: Will ensure all given sections have 'variable'
-
-		variable (str) - Which variable to ensure
-			- If list: Will ensure all given variables
-
-		value (any) - The default value that 'variable' should have if it does not exist
-		comment (str) - Optional comment string for 'variable'
-
-		Example Input: ensure("containers", "label", value = False)
-		"""
-
-		for _section in self.ensure_container(section):
-			if (not self.has_section(_section)):
-				self.contents[_section] = {}
-
-			for _variable in self.ensure_container(variable):
-				if (not self.has_setting(_variable, _section)):
-					if (makeDirty):
-						self.dirty = True
-					if (comment):
-						self.contents[_section][_variable] = {"value": value, "comment": comment}
-					else:
-						self.contents[_section][_variable] = value
 
 	def apply(self, handle, section, include = None, exclude = None, handleTypes = None):
 		"""Places default values into the supplied handle.
@@ -3526,6 +3660,7 @@ class JSON_Aid(Base):
 			
 			if (_section not in catalogue):
 				print("@apply", f"{_section} does not exist in catalogue\n  -- keys: {tuple(catalogue.keys())}")
+				raise NotImplementedError()
 				return
 
 			for variable, _catalogue in catalogue[_section].items():
@@ -3595,7 +3730,7 @@ class JSON_Aid(Base):
 
 		return tuple(key for key, catalogue in self.contents.items() if (variable in catalogue.keys()))
 
-	def getSettings(self, section = None):
+	def getSettings(self, section = None, valuesAsSet = False):
 		"""Returns a list of existing settings for the given section.
 
 		section (str) - What section to write this setting in
@@ -3606,22 +3741,292 @@ class JSON_Aid(Base):
 		Example Input: getSettings("AutoSave")
 		"""
 
-		return tuple(variable for key in (self.ensure_container(section) or self.contents.keys()) for variable in self.contents[key].keys())
+		if (valuesAsSet):
+			container = set
+		else:
+			container = tuple
+
+		return container(variable for key in (self.ensure_container(section) or self.contents.keys()) for variable in self.contents[key].keys())
+
+class JSON_Aid(Config_Base):
+	"""Utility API for json scripts.
+
+	Use: https://martin-thoma.com/configuration-files-in-python/#json
+	"""
+
+	def __init__(self, default_filePath = None, **kwargs):
+		"""
+		Example Input: JSON_Aid()
+		"""
+
+		super().__init__(default_filePath = default_filePath or "settings.json", defaultFileExtension = "json", **kwargs)
+
+	def load(self, *args, **kwargs):
+		"""Loads the json file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load()
+		Example Input: load("database/settings_user.json")
+		"""
+
+		with self._load(*args, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				self.contents = json.load(fileHandle) or {}
+			
+		return self.contents
+
+	def load_override(self, *args, **kwargs):
+		"""Loads the override json file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load_override()
+		Example Input: load_override("database/settings_user_override.json")
+		"""
+
+		with self._load_override(*args, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				self.contents_override = json.load(fileHandle) or {}
+
+	def save(self, *args, **kwargs):
+		"""Saves changes to json file.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		ifDirty (bool) - Determines if the file should be saved only if changes have been made
+
+		Example Input: save()
+		Example Input: save("database/settings_user.json")
+		"""
+
+		with self._save(*args, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				json.dump(self.contents or None, fileHandle, indent = "\t")
+
+	def save_override(self, *args, base = None, **kwargs):
+		"""Saves changes to json file.
+		Note: Only looks at changes and additions, not removals.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		Example Input: save_override()
+		Example Input: save_override("database/settings_user_override.json")
+		"""
+
+		if (base is None):
+			with open(self.filePath_lastLoad) as fileHandle:
+				base = json.load(fileHandle) or {}
+
+		with self._save_override(*args, base = base, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				json.dump(self.contents_override or None, fileHandle, indent = "\t")
+
+		return True
+
+	def ensure(self, *args, saveToOverride = None, **kwargs):
+		"""Makes sure that the given variable exists in the given section.
+
+		Example Input: ensure("containers", "label", value = False)
+		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
+		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
+		"""
+		global newOpen
+
+		if (saveToOverride is None):
+			for section, variable, value in self._ensure(*args, **kwargs):
+				self.contents[section][variable] = value
+			return True
+
+		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
+		with open(filePath) as fileHandle:
+			base = json.load(fileHandle) or {}
+
+		changed = False
+		for section, variable, value in self._ensure(*args, **kwargs):
+			self.contents[section][variable] = value
+			changed = True
+
+			if (section not in base):
+				base[section] = {}
+			base[section][variable] = value
+
+		if (changed):
+			with newOpen(filePath) as fileHandle:
+				json.dump(base or None, fileHandle, indent = "\t")
+
+		return True
+
+class YAML_Aid(Config_Base):
+	"""Utility API for yaml scripts.
+
+	Use: https://pyyaml.org/wiki/PyYAMLDocumentation
+	Use: https://martin-thoma.com/configuration-files-in-python/#yaml
+	"""
+
+	def __init__(self, default_filePath = None, **kwargs):
+		"""
+		Example Input: YAML_Aid()
+		"""
+
+		super().__init__(default_filePath = default_filePath or "settings.yaml", defaultFileExtension = "yaml", **kwargs)
+
+	def load(self, *args, **kwargs):
+		"""Loads the yaml file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load()
+		Example Input: load("database/settings_user.yaml")
+		"""
+
+		with self._load(*args, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				self.contents = yaml.load(fileHandle) or {}
+			
+		return self.contents
+
+	def load_override(self, *args, **kwargs):
+		"""Loads the override yaml file.
+
+		filePath (str) - Where to load the config file from
+			- If None: Will use the default file path
+
+		Example Input: load_override()
+		Example Input: load_override("database/settings_user_override.yaml")
+		"""
+
+		with self._load_override(*args, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				self.contents_override = yaml.load(fileHandle) or {}
+
+	def save(self, *args, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
+		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
+		"""Saves changes to yaml file.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		ifDirty (bool) - Determines if the file should be saved only if changes have been made
+
+		Example Input: save()
+		Example Input: save("database/settings_user.yaml")
+		"""
+
+		with self._save(*args, overrideKwargs = {"explicit_start": explicit_start, "width": width, "indent": indent, 
+			"canonical": canonical, "default_flow_style": default_flow_style}, **kwargs) as fileHandle:
+
+			if (fileHandle is not None):
+				yaml.dump(self.contents or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
+					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
+					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
+
+	def save_override(self, *args, base = None, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
+		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
+		"""Saves changes to yaml file.
+		Note: Only looks at changes and additions, not removals.
+
+		filePath (str) - Where to save the config file to
+			- If None: Will use the default file path
+
+		Example Input: save_override()
+		Example Input: save_override("database/settings_user_override.yaml")
+		"""
+
+		if (base is None):
+			with open(self.filePath_lastLoad) as fileHandle:
+				base = yaml.load(fileHandle) or {}
+
+		with self._save_override(*args, base = base, **kwargs) as fileHandle:
+			if (fileHandle is not None):
+				yaml.dump(self.contents_override or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
+					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
+					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
+
+		return True
+
+	def ensure(self, *args, saveToOverride = None, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
+		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
+		"""Makes sure that the given variable exists in the given section.
+
+		Example Input: ensure("containers", "label", value = False)
+		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
+		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
+		"""
+
+		global newOpen
+
+		if (saveToOverride is None):
+			for section, variable, value in self._ensure(*args, **kwargs):
+				self.contents[section][variable] = value
+			return True
+
+		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
+		with open(filePath) as fileHandle:
+			base = yaml.load(fileHandle) or {}
+
+		changed = False
+		for section, variable, value in self._ensure(*args, **kwargs):
+			self.contents[section][variable] = value
+			changed = True
+
+			if (section not in base):
+				base[section] = {}
+			base[section][variable] = value
+
+		if (changed):
+			with newOpen(filePath) as fileHandle:
+				yaml.dump(base or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
+					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
+					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
+
+		return True
 
 def quiet(*args):
 	pass
 	print(*args)
 
 def sandbox():
+	def test_yaml():
+		class Test(): pass
+		test_1 = Test()
+		test_2 = Test()
+
+		# yaml_api = build_yaml(default_filePath = "test/settings.yaml", forceExists = True)
+		# print(yaml_api)
+
+		# yaml_api = build_yaml(default_filePath = "M:/Settings/default_user.yaml", override = {"GUI_Manager": {"startup_window": "settings"}})
+		yaml_api = build_yaml(default_filePath = "M:/Settings/default_user.yaml", override = "M:/Settings/temp_default_user.yaml", overrideIsSave = True)
+		yaml_api.apply(test_1, "GUI_Manager", handleTypes = Test)
+		yaml_api.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
+		yaml_api.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
+
+		quiet(vars(test_1))
+		quiet(vars(test_2))
+		quiet(yaml_api.getSettings())
+		quiet(yaml_api.getSettings("Users"))
+		quiet(yaml_api.getSections(variable = "debugging_default"))
+
+		yaml_api.set({"GUI_Manager": {"startup_window": "main"}})
+		yaml_api.save()
+
 	def test_json():
 		class Test(): pass
 		test_1 = Test()
 		test_2 = Test()
 
-		# json_API = build_json(default_filePath = "H:/Python/Material_Tracker/database/settings_default.json", override = {"GUI_Manager": {"startup_window": "settings"}})
-		json_API = build_json(default_filePath = "H:/Python/Material_Tracker/database/settings_default.json", override = "H:/Python/Material_Tracker/database/temp_settings_user.json", overrideIsSave = True)
+		# json_API = build_json(default_filePath = "M:/Settings/default_user.json", override = {"GUI_Manager": {"startup_window": "settings"}})
+		json_API = build_json(default_filePath = "M:/Settings/default_user.json", override = "M:/Settings/temp_default_user.json", overrideIsSave = True)
 		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
-		json_API.apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
+		json_API.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
 		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
 
 		quiet(vars(test_1))
@@ -3646,7 +4051,7 @@ def sandbox():
 		# 			quiet(section, key, value)
 
 		user = os.environ.get('username')
-		config_API = build_configuration("H:/Python/Material_Tracker/database/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
+		config_API = build_configuration("M:/Settings/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
 
 		value = config_API.get("startup_user")
 		print(value, type(value))
@@ -3659,9 +4064,9 @@ def sandbox():
 
 	def test_sqlite():
 		database_API = build()
-		# database_API.openDatabase(None, "H:/Python/Material_Tracker/database/schema.py") 
-		# database_API.openDatabase("test/test_map_example.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
-		# database_API.openDatabase("H:/Python/Material_Tracker/database/data.db", "H:/Python/Material_Tracker/database/schema.py", openAlembic = False)
+		# database_API.openDatabase(None, "M:/Schema/main/schema_main.py") 
+		# database_API.openDatabase("test/test_map_example.db", "M:/Schema/main/schema_main.py", openAlembic = False)
+		# database_API.openDatabase("M:/Settings/data.db", "M:/Schema/main/schema_main.py", openAlembic = False)
 		database_API.openDatabase(None, "M:/Schema/main/schema_main.py", openAlembic = False)
 		database_API.removeRelation()
 		database_API.createRelation()
@@ -3908,10 +4313,11 @@ def sandbox():
 		# database_API.checkSchema()
 
 	# test_json()
+	test_yaml()
 	# test_config()
 	# test_sqlite()
 	# test_access()
-	test_mysql()
+	# test_mysql()
 
 def main():
 	"""The main program controller."""
