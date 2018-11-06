@@ -2819,8 +2819,9 @@ class Configuration(Base):
 	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
 	"""
 
-	def __init__(self, default_filePath = None, default_values = None, default_section = None, forceExists = False,
-		allowNone = True, interpolation = True, valid_section = None, readOnly = False, knownTypes = None, knownTypesSection = "knownTypes"):
+	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False,
+		allowNone = True, interpolation = True, valid_section = None, readOnly = False, 
+		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
 		"""
 
 		allowNone (bool) - Determines what happens if a setting does not have a set value
@@ -2867,6 +2868,7 @@ class Configuration(Base):
 
 		# self.config.optionxform = str
 
+		self.knownTypeDefault = knownTypeDefault or "_default_"
 		self.knownTypesSection = knownTypesSection or None
 		self.knownTypes = knownTypes or {}
 		self.readOnly = readOnly
@@ -2937,15 +2939,49 @@ class Configuration(Base):
 			return dict(self.config)
 		return {key: value for key, value in self.items()}
 
-	def check_invalidSection(self, section, raiseError = True, valid_section = NULL):
+	def check_invalidSection(self, section, *, raiseError = True, valid_section = NULL):
 		if (valid_section is NULL):
 			valid_section = self.valid_section
-		if ((valid_section is not None) and (section not in valid_section) and (not self.has_section(section))):
+		if ((valid_section is not None) and (section not in valid_section) and (not self.has_section(section, valid_section = None))):
 			if (raiseError):
 				raise InvalidSectionError(self, section)
 			return True
 
-	def get(self, variable = None, section = None, dataType = None, default_values = None, include_defaults = True,
+	def _getType(self, variable, section = None, *, dataType = None):
+		"""Returns what type to use for the given variable.
+
+		Example Input: _getType("delay")
+		"""
+
+		if (dataType is None):
+			section = section or self.default_section
+			check_section = False
+			if ((self.knownTypesSection is not None) and (self.knownTypesSection in self.config.sections())):
+				if (self.has_setting(variable, self.knownTypesSection)):
+					function = self.dataType_catalogue.get(self.config[self.knownTypesSection][variable], None)
+					if (function is not None):
+						return function
+				check_section = True
+
+			if ((section in self.knownTypes) and (variable in self.knownTypes[section])):
+				return self.dataType_catalogue[self.knownTypes[section][variable]]
+
+			default_section = self.config.default_section
+			if ((default_section in self.knownTypes) and (variable in self.knownTypes[default_section])):
+				return self.dataType_catalogue[self.knownTypes[default_section][variable]]
+
+			if (variable in self.knownTypes):
+				return self.dataType_catalogue[self.knownTypes[variable]]
+
+
+			if (check_section and self.has_setting(self.knownTypeDefault, self.knownTypesSection)):
+				function = self.dataType_catalogue.get(self.config[self.knownTypesSection][self.knownTypeDefault], None)
+				if (function is not None):
+					return function
+
+		return self.dataType_catalogue[dataType]
+
+	def get(self, variable = None, section = None, *, dataType = None, default_values = None, include_defaults = True,
 		fallback = configparser._UNSET, raw = False, forceSection = False, forceSetting = False, valid_section = NULL):
 		"""Returns a setting from the given section.
 
@@ -2989,30 +3025,6 @@ class Configuration(Base):
 		Example Input: get(include_defaults = False)
 		"""
 
-		def getFunction(section, variable):
-			nonlocal self, dataType
-
-			if (dataType is None):
-				if ((self.knownTypesSection is not None) and (self.knownTypesSection in self.config.sections())):
-					if (self.has_setting(variable, self.knownTypesSection)):
-						function = self.dataType_catalogue.get(self.config[self.knownTypesSection][variable], None)
-						if (function is not None):
-							return function
-
-				if ((section in self.knownTypes) and (variable in self.knownTypes[section])):
-					return self.dataType_catalogue[self.knownTypes[section][variable]]
-
-				default_section = self.config.default_section
-				if ((default_section in self.knownTypes) and (variable in self.knownTypes[default_section])):
-					return self.dataType_catalogue[self.knownTypes[default_section][variable]]
-
-				if (variable in self.knownTypes):
-					return self.dataType_catalogue[self.knownTypes[variable]]
-
-			return self.dataType_catalogue[dataType]
-
-		##################################
-
 		section = section or self.default_section
 		self.check_invalidSection(section, valid_section = valid_section)
 		if (not self.has_section(section)):
@@ -3046,7 +3058,7 @@ class Configuration(Base):
 				return
 			return next(iter(answer.values()))
 
-		function = getFunction(section, variable)
+		function = self._getType(variable, section, dataType = dataType)
 
 		try:
 			return function(section, variable, vars = default_values or {}, raw = raw, fallback = fallback)
@@ -3055,7 +3067,7 @@ class Configuration(Base):
 			print("@Configuration.get", error)
 			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
 
-	def set(self, variable, value = None, section = None, valid_section = NULL):
+	def set(self, variable, value = None, section = None, *, valid_section = NULL):
 		"""Adds a setting to the given section.
 
 		variable (str) - What setting to get
@@ -3099,7 +3111,7 @@ class Configuration(Base):
 		else:
 			self.config.set(section, variable, f"{value}")
 
-	def load(self, filePath = None, valid_section = NULL, forceExists = False):
+	def load(self, filePath = None, *, valid_section = NULL, forceExists = False):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
@@ -3147,7 +3159,7 @@ class Configuration(Base):
 		with newOpen(filePath or self.default_filePath) as config_file:
 			self.config.write(config_file)
 
-	def has_section(self, section = None, valid_section = NULL):
+	def has_section(self, section = None, *, valid_section = NULL):
 		"""Returns True if the section exists in the config file, otherwise returns False.
 
 		section (str) - What section to write this setting in
@@ -3162,13 +3174,9 @@ class Configuration(Base):
 		if (section == self.config.default_section):
 			return True
 
-		if (valid_section is NULL):
-			valid_section = self.valid_section
-		if (valid_section is None):
-			return self.config.has_section(section)
-		return section in self.getSections(valid_section = valid_section)
+		return section in self.getSections(valid_section = valid_section, skip_knownTypes = False)
 
-	def has_setting(self, variable, section = None, checkDefault = False, valid_section = NULL):
+	def has_setting(self, variable, section = None, *, checkDefault = False, valid_section = NULL):
 		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
 
 		section (str) - What section to write this setting in
@@ -3190,7 +3198,7 @@ class Configuration(Base):
 		else:
 			return variable in self.config._sections.get(section, ())
 
-	def remove_section(self, section = None, valid_section = NULL):
+	def remove_section(self, section = None, *, valid_section = NULL):
 		"""Removes a section.
 
 		section (str) - What section to write this setting in
@@ -3206,7 +3214,7 @@ class Configuration(Base):
 
 		self.config.remove_section(section or self.default_section)
 
-	def remove_setting(self, variable, section = None, valid_section = NULL):
+	def remove_setting(self, variable, section = None, *, valid_section = NULL):
 		"""Removes a setting from the given section.
 
 		section (str) - What section to write this setting in
@@ -3222,18 +3230,27 @@ class Configuration(Base):
 
 		self.config.remove_option(section or self.default_section, variable)
 
-	def getSections(self, valid_section = NULL):
+	def getSections(self, *, valid_section = NULL, skip_knownTypes = True):
 		"""Returns a list of existing sections.
 
 		Example Input: getSections()
 		"""
 
-		if (valid_section is NULL):
-			valid_section = self.valid_section
+		def yieldSection():
+			nonlocal self, valid_section, skip_knownTypes
 
-		if (valid_section is None):
-			return self.config.sections()
-		return (section for section in self.config.sections() if (section in valid_section))
+			for section in self.config.sections():
+				if (self.check_invalidSection(section, raiseError = False, valid_section = valid_section)):
+					continue
+
+				if (skip_knownTypes and (section == self.knownTypesSection)):
+					continue
+
+				yield section
+
+		###################################
+
+		return tuple(yieldSection())
 
 	def getDefaults(self):
 		"""Returns the defaults that will be used if a setting does not exist.
@@ -3256,7 +3273,7 @@ class Configuration(Base):
 
 		self.ConfigParser.BOOLEAN_STATES.update({value: state})
 
-	def set_validSection(self, valid_section):
+	def set_validSection(self, valid_section = None):
 		if (valid_section is None):
 			self.valid_section = None
 		else:
