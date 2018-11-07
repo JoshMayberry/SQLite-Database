@@ -57,11 +57,13 @@ sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
 #Required Modules
 ##py -m pip install
+	# pyyaml
 	# pyodbc
 	# alembic
 	# unidecode
-	# sqlalchemy
 	# cachetools
+	# sqlalchemy
+	# sqlalchemy_utils
 
 	# pynsist
 	# wxPython
@@ -2850,7 +2852,7 @@ class Configuration(Base):
 		self.default_filePath = default_filePath or "settings.ini"
 
 		if (interpolation):
-			interpolation = configparser.ExtendedInterpolation()
+			interpolation = self.MyExtendedInterpolation()
 		elif (interpolation is not None):
 			interpolation = configparser.BasicInterpolation()
 
@@ -3287,6 +3289,71 @@ class Configuration(Base):
 	converters = {
 		"datetime": convert_datetime,
 	}
+
+	#Interpolators
+	class MyExtendedInterpolation(configparser.ExtendedInterpolation):
+		"""Modified ExtendedInterpolation from configparser.py"""
+
+		def _interpolate_some(self, parser, option, accum, rest, section, mapping, depth):
+			"""The default ExtendedInterpolation does not account for default values in nested interpolations.
+			ie: The following does not work when get() is given the kwargs 'section = "debugging"' and 'vars = {"filePath_versionDir": "C:/"}').
+				[admin]
+				alembicPath = ${filePath_versionDir}/Schema/main/
+
+				[debugging]
+				alembicPath = ${admin:alembicPath}
+			"""
+
+			rawval = parser.get(section, option, raw = True, fallback = rest)
+			if (depth > configparser.MAX_INTERPOLATION_DEPTH):
+				raise InterpolationDepthError(option, section, rawval)
+			while rest:
+				p = rest.find("$")
+				if p < 0:
+					accum.append(rest)
+					return
+				if p > 0:
+					accum.append(rest[:p])
+					rest = rest[p:]
+				# p is no longer used
+				c = rest[1:2]
+				if c == "$":
+					accum.append("$")
+					rest = rest[2:]
+				elif c == "{":
+					m = self._KEYCRE.match(rest)
+					if m is None:
+						raise InterpolationSyntaxError(option, section,
+							"bad interpolation variable reference %r" % rest)
+					path = m.group(1).split(':')
+					rest = rest[m.end():]
+					sect = section
+					opt = option
+					try:
+						if (len(path) is 1):
+							opt = parser.optionxform(path[0])
+							v = mapping[opt]
+
+						elif (len(path) is 2):
+							sect = path[0]
+							opt = parser.optionxform(path[1])
+							v = parser.get(sect, opt, raw = True)
+
+						else:
+							raise configparser.InterpolationSyntaxError(option, section, "More than one ':' found: %r" % (rest,))
+
+					except (KeyError, NoSectionError, NoOptionError):
+						raise configparser.InterpolationMissingOptionError(option, section, rawval, ":".join(path)) from None
+					
+					if ("$" in v):
+						self._interpolate_some(parser, opt, accum, v, sect, {**mapping, **dict(parser.items(sect, raw = True))}, depth + 1) # <- This was the only change
+					else:
+						accum.append(v)
+				else:
+					raise InterpolationSyntaxError(
+						option, section,
+						"'$' must be followed by '$' or '{', "
+						"found: %r" % (rest,))
 
 class Config_Base(Base, metaclass = abc.ABCMeta):
 	"""Utility API for json and yaml scripts."""
