@@ -55,6 +55,8 @@ import Utilities as MyUtilities
 
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
+NULL = MyUtilities.common.NULL
+
 #Required Modules
 ##py -m pip install
 	# pyyaml
@@ -77,6 +79,9 @@ class ReadOnlyError(Exception):
 	pass
 
 class InvalidSectionError(Exception):
+	pass
+
+class ValueExistsError(Exception):
 	pass
 
 #Iterators
@@ -216,7 +221,7 @@ sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
 sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
 
 #Utility Classes
-class Base(MyUtilities.common.Ensure):
+class Base(MyUtilities.common.Ensure, MyUtilities.common.CommonFunctions):
 	pass
 
 class Base_Database(Base):
@@ -258,6 +263,15 @@ class Base_Database(Base):
 		bin: sqlalchemy.LargeBinary(), "bin": sqlalchemy.LargeBinary(), "blob": sqlalchemy.LargeBinary(), "pickle": sqlalchemy.PickleType(),
 	}
 
+	dataType_numbers = (
+		dataType_catalogue[int], 
+		dataType_catalogue[bool].__class__, 
+		dataType_catalogue["decimal"].__class__, 
+		dataType_catalogue[float].__class__, 
+		dataType_catalogue["bigint"], 
+		dataType_catalogue["smallint"], 
+	)
+
 	@classmethod
 	def getPrimaryKey(cls, relationHandle = None):
 		if (relationHandle is None):
@@ -265,7 +279,7 @@ class Base_Database(Base):
 		return sqlalchemy.inspection.inspect(relationHandle).primary_key[0].name
 
 	@classmethod
-	def schema_column(cls, dataType = int, default = None, 
+	def schema_column(cls, dataType = int, default = None, used = None,
 		system = False, quote = None, docstring = None, comment = None, info = None, 
 		foreignKey = None, foreign_update = True, foreign_delete = False, foreign_info = None,
 		unique = None, notNull = None, autoIncrement = None, primary = None):
@@ -299,6 +313,7 @@ class Base_Database(Base):
 		unique (bool) - If this column must be unique
 		notNull (bool) - If this column cannot be NULL
 		autoIncrement (bool) - If this column should have an unused and unique integer as a value
+		used (handle) - What table.column contains a list of used items that should not be used again
 		primary (bool) - Determines if this is a primary key
 			- If True: If this is a primary key
 			~ Defaults 'unique' and 'notNull' to True, but these can be overridden by their parameters
@@ -355,11 +370,20 @@ class Base_Database(Base):
 		if (comment):
 			columnKwargs["comment"] = comment
 
-		return sqlalchemy.Column(dataType, *columnItems, **columnKwargs)
+		if ((used is not None) and columnKwargs["unique"]):
+			columnKwargs["used"] = used
+
+		return MyColumn(dataType, *columnItems, **columnKwargs)
 
 	@classmethod
 	def printSQL(cls, query):
 		print(sqlalchemy_utils.functions.render_statement(query))
+
+class MyColumn(sqlalchemy.Column):
+	def __init__(self, *args, used = None, **kwargs):
+		super().__init__(*args, **kwargs)
+
+		self._used = used 
 
 class Utility_Base(Base_Database):
 	#Context Managers
@@ -457,21 +481,143 @@ class Schema_Base(Base_Database):
 	defaultRows = ()
 
 	def __init__(self, kwargs = {}):
-		"""Automatically creates tuples for the provided relations if one does not exist.
-		Special thanks to shamittomar for how to do custom auto-incrementing on https://stackoverflow.com/questions/5016907/mysql-find-smallest-unique-id-available/5016969#5016969
-		"""
+		"""Automatically creates tuples for the provided relations if one does not exist."""
 
 		session = kwargs.pop("session", None)
 
 		#Increment primary key to lowest unique value
 		index = self.getPrimaryKey()
 		if (index not in kwargs):
-			if (session is not None):
-				#Changes must be applied to increment the primary key properly
-				session.commit()
+			kwargs[index] = self.uniqueMinimum(relation = self.__tablename__, attribute = index, session = session)
 
-			answer = self.metadata.bind.execute(f"SELECT MIN(t1.{index} + 1) FROM {self.__tablename__} as t1 LEFT JOIN {self.__tablename__} as t2 ON t1.{index} + 1 = t2.{index} WHERE t2.{index} is NULL").first() or (None,)
-			kwargs[index] = answer[0] or 1
+		if (self.checkUsed(catalogue = kwargs, session = session, autoAdd = True, returnOnPass = True, useForFail = None)):
+			raise ValueExistsError(kwargs)
+
+	@classmethod
+	def uniqueMinimum(cls, relation = None, attribute = None, *, session = None, minimum = None, default = 1, forceAttribute = False):
+		"""Returns the lowest unique value that is greater than the first entry on the table.
+		Special thanks to shamittomar for how to do custom auto-incrementing on https://stackoverflow.com/questions/5016907/mysql-find-smallest-unique-id-available/5016969#5016969
+
+		relation (str) - Which relation (table) to look in
+			- If None: Will use the relation belonging to this class
+
+		attribute (str) - Which attribute (column) to look in
+			- If None: Will use the primary column
+
+		minimum (int) - What value any answer must be greater than or equal to
+			- If None: Will not apply a minimum
+
+		default (int) - What value to start at if the relation is empty
+
+		Example Input: uniqueMinimum()
+		Example Input: uniqueMinimum(relation = "Dictionary")
+		Example Input: uniqueMinimum(relation = "Dictionary", attribute = "pageNumber")
+		"""
+
+		relation = relation or cls.__tablename__
+		attribute = attribute or cls.getPrimaryKey()
+
+		if (session is not None):
+			#Changes must be applied to account for recently added items
+			session.commit()
+
+		answer = int((cls.metadata.bind.execute(f"SELECT MIN(t1.{attribute} + 1) FROM {relation} as t1 LEFT JOIN {relation} as t2 ON t1.{attribute} + 1 = t2.{attribute} WHERE ((t2.{attribute} is NULL) AND (t1.{attribute} > {minimum or 0}))").first() or (None,))[0] or default)
+		
+		if ((minimum is not None) and (answer < minimum)):
+			answer = minimum
+
+		if (forceAttribute):
+			return {attribute: answer}
+		return answer
+
+	@classmethod
+	def checkExists(cls, relation = None, attribute = None, value = None, *, session = None):
+		"""Returns if the value exists or not.
+		Special thanks to Laurent W for how to quickly check if a row exists on https://stackoverflow.com/questions/1676551/best-way-to-test-if-a-row-exists-in-a-mysql-table/10688065#10688065
+
+		relation (str) - Which relation (table) to look in
+			- If None: Will use the relation belonging to this class
+
+		attribute (str) - Which attribute (column) to look in
+			- If None: Will use the primary column
+
+		value (any) - What value to look for
+
+		Example Input: checkExists()
+		Example Input: checkExists(relation = "Dictionary", attribute = "word", value = "lorem")
+		"""
+
+		relation = relation or cls.__tablename__
+		attribute = attribute or cls.getPrimaryKey()
+
+		if (session is not None):
+			#Changes must be applied to account for recently added items
+			session.commit()
+
+		return cls.metadata.bind.execute(f"SELECT EXISTS(SELECT 1 FROM {relation} WHERE ({attribute} = %s) LIMIT 1)", (value,)).first()[0]
+
+	@classmethod
+	def checkUsed(cls, catalogue = None, *, session = None, autoAdd = False, forceAttribute = False, 
+		returnOnPass = False, returnOnFail = False, useForPass = True, useForFail = False, **kwargs):
+		"""Returns if the given value is used or not.
+
+		catalogue (dict) - {attribute (str): value (any)}
+			- If not dict or None for key: Will check all attributes for the given value
+
+		autoAdd (bool) - Determines if the given value is automatically added to any linked catalogues
+		returnOnPass (bool) - Determines if True should be returned immidiately after a success
+		returnOnFail (bool) - Determines if False should be returned immidiately after a failure
+		
+		useForPass (any) - What should be used to signify a success
+			- If None: Will not record
+		useForFail (any) - What should be used to signify a failure
+			- If None: Will not record
+
+		forceAttribute (bool) - Determines if the attribute is returned in the answer
+			- If True: Answers will always contain the attribute
+			- If False: Answers will omit the attribute if there is only one in the answer
+
+		Example Input: checkUsed(1234)
+		Example Input: checkUsed({None: 1234})
+		Example Input: checkUsed({"label": 1234})
+		Example Input: checkUsed(kwargs, autoAdd = True)
+		"""
+
+		if (not cls.usedCatalogue):
+			if (forceAttribute):
+				return {}
+			return
+
+		answer = {}
+		catalogue = cls.ensure_dict(catalogue, default = None, useAsKey = False)
+		for attribute, usedColumn in cls.usedCatalogue.items():
+			if (attribute in catalogue):
+				value = catalogue[attribute]
+			elif (None in catalogue):
+				value = catalogue[None]
+			else:
+				continue
+
+			index = usedColumn.getPrimaryKey()
+			if (cls.checkExists(relation = usedColumn.__tablename__, attribute = index, value = value, session = session, **kwargs)):
+				if (returnOnPass):
+					return useForPass
+				elif (useForPass is not None):
+					answer[attribute] = useForPass
+			else:
+				if (returnOnFail):
+					return useForFail
+				elif (useForPass is not None):
+					answer[attribute] = useForFail
+
+			if (autoAdd):
+				with cls.makeSession() as session:
+					session.add(usedColumn(**{index: value}))
+
+		if (forceAttribute or (len(answer) is not 1)):
+			return answer
+		else:
+			return next(iter(answer.values()), {})
 
 	#Context Managers
 	@classmethod
@@ -517,12 +663,21 @@ class Schema_Base(Base_Database):
 
 	#Virtual Functions
 	@classmethod
-	def reset(cls):
+	def reset(cls, *, override_resetBypass = False):
 		"""Clears all rows and places in default ones."""
 
-		with cls.makeSession() as session:
+		if (cls.defaultRows is NULL):
+			if (not override_resetBypass):
+				return
+			defaultRows = ()
+		else:
+			defaultRows = cls.defaultRows
+
+		with cls.makeSession() as session:				
 			session.query(cls).delete()
-			for catalogue in cls.defaultRows:
+			for catalogue in cls.ensure_container(defaultRows):
+				if (not catalogue):
+					continue
 				child = cls(**catalogue, session = session)
 				session.add(child)
 
@@ -548,6 +703,26 @@ class Schema_Base(Base_Database):
 		for variable, newValue in values.items():
 			setattr(self, variable, newValue)
 
+class Schema_Used(Schema_Base):
+	
+	@classmethod
+	def reset(cls, *args, **kwargs):
+		"""Overridden to populate with existing values.
+		Special thanks to Eric for how to get a list of unincluded items on https://stackoverflow.com/questions/1001144/mysql-select-x-from-a-where-not-in-select-x-from-b-unexpected-result/1001180#1001180
+		"""
+
+		super().reset(*args, **kwargs)
+
+		#Find missing rows and add them
+		index = cls.getPrimaryKey()
+		with cls.makeSession() as session:	
+			for foreignHandle, attributeList in cls.usedBy.items():
+				for foreign_attribute in attributeList:
+					for result in tuple(zip(*cls.metadata.bind.execute(f"SELECT t1.{foreign_attribute} FROM {foreignHandle.__tablename__} as t1 LEFT OUTER JOIN {cls.__tablename__} as t2 ON t1.{foreign_attribute} = t2.{index} AND t2.{index} IS NOT NULL WHERE t2.{index} IS NULL"))):
+						for item in result:
+							child = cls(**{index: item}, session = session)
+							session.add(child)
+
 class Schema_AutoForeign(Schema_Base):
 	_foreignInfo = {}
 
@@ -555,6 +730,8 @@ class Schema_AutoForeign(Schema_Base):
 		"""Automatically creates tuples for the provided relations if one does not exist.
 		Special thanks to van for how to automatically add children on https://stackoverflow.com/questions/8839211/sqlalchemy-add-child-in-one-to-many-relationship
 		"""
+
+		super().__init__(kwargs = kwargs)
 
 		forcedCatalogue = {}
 		for variable, relationHandle in self.foreignKeys.items():
@@ -767,18 +944,6 @@ def build_yaml(*args, **kwargs):
 	"""Creates a YAML_Aid object with YAML notation."""
 
 	return YAML_Aid(*args, **kwargs)
-
-class Singleton():
-	"""Used to get values correctly."""
-
-	def __init__(self, label = "Singleton"):
-		self.label = label
-
-	def __repr__(self):
-		return f"{self.label}()"
-
-NULL = Singleton("NULL")
-FLAG = Singleton("FLAG")
 
 #Dialects
 sqlalchemy.dialects.registry.register("access.fixed", "forks.sqlalchemy.dialects.access.base", "AccessDialect")
@@ -1189,6 +1354,8 @@ class Database(Utility_Base):
 
 			return sql
 
+		self.dataType_catalogue["int_unsigned"] = sqlalchemy.dialects.mysql.INTEGER(unsigned = True)
+
 		old_mysql__show_create_table = sqlalchemy.dialects.mysql.base.MySQLDialect._show_create_table
 		sqlalchemy.dialects.mysql.base.MySQLDialect._show_create_table = mp_mysql__show_create_table
 
@@ -1486,7 +1653,41 @@ class Database(Utility_Base):
 
 		with self.makeConnection() as connection:
 			return yieldResult(connection.execute(command, valueList or ()))
-			
+
+	def checkUsed(self, myTuple, *, forceRelation = False, **kwargs):
+		"""Returns if the given value is used or not.
+
+		Example Input: checkUsed({"Containers": 1234})
+		Example Input: checkUsed({"Containers": {None: 1234}})
+		Example Input: checkUsed({"Containers": {"label": 1234}})
+		Example Input: checkUsed({"Containers": 1234}, forceRelation = True, forceAttribute = True)
+		"""
+
+		answer = {}
+		for relation, catalogue in myTuple.items():
+			schema = self.schema.relationCatalogue[relation]
+			answer[relation] = schema.checkUsed(catalogue, **kwargs)
+
+		if (forceRelation or (len(myTuple) > 1)):
+			return answer
+		return next(iter(answer.values()), ())
+
+	def uniqueMinimum(self, myTuple, *, forceRelation = False, **kwargs):
+		"""Returns the lowest positive unique value.
+
+		Example Input: uniqueMinimum({"Containers": "label"})
+		Example Input: uniqueMinimum({"Containers": "label"}, minimum = 10000)
+		Example Input: uniqueMinimum({"Containers": "label"}, forceRelation = True, forceAttribute = True)
+		"""
+
+		answer = {}
+		for relation, attribute in myTuple.items():
+			schema = self.schema.relationCatalogue[relation]
+			answer[relation] = schema.uniqueMinimum(relation = relation, attribute = attribute, **kwargs)
+
+		if (forceRelation or (len(myTuple) > 1)):
+			return answer
+		return next(iter(answer.values()), ())
 
 	#Configure SQL functions
 	def configureLocation(self, handle, schema, table, fromSchema = False, nextToCondition = True, nextToCondition_None = None, checkForeign = True, forceMatch = True, 
@@ -1755,11 +1956,11 @@ class Database(Utility_Base):
 
 		config = build_configuration(default_filePath = filePath, default_section = section)
 		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
-			"alembicPath", "openAlembic", "connectionType", "reset")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
+			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
-		openAlembic = False, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None,
+		openAlembic = False, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None, override_resetBypass = False,
 		port = None, host = None, user = None, password = None, echo = False,
 		resultError_replacement = None, aliasError_replacement = None):
 
@@ -1860,7 +2061,7 @@ class Database(Utility_Base):
 			if (_reset):
 				print(f"Creating Fresh Database for {fileName}")
 				self.createRelation()
-				self.resetRelation()
+				self.resetRelation(override_resetBypass = override_resetBypass)
 
 				if (self.alembic):
 					self.alembic.stamp()
@@ -1976,13 +2177,45 @@ class Database(Utility_Base):
 		else:
 			self.schema = importlib.import_module(schemaPath)
 
-		#Finish Schema
-		self.schema.relationCatalogue = {item.__name__: item for item in Schema_Base.__subclasses__() if ((item.__module__ == self.schema.__name__) and (item not in {Schema_AutoForeign}))}
-		self.schema.hasForeignCatalogue = {item.__name__: item for item in Schema_AutoForeign.__subclasses__() if (item.__module__ == self.schema.__name__)}
+		#Finish Schema Catalogues
+		self.schema.relationCatalogue = {item.__tablename__: item for item in Schema_Base.yieldSubClass(include = self.schema.__name__)}
+		self.schema.hasForeignCatalogue = {item.__tablename__: item for item in Schema_AutoForeign.yieldSubClass(include = self.schema.__name__)}
+		
+		##Prep usedByCatalogue
+		self.schema.usedByCatalogue = {}
+		for relationHandle in self.schema.relationCatalogue.values():
+			if (not issubclass(relationHandle, Schema_Used)):
+				continue
 
+			relationHandle.usedBy = collections.defaultdict(set)
+			self.schema.usedByCatalogue[relationHandle.__tablename__] = None
+
+		##Fill usedCatalogue
+		self.schema.usedCatalogue = {}
+		for relation, relationHandle in self.schema.relationCatalogue.items():
+			relationHandle.usedCatalogue = {}
+			for column, columnHandle in relationHandle.__mapper__.columns.items():
+				_used = columnHandle._used
+				if (_used is None):
+					continue
+
+				relationHandle.usedCatalogue[column] = _used
+				_used.usedBy[relationHandle].add(column)
+
+			relationHandle.usedCatalogue = {column: columnHandle._used for column, columnHandle in relationHandle.__mapper__.columns.items() if (columnHandle._used is not None)}
+			self.schema.usedCatalogue[relation] = relationHandle.usedCatalogue
+
+		##Post usedBy
+		for relation in self.schema.usedByCatalogue.keys():
+			relationHandle = self.schema.relationCatalogue[relation]
+			relationHandle.usedBy = dict(relationHandle.usedBy) #Remove defaultdict
+			self.schema.usedByCatalogue[relation] = relationHandle.usedBy
+
+		##Finalize Foreign Relations
 		for module in self.schema.hasForeignCatalogue.values():
 			module.formatForeign(self.schema.relationCatalogue)
 
+		##Record Primary Keys
 		for module in self.schema.relationCatalogue.values():
 			module._primaryKeys = tuple(attribute for attribute, columnHandle in module.__mapper__.columns.items() if (columnHandle.primary_key))
 
@@ -2035,7 +2268,7 @@ class Database(Utility_Base):
 				table.drop(self.engine)
 
 	@wrap_errorCheck()
-	def resetRelation(self, relation = None):
+	def resetRelation(self, relation = None, *, override_resetBypass = False):
 		"""Resets the relation to factory default, as described in the schema.
 
 		relation (str) - What the relation is called in the .db
@@ -2045,12 +2278,22 @@ class Database(Utility_Base):
 		Example Input: resetRelation("Users")
 		"""
 
+		def filterFunction(relationHandle):
+			nonlocal self
+
+			first = relationHandle.__tablename__ not in self.schema.hasForeignCatalogue #Do these first
+			second = issubclass(relationHandle, Schema_Used) #Do these last
+
+			return (first, second)
+
+		###############################################
+
 		if (relation is None):
-			for relationHandle in sorted(self.schema.relationCatalogue.values(), key = lambda relationHandle: relationHandle.__tablename__ not in self.schema.hasForeignCatalogue):
-				relationHandle.reset()
+			for relationHandle in sorted(self.schema.relationCatalogue.values(), key = filterFunction):
+				relationHandle.reset(override_resetBypass = override_resetBypass)
 		else:
 			relationHandle = self.schema.relationCatalogue[relation]
-			relationHandle.reset()
+			relationHandle.reset(override_resetBypass = override_resetBypass)
 
 	@wrap_errorCheck()
 	def clearRelation(self, relation = None, applyChanges = None):
@@ -2477,7 +2720,6 @@ class Database(Utility_Base):
 		Example Input: getValue({"Users": None}, {"age": 24})
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
-		# startTime = time.perf_counter()
 
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
@@ -2668,8 +2910,6 @@ class Database(Utility_Base):
 
 				results_catalogue[relation] = getResult(query)
 		
-		# print(f"@getValue.9", fromSchema, f"{time.perf_counter() - startTime:.6f}")
-
 		if (forceRelation or (len(myTuple) > 1)):
 			return results_catalogue
 		return results_catalogue[relation]
@@ -3734,13 +3974,22 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		Example Input: apply((test1, test_2), {"Settings": ("debugging_default", "debugging_enabled")}, handleTypes = Test)
 		"""
 
+		def yieldApplied():
+			nonlocal self, handle, section, handleTypes
+
+			for _handle in self.ensure_container(handle, elementTypes = handleTypes):
+				for _section in self.ensure_container(section):
+					for item in setValue(_handle, _section, self.contents):
+						yield item
+
 		def setValue(_handle, _section, catalogue):
 			nonlocal self, include, exclude
 
 			if (isinstance(_section, dict)):
 				for key, value in _section.items():
-					setValue(_handle, value, catalogue.get(key))
-				return
+					for item in setValue(_handle, value, catalogue.get(key)):
+						yield item
+				return 
 			
 			if (_section not in catalogue):
 				print("@apply", f"{_section} does not exist in catalogue\n  -- keys: {tuple(catalogue.keys())}")
@@ -3758,14 +4007,14 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 				else:
 					setattr(_handle, variable, _catalogue["value"])
 
-		#######################################################
+				yield variable
 
+		#######################################################
+		
 		include = self.ensure_container(include)
 		exclude = self.ensure_container(exclude)
 
-		for _handle in self.ensure_container(handle, elementTypes = handleTypes):
-			for _section in self.ensure_container(section):
-				setValue(_handle, _section, self.contents)
+		return tuple(yieldApplied())
 
 	def has_section(self, section = None):
 		"""Returns True if the section exists in the config file, otherwise returns False.
@@ -4087,11 +4336,11 @@ def sandbox():
 		# yaml_api = build_yaml(default_filePath = "test/settings.yaml", forceExists = True)
 		# print(yaml_api)
 
-		# yaml_api = build_yaml(default_filePath = "M:/Settings/default_user.yaml", override = {"GUI_Manager": {"startup_window": "settings"}})
-		yaml_api = build_yaml(default_filePath = "M:/Settings/default_user.yaml", override = "M:/Settings/temp_default_user.yaml", overrideIsSave = True)
-		yaml_api.apply(test_1, "GUI_Manager", handleTypes = Test)
-		yaml_api.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
-		yaml_api.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
+		# yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = {"GUI_Manager": {"startup_window": "settings"}})
+		yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = "M:/Versions/dev/Settings/temp_default_user.yaml", overrideIsSave = True)
+		quiet(yaml_api.apply(test_1, "GUI_Manager", handleTypes = Test))
+		quiet(yaml_api.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,)))
+		quiet(yaml_api.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,)))
 
 		quiet(vars(test_1))
 		quiet(vars(test_2))
@@ -4107,8 +4356,8 @@ def sandbox():
 		test_1 = Test()
 		test_2 = Test()
 
-		# json_API = build_json(default_filePath = "M:/Settings/default_user.json", override = {"GUI_Manager": {"startup_window": "settings"}})
-		json_API = build_json(default_filePath = "M:/Settings/default_user.json", override = "M:/Settings/temp_default_user.json", overrideIsSave = True)
+		# json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = {"GUI_Manager": {"startup_window": "settings"}})
+		json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = "M:/Versions/dev/Settings/temp_default_user.json", overrideIsSave = True)
 		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
 		json_API.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
 		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
@@ -4135,7 +4384,7 @@ def sandbox():
 		# 			quiet(section, key, value)
 
 		user = os.environ.get('username')
-		config_API = build_configuration("M:/Settings/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
+		config_API = build_configuration("M:/Versions/dev/Settings/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
 
 		value = config_API.get("startup_user")
 		print(value, type(value))
@@ -4150,7 +4399,7 @@ def sandbox():
 		database_API = build()
 		# database_API.openDatabase(None, "M:/Schema/main/schema_main.py") 
 		# database_API.openDatabase("test/test_map_example.db", "M:/Schema/main/schema_main.py", openAlembic = False)
-		# database_API.openDatabase("M:/Settings/data.db", "M:/Schema/main/schema_main.py", openAlembic = False)
+		# database_API.openDatabase("M:/Versions/dev/Settings/data.db", "M:/Schema/main/schema_main.py", openAlembic = False)
 		database_API.openDatabase(None, "M:/Schema/main/schema_main.py", openAlembic = False)
 		database_API.removeRelation()
 		database_API.createRelation()
@@ -4265,7 +4514,7 @@ def sandbox():
 		quiet(database_API.getValue({"tblMaterialLog": "ContainerID"}, isIn = {"ContainerID": ("1272", "1498", "2047")}, fromSchema = None))
 
 	def test_mysql():
-		database_API = build(fileName = "M:/Settings/config_mysql.ini", section = "testing", settingsKwargs = {"filePath_sharedDir": "M:"})
+		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "testing", settingsKwargs = {"filePath_sharedDir": "M:"})
 		# quiet(database_API.getRelationNames())
 
 		#Add Items
