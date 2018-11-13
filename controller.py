@@ -2498,10 +2498,9 @@ class Database(Utility_Base):
 						query = session.query(schema)
 						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
-						# print("@3", self.printSQL(query))
-						
 						if ((forceMatch is not False) and (query.count() is 0)):
 							if (forceMatch is None):
+								self.printSQL(query)
 								errorMessage = f"There is no row in {relation} that matches the criteria {attributeDict}, {nextTo}, and {locationKwargs}"
 								raise KeyError(errorMessage)
 
@@ -2779,7 +2778,9 @@ class Database(Utility_Base):
 				###################################
 
 				for result in yieldResult():
-					if ((not forceAttribute) and (len(result) <= 1)):
+					if (result is None):
+						continue
+					elif ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
 					elif (not foreignAsDict):
@@ -2837,7 +2838,9 @@ class Database(Utility_Base):
 					answer = query.all()
 
 				for result in answer:
-					if ((not forceAttribute) and (len(result) <= 1)):
+					if (result is None):
+						continue
+					elif ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
 					elif (not foreignAsDict):
@@ -4238,7 +4241,7 @@ class YAML_Aid(Config_Base):
 			if (fileHandle is not None):
 				self.contents_override = yaml.load(fileHandle) or {}
 
-	def save(self, *args, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+	def save(self, *args, explicit_start = True, explicit_end = True, width = None, indent = 4, 
 		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
 		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
 		"""Saves changes to yaml file.
@@ -4260,7 +4263,7 @@ class YAML_Aid(Config_Base):
 					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
 					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
 
-	def save_override(self, *args, base = None, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+	def save_override(self, *args, base = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
 		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
 		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
 		"""Saves changes to yaml file.
@@ -4285,7 +4288,7 @@ class YAML_Aid(Config_Base):
 
 		return True
 
-	def ensure(self, *args, saveToOverride = None, explicit_start = True, explicit_end = True, width = 50, indent = 4, 
+	def ensure(self, *args, saveToOverride = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
 		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
 		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
 		"""Makes sure that the given variable exists in the given section.
