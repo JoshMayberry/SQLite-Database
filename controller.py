@@ -514,6 +514,17 @@ class Schema_Base(Base_Database):
 		Example Input: uniqueMinimum(relation = "Dictionary", attribute = "pageNumber")
 		"""
 
+		def yieldLocation():
+			nonlocal attribute, minimum
+
+			yield f"(t2.{attribute} is NULL)"
+			yield f"(t1.{attribute} > {minimum or 0})"
+
+			for key, foreignHandle in cls.usedCatalogue.items():
+				yield f"(t1.{attribute} + 1 NOT IN (SELECT {foreignHandle.getPrimaryKey()} FROM {foreignHandle.__tablename__}))"
+
+		#################################################
+
 		relation = relation or cls.__tablename__
 		attribute = attribute or cls.getPrimaryKey()
 
@@ -521,7 +532,11 @@ class Schema_Base(Base_Database):
 			#Changes must be applied to account for recently added items
 			session.commit()
 
-		answer = int((cls.metadata.bind.execute(f"SELECT MIN(t1.{attribute} + 1) FROM {relation} as t1 LEFT JOIN {relation} as t2 ON t1.{attribute} + 1 = t2.{attribute} WHERE ((t2.{attribute} is NULL) AND (t1.{attribute} > {minimum or 0}))").first() or (None,))[0] or default)
+		command = f"SELECT MIN(t1.{attribute} + 1) FROM {relation} as t1 "
+		command += f"LEFT JOIN {relation} as t2 ON t1.{attribute} + 1 = t2.{attribute} "
+		command += f"WHERE ({' AND '.join(yieldLocation())})"
+
+		answer = int((cls.metadata.bind.execute(command).first() or (None,))[0] or default)
 		
 		if ((minimum is not None) and (answer < minimum)):
 			answer = minimum
