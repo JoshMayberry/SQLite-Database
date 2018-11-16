@@ -221,7 +221,7 @@ sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
 sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
 
 #Utility Classes
-class Base(MyUtilities.common.Ensure, MyUtilities.common.CommonFunctions):
+class Base(MyUtilities.common.EnsureFunctions, MyUtilities.common.CommonFunctions):
 	pass
 
 class Base_Database(Base):
@@ -4020,7 +4020,7 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 				if (exclude and (variable in exclude)):
 					continue
 
-				if (not isinstance(_catalogue, dict)):
+				if ((not isinstance(_catalogue, dict) or ("value" not in _catalogue))):
 					setattr(_handle, variable, _catalogue)
 				else:
 					setattr(_handle, variable, _catalogue["value"])
