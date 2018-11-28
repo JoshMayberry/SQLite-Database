@@ -546,30 +546,30 @@ class Schema_Base(Base_Database):
 		return answer
 
 	@classmethod
-	def checkExists(cls, relation = None, attribute = None, value = None, *, session = None):
+	def checkExists(cls, catalogue = None, *, session = None, forceAttribute = False):
 		"""Returns if the value exists or not.
 		Special thanks to Laurent W for how to quickly check if a row exists on https://stackoverflow.com/questions/1676551/best-way-to-test-if-a-row-exists-in-a-mysql-table/10688065#10688065
 
-		relation (str) - Which relation (table) to look in
-			- If None: Will use the relation belonging to this class
-
-		attribute (str) - Which attribute (column) to look in
-			- If None: Will use the primary column
-
-		value (any) - What value to look for
+		catalogue (dict) - {attribute (str): value (any)}
+			- If not dict or None for key: Will check all attributes for the given value
 
 		Example Input: checkExists()
-		Example Input: checkExists(relation = "Dictionary", attribute = "word", value = "lorem")
+		Example Input: checkExists({"word": "lorem"})
 		"""
-
-		relation = relation or cls.__tablename__
-		attribute = attribute or cls.getPrimaryKey()
 
 		if (session is not None):
 			#Changes must be applied to account for recently added items
 			session.commit()
 
-		return cls.metadata.bind.execute(f"SELECT EXISTS(SELECT 1 FROM {relation} WHERE ({attribute} = %s) LIMIT 1)", (value,)).first()[0]
+		answer = {}
+		for attribute, value in cls.ensure_dict(catalogue).items():
+			attribute = cls.ensure_default(attribute, default = cls.getPrimaryKey)
+			answer[attribute] = cls.metadata.bind.execute(f"SELECT EXISTS(SELECT 1 FROM {cls.__tablename__} WHERE ({attribute} = %s) LIMIT 1)", (value,)).first()[0]
+
+		if (forceAttribute or (len(answer) is not 1)):
+			return answer
+		else:
+			return next(iter(answer.values()), {})
 
 	@classmethod
 	def checkUsed(cls, catalogue = None, *, session = None, autoAdd = False, forceAttribute = False, 
@@ -614,7 +614,7 @@ class Schema_Base(Base_Database):
 				continue
 
 			index = usedColumn.getPrimaryKey()
-			if (cls.checkExists(relation = usedColumn.__tablename__, attribute = index, value = value, session = session, **kwargs)):
+			if (cls.checkExists({index: value}, session = session, **kwargs)):
 				if (returnOnPass):
 					return useForPass
 				elif (useForPass is not None):
@@ -1668,6 +1668,24 @@ class Database(Utility_Base):
 
 		with self.makeConnection() as connection:
 			return yieldResult(connection.execute(command, valueList or ()))
+
+	def checkExists(self, myTuple, *, forceRelation = False, **kwargs):
+		"""Returns if the given value currently exists or not.
+
+		Example Input: checkExists({"Containers": 1234})
+		Example Input: checkExists({"Containers": {None: 1234}})
+		Example Input: checkExists({"Containers": {"label": 1234}})
+		Example Input: checkExists({"Containers": 1234}, forceRelation = True, forceAttribute = True)
+		"""
+
+		answer = {}
+		for relation, catalogue in myTuple.items():
+			schema = self.schema.relationCatalogue[relation]
+			answer[relation] = schema.checkExists(catalogue, **kwargs)
+
+		if (forceRelation or (len(myTuple) > 1)):
+			return answer
+		return next(iter(answer.values()), ())
 
 	def checkUsed(self, myTuple, *, forceRelation = False, **kwargs):
 		"""Returns if the given value is used or not.
