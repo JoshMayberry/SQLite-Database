@@ -1,3 +1,20 @@
+import lazyLoad
+lazyLoad.load(
+	"unidecode", 
+	"importlib", 
+	"cachetools", 
+
+	"yaml", 
+	"json", 
+	"pyodbc", 
+	"alembic", 
+	"sqlite3", 
+	"sqlalchemy", 
+	"configparser", 
+	
+	"forks.pypubsub.src.pubsub", 
+) 
+
 from . import version
 __version__ = version.VERSION_STRING
 
