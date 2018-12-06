@@ -561,6 +561,7 @@ class Schema_Base(Base_Database):
 			session.commit()
 
 		answer = {}
+		assert catalogue is not None
 		for attribute, value in cls.ensure_dict(catalogue).items():
 			attribute = cls.ensure_default(attribute, default = cls.getPrimaryKey)
 			answer[attribute] = cls.metadata.bind.execute(f"SELECT EXISTS(SELECT 1 FROM {cls.__tablename__} WHERE ({attribute} = %s) LIMIT 1)", (value,)).first()[0]
@@ -603,7 +604,7 @@ class Schema_Base(Base_Database):
 			return
 
 		answer = {}
-		catalogue = cls.ensure_dict(catalogue, default = None, useAsKey = False)
+		catalogue = cls.ensure_dict(catalogue, default = None, useAsKey = False, convertNone = False)
 		for attribute, usedColumn in cls.usedCatalogue.items():
 			if (attribute in catalogue):
 				value = catalogue[attribute]
@@ -1278,14 +1279,25 @@ class Alembic(Base):
 
 			return operation.formatText(operation.command)
 
-class Database(Utility_Base):
+class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 	"""Used to create and interact with a database.
 	To expand the functionality of this API, see: "https://www.sqlite.org/lang_select.html"
 
 	To backup database on schedule: https://www.redolive.com/utah-web-designers-blog/automated-mysql-backup-for-windows/
 	"""
 
-	def __init__(self, fileName = None, **kwargs):
+	logger_config = {
+		None: {
+			"level": 1,
+		},
+
+		"console": {
+			"type": "stream",
+			"level": 1,
+		},
+	}
+
+	def __init__(self, fileName = None, logger_name = None, logger_config = None, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
@@ -1297,6 +1309,8 @@ class Database(Utility_Base):
 		Example Input: Database()
 		Example Input: Database("emaildb")
 		"""
+
+		MyUtilities.logger.LoggingFunctions.__init__(self, label = logger_name or __name__, config = logger_config or self.logger_config, force_quietRoot = __name__ == "__main__")
 
 		self._applyMonkeyPatches()
 
@@ -2020,6 +2034,8 @@ class Database(Utility_Base):
 		Example Input: openDatabase_fromConfig("settings.ini")
 		"""
 
+		self.log_info("Opening Database from config file", filePath = filePath, section = section)
+
 		config = build_configuration(default_filePath = filePath, default_section = section)
 		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
 			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
@@ -2133,6 +2149,8 @@ class Database(Utility_Base):
 					self.alembic.stamp()
 
 		#########################
+
+		self.log_info("Opening Database", fileName = fileName, schemaPath = schemaPath, openAlembic = openAlembic)
 
 		if (not fileName):
 			fileName = "" #":memory:"
