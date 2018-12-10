@@ -55,6 +55,7 @@ import Utilities as MyUtilities
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
 NULL = MyUtilities.common.NULL
+openPlus = MyUtilities.common.openPlus
 
 #Required Modules
 ##py -m pip install
@@ -3114,14 +3115,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 #Monkey Patches
 configparser.ConfigParser.optionxform = str
 
-@contextlib.contextmanager
-def newOpen(filePath, flag = "w"):
-	directory = os.path.dirname(filePath)
-	if (directory):
-		os.makedirs(directory, exist_ok = True)
-	with open(filePath, flag) as fileHandle:
-		yield fileHandle
-
 class Configuration(Base):
 	"""Used to handle .ini files.
 
@@ -3160,7 +3153,7 @@ class Configuration(Base):
 	"""
 
 	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False,
-		allowNone = True, interpolation = True, valid_section = None, readOnly = False, 
+		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None,
 		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
 		"""
 
@@ -3186,8 +3179,9 @@ class Configuration(Base):
 		Example Input: Configuration(self, defaults = {"startup_user": "admin"})
 		"""
 
+		self.defaultFileExtension = defaultFileExtension or "ini"
 		self.default_section = default_section or "main"
-		self.default_filePath = default_filePath or "settings.ini"
+		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
 
 		if (interpolation):
 			interpolation = self.MyExtendedInterpolation()
@@ -3463,7 +3457,7 @@ class Configuration(Base):
 		Example Input: load("database/settings_user.ini")
 		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
 		"""
-		global newOpen
+		global openPlus
 
 		if (valid_section is not NULL):
 			self.set_validSection(valid_section)
@@ -3476,12 +3470,12 @@ class Configuration(Base):
 			if (isinstance(forceExists, dict)):
 				self.set(forceExists, valid_section = None)
 
-			with newOpen(filePath) as config_file:
+			with openPlus(filePath) as config_file:
 				self.config.write(config_file)
 
 		self.config.read(filePath)
 
-	def save(self, filePath = None):
+	def save(self, filePath = None, override_readOnly = False, **kwargs):
 		"""Saves changes to config file.
 
 		filePath (str) - Where to save the config file to
@@ -3490,13 +3484,13 @@ class Configuration(Base):
 		Example Input: save()
 		Example Input: save("database/settings_user.ini")
 		"""
-		global newOpen
+		global openPlus
 
-		if (self.readOnly):
+		if ((not override_readOnly) and self.readOnly):
 			raise ReadOnlyError(self)
 		
 		filePath = filePath or self.default_filePath
-		with newOpen(filePath or self.default_filePath) as config_file:
+		with openPlus(filePath or self.default_filePath, **kwargs) as config_file:
 			self.config.write(config_file)
 
 	def has_section(self, section = None, *, valid_section = NULL):
@@ -3857,7 +3851,8 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		MyUtilities.common.nestedUpdate(self.contents, self.contents_override, preserveNone = False)
 
 	@contextlib.contextmanager
-	def _save(self, filePath = None, ifDirty = True, removeDirty = True, applyOverride = True, overrideKwargs = None):
+	def _save(self, filePath = None, ifDirty = True, removeDirty = True, 
+		applyOverride = True, overrideKwargs = None, **kwargs):
 		"""Saves changes to json file.
 
 		filePath (str) - Where to save the config file to
@@ -3868,7 +3863,7 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		Example Input: save()
 		Example Input: save("database/settings_user.json")
 		"""
-		global newOpen
+		global openPlus
 
 		filePath = filePath or self.default_filePath
 		if (ifDirty and (not self.dirty) and (os.path.exists(filePath))):
@@ -3880,7 +3875,7 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 				yield None
 				return
 
-			with newOpen(filePath) as fileHandle:
+			with openPlus(filePath, **kwargs) as fileHandle:
 				yield fileHandle
 
 		except Exception as error:
@@ -3901,7 +3896,7 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		Example Input: save_override()
 		Example Input: save_override("database/settings_user_override.json")
 		"""
-		global newOpen
+		global openPlus
 
 		def formatCatalogue(catalogue):
 			if (not isinstance(catalogue, dict)):
@@ -3933,7 +3928,7 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		MyUtilities.common.nestedUpdate(self.contents_override, changes) #Filter out defaultdict
 
 		if (self.override):
-			with newOpen(filePath or self.default_filePath_override) as fileHandle:
+			with openPlus(filePath or self.default_filePath_override) as fileHandle:
 				yield fileHandle
 		else:
 			yield None
@@ -4266,7 +4261,7 @@ class JSON_Aid(Config_Base):
 		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
 		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
 		"""
-		global newOpen
+		global openPlus
 
 		if (saveToOverride is None):
 			for section, variable, value in self._ensure(*args, **kwargs):
@@ -4287,7 +4282,7 @@ class JSON_Aid(Config_Base):
 			base[section][variable] = value
 
 		if (changed):
-			with newOpen(filePath) as fileHandle:
+			with openPlus(filePath) as fileHandle:
 				json.dump(base or None, fileHandle, indent = "\t")
 
 		return True
@@ -4393,7 +4388,7 @@ class YAML_Aid(Config_Base):
 		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
 		"""
 
-		global newOpen
+		global openPlus
 
 		if (saveToOverride is None):
 			for section, variable, value in self._ensure(*args, **kwargs):
@@ -4414,7 +4409,7 @@ class YAML_Aid(Config_Base):
 			base[section][variable] = value
 
 		if (changed):
-			with newOpen(filePath) as fileHandle:
+			with openPlus(filePath) as fileHandle:
 				yaml.dump(base or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
 					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
 					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
