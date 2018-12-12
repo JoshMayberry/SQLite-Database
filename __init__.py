@@ -1,5 +1,6 @@
 import lazyLoad
 lazyLoad.load(
+	"io", 
 	"unidecode", 
 	"importlib", 
 	"cachetools", 

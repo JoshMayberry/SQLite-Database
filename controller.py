@@ -11,9 +11,11 @@ import abc
 import time
 import shutil
 
+import io
 import enum
 import types
 import decimal
+import subprocess
 
 #Utility Modules
 import warnings
@@ -406,9 +408,20 @@ class Utility_Base(Base_Database):
 			session.close()
 
 	@contextlib.contextmanager
-	def makeConnection(self, asTransaction = True):
+	def makeConnection(self, asTransaction = True, raw = False):
+		"""Provides a transactional scope for a direct connection.
 
-		connection = self.engine.connect()
+		raw (bool) - Determiens what module the connection belongs to
+			- If True: 'connection' is from the dialect
+			- If False: 'connection' is from sqlalchemy
+		"""
+
+		if (raw):
+			connection = self.engine.raw_connection()
+			asTransaction = False
+		else:
+			connection = self.engine.connect()
+	
 		if (asTransaction):
 			transaction = connection.begin()
 			try:
@@ -419,13 +432,14 @@ class Utility_Base(Base_Database):
 				raise
 			finally:
 				connection.close()
-		else:
-			try:
-				yield connection
-			except:
-				raise
-			finally:
-				connection.close()
+			return
+
+		try:
+			yield connection
+		except:
+			raise
+		finally:
+			connection.close()
 
 	def yieldColumn_fromTable(self, relation, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
@@ -1298,7 +1312,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		},
 	}
 
-	def __init__(self, fileName = None, logger_name = None, logger_config = None, **kwargs):
+	def __init__(self, fileName = None, logger_name = None, logger_config = None, defaultFileExtension = None, **kwargs):
 		"""Defines internal variables.
 		A better way to handle multi-threading is here: http://code.activestate.com/recipes/526618/
 
@@ -1326,9 +1340,10 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		self.fileName = None
 		self.schemaPath = None
 		self.alembicPath = None
+		self.baseFileName = None
 		self.defaultCommit = None
 		self.connectionType = None
-		self.defaultFileExtension = ".db"
+		self.defaultFileExtension = defaultFileExtension or "db"
 		self.aliasError_replacement = None
 		self.resultError_replacement = None
 
@@ -2092,6 +2107,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			self.isMySQL = self.connectionType == "mysql"
 			self.isMsSQL = self.connectionType == "mssql"
 
+			self.baseFileName = fileName
+
 			if (self.isMySQL):
 				engineKwargs = {"connect_args": {"time_zone": "+00:00"}, "pool_recycle": 3600}
 				self.fileName = f"mysql+mysqlconnector://{user}:{password}@{host or 'localhost'}:{port or 3306}/{fileName}"
@@ -2159,7 +2176,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		else:
 			#Check for file extension
 			if (forceExtension and ("." not in fileName)):
-				fileName += self.defaultFileExtension
+				fileName += f".{self.defaultFileExtension}"
 
 			if (connectionType is None):
 				if (fileName.endswith(("mdb", "accdb"))):
@@ -2463,9 +2480,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			schema = self.schema
 		else:
 			schema = self.loadSchema(schemaPath)
-
-		gjhgjhgjh
-
 
 	def copyAttribute(self, source_relation, source_attribute, destination_relation, destination_attribute = None):
 		"""Copies an attribute from an existing table to another.
@@ -3111,6 +3125,64 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 	@wrap_errorCheck()
 	def removeIndex(self, relation = None, attribute = None, name = None, noReplication = False):
 		"""Removes an index for the given attribute."""
+
+	def backup(self, destination = None, *, username = None, password = None, closeIO = None):
+		"""Backs up the database to the given destination.
+		If 'destination' is None, returns an io stream with the backup in it.
+
+		Modified code from Jeremy Brown on: https://stackoverflow.com/questions/3600948/python-subprocess-mysqldump-and-pipes/3601157#3601157
+		Special thanks to Cristian Porta for how to run mysqldump without generating password warnings on: https://stackoverflow.com/questions/20751352/suppress-warning-messages-using-mysql-from-within-terminal-but-password-written/20854048#20854048
+		Use: https://lyceum-allotments.github.io/2017/03/python-and-pipes-part-5-subprocesses-and-pipes/
+
+		Example Input: backup()
+		"""
+		global openPlus
+
+		def dump_mySQL():
+			nonlocal self, username, password
+
+			if ((username is None) or (password is None)):
+				username, password =  re.search("mysql\+mysqlconnector://(.*):(.*)@", self.fileName).groups()
+			domain, port, target = re.search("@([\d\.]*):(\d*)/(.*)", self.fileName).groups()
+
+			command = ("C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysqldump.exe", f"--host={domain}", f"--port={port}", f"--user={username}", f"--password={password}", target)
+			with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+				yield f"--{process.communicate()[0].decode()}"
+
+		def dump_sqlite():
+			nonlocal self
+
+			with self.makeConnection(raw = True) as connection:
+				for item in connection.iterdump():
+					yield f"{item}\n"
+
+		##########################################################################
+
+		if (self.isMySQL):
+			dumpRoutine = dump_mySQL()
+		elif (self.isSQLite):
+			dumpRoutine = dump_sqlite()
+		else:
+			raise NotImplementedError(self.fileName)
+
+		with openPlus(destination, closeIO = self.ensure_default(closeIO, default = lambda: (not isinstance(destination, (io.IOBase, type(None)))))) as fileHandle:
+			for item in dumpRoutine:
+				fileHandle.write(item)
+
+		if (destination is None):
+			return fileHandle
+
+	def restore(self, backupFile):
+		"""Restores a backup.
+
+		Example Input: restore()
+		"""
+
+		raise NotImplementedError()
+
+	#Alias Functions
+	save = backup
+	load = restore
 
 #Monkey Patches
 configparser.ConfigParser.optionxform = str
@@ -4735,15 +4807,17 @@ def sandbox():
 
 		# quiet(database_API.getForeignSchema("Containers", "job"))
 
-		quiet(database_API.getAttributeDefaults("Containers", "msds"))
-		quiet(database_API.getAttributeDefaults("Containers", "msds", forceAttribute = True))
-		quiet(database_API.getAttributeDefaults("Containers"))
-		quiet(database_API.getAttributeDefaults("Containers", foreignAsDict = True))
-
+		# quiet(database_API.getAttributeDefaults("Containers", "msds"))
+		# quiet(database_API.getAttributeDefaults("Containers", "msds", forceAttribute = True))
+		# quiet(database_API.getAttributeDefaults("Containers"))
+		# quiet(database_API.getAttributeDefaults("Containers", foreignAsDict = True))
 
 		# #Update Schema
 		# database_API.openDatabase("test_map_example.db", "test_map_2")
 		# database_API.checkSchema()
+
+		#Backup and Restore
+		database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
 
 	# test_json()
 	# test_yaml()
