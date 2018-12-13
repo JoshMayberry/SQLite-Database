@@ -1404,12 +1404,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		sqlalchemy.dialects.mysql.base.MySQLDialect._show_create_table = mp_mysql__show_create_table
 
 	#Caches
-	cache_info = MyUtilities.caching.LFUCache(maxsize = 10)
-	cache_defaults = MyUtilities.caching.LFUCache(maxsize = 10)
-	cache_relations = MyUtilities.caching.LFUCache(maxsize = 10)
-	cache_primaryKey = MyUtilities.caching.LFUCache(maxsize = 10)
-	cache_attributes = MyUtilities.caching.LFUCache(maxsize = 10)
-	cache_creationOrder = MyUtilities.caching.LFUCache(maxsize = 10)
+	cache_info = MyUtilities.caching.LFUCache(maxsize = 100000)
+	cache_defaults = MyUtilities.caching.LFUCache(maxsize = 100000)
+	cache_relations = MyUtilities.caching.LFUCache(maxsize = 100000)
+	cache_primaryKey = MyUtilities.caching.LFUCache(maxsize = 100000)
+	cache_attributes = MyUtilities.caching.LFUCache(maxsize = 100000)
+	cache_creationOrder = MyUtilities.caching.LFUCache(maxsize = 100000)
 
 	#Event Functions
 	def setFunction_cmd_startWaiting(self, function):
@@ -3224,7 +3224,7 @@ class Configuration(Base):
 	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
 	"""
 
-	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False,
+	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False, forceCondition = None,
 		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None,
 		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
 		"""
@@ -3260,17 +3260,9 @@ class Configuration(Base):
 		elif (interpolation is not None):
 			interpolation = configparser.BasicInterpolation()
 
-		self.config = configparser.ConfigParser(converters = self.converters, allow_no_value = allowNone, 
+		self.setReset(converters = self.converters, allow_no_value = allowNone, 
 			defaults = default_values or {}, interpolation = interpolation)
-
-		self.dataType_catalogue = {
-			None: self.config.get,
-			str: self.config.get, "str": self.config.get,
-			int: self.config.getint, "int": self.config.getint,
-			float: self.config.getfloat, "float": self.config.getfloat,
-			bool: self.config.getboolean, "bool": self.config.getboolean,
-			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
-		}
+		self.reset()
 
 		# self.config.optionxform = str
 
@@ -3282,7 +3274,22 @@ class Configuration(Base):
 		self.set_validSection(valid_section)
 
 		if (default_filePath):
-			self.load(forceExists = forceExists)
+			self.load(forceExists = forceExists, forceCondition = forceCondition)
+
+	def setReset(self, *args, **kwargs):
+		self._reset = (args, kwargs)
+
+	def reset(self):
+		self.config = configparser.ConfigParser(*self._reset[0], **self._reset[1])
+
+		self.dataType_catalogue = {
+			None: self.config.get,
+			str: self.config.get, "str": self.config.get,
+			int: self.config.getint, "int": self.config.getint,
+			float: self.config.getfloat, "float": self.config.getfloat,
+			bool: self.config.getboolean, "bool": self.config.getboolean,
+			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
+		}
 
 	def __repr__(self):
 		representation = f"{type(self).__name__}(id = {id(self)})"
@@ -3517,7 +3524,7 @@ class Configuration(Base):
 		else:
 			self.config.set(section, variable, f"{value}")
 
-	def load(self, filePath = None, *, valid_section = NULL, forceExists = False):
+	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
@@ -3546,6 +3553,20 @@ class Configuration(Base):
 				self.config.write(config_file)
 
 		self.config.read(filePath)
+
+		if (forceCondition is not None):
+			for variable, value in forceCondition.items():
+				var_mustBe = self.tryInterpolation(variable, value)
+				var_isActually = self.get(variable)
+				if (var_mustBe != var_isActually):
+					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch")
+					os.remove(filePath)
+					self.reset()
+
+					return self.load(filePath = filePath, valid_section = valid_section, forceExists = forceExists, forceCondition = None)
+
+	def tryInterpolation(self, variable, value, section = None):
+		return self.config._interpolation.before_get(self.config, section or "DEFAULT", variable, value, self.config.defaults())
 
 	def save(self, filePath = None, override_readOnly = False, **kwargs):
 		"""Saves changes to config file.
@@ -3608,7 +3629,7 @@ class Configuration(Base):
 		"""Removes a section.
 
 		section (str) - What section to write this setting in
-			- If None: Will use the default section
+			- If None: Will remove all sections
 
 		Example Input: remove_section("startup_user")
 		Example Input: remove_section("scanDelay", section = "AutoSave")
@@ -3616,8 +3637,13 @@ class Configuration(Base):
 
 		if (self.readOnly):
 			raise ReadOnlyError(self)
-		self.check_invalidSection(section, valid_section = valid_section)
 
+		if (section is None):
+			for section in self.getSections():
+				self.config.remove_section(section)
+			return
+
+		self.check_invalidSection(section, valid_section = valid_section)
 		self.config.remove_section(section or self.default_section)
 
 	def remove_setting(self, variable, section = None, *, valid_section = NULL):
