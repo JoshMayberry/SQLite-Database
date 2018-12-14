@@ -3559,7 +3559,7 @@ class Configuration(Base):
 				var_mustBe = self.tryInterpolation(variable, value)
 				var_isActually = self.get(variable)
 				if (var_mustBe != var_isActually):
-					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch")
+					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch'")
 					os.remove(filePath)
 					self.reset()
 
@@ -4089,16 +4089,29 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 	def ensure(self, *args, **kwargs):
 		pass
 
-	def get(self, section, setting, default = None):
+	def get(self, section, setting, default = None, *, forceTuple = False):
 		"""Returns the value of the given setting in the given section.
 
+		setting (str) - What variable to look for
+			- If list: Will return the value for each variable given
+
 		Example Input: get("lorem", "ipsum")
+		Example Input: get("lorem", ("ipsum", "dolor"))
 		"""
 
-		value = self.contents[section][setting]
-		if (isinstance(value, dict)):
-			return value.get("value", default)
-		return value
+		def yieldValue():
+			nonlocal self, section, setting, default
+
+			for _setting in self.ensure_container(setting):
+				value = self.contents[section][_setting]
+				if (isinstance(value, dict)):
+					yield value.get("value", default)
+				else:
+					yield value
+
+		####################
+
+		return self.oneOrMany(yieldValue, forceTuple = forceTuple)
 
 	def set(self, contents = None, update = True, makeDirty = True):
 		"""Adds a section to the internal contents.
