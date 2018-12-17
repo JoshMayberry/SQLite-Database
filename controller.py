@@ -57,6 +57,7 @@ import Utilities as MyUtilities
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
 NULL = MyUtilities.common.NULL
+NULL_private = MyUtilities.common.Singleton("NULL", state = False, private = True)
 openPlus = MyUtilities.common.openPlus
 
 #Required Modules
@@ -2728,7 +2729,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
 		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
 		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
-		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False,  
+		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False, noAnswer = NULL_private, 
 		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
 		foreignAsDict = False, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
@@ -2969,12 +2970,17 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		container = (tuple, set)[valuesAsSet]
 
 		def getResult(query):
-			nonlocal forceTuple, container
+			nonlocal forceTuple, container, noAnswer
 
 			answer = container(yieldRow(query))
 
 			if (not answer):
-				return container()
+				if (noAnswer is NULL_private):
+					return container()
+				elif (callable(noAnswer)):
+					return noAnswer()
+				return noAnswer
+
 			elif (forceTuple or (len(answer) > 1)):
 				if ((not attributeFirst) or (not isinstance(answer[-1], dict))):
 					return answer
