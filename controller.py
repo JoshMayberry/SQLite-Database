@@ -223,6 +223,30 @@ json._default_decoder = _JSONDecoder()
 sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
 sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
 
+class _JSON(sqlalchemy.TypeDecorator):
+	"""Allows sqlite to use JSON files.
+	Modified code from Xiwei Wang on: https://stackoverflow.com/questions/46712393/creating-json-type-column-in-sqlite-with-sqlalchemy/49933601#49933601
+	See: https://docs.sqlalchemy.org/en/latest/core/custom_types.html#sqlalchemy.types.TypeDecorator
+	"""
+
+	@property
+	def python_type(self):
+		return object
+
+	impl = sqlalchemy.types.String
+
+	def process_bind_param(self, value, dialect):
+		return json.dumps(value)
+
+	def process_literal_param(self, value, dialect):
+		return value
+
+	def process_result_value(self, value, dialect):
+		try:
+			return json.loads(value)
+		except (ValueError, TypeError):
+			return None
+
 #Utility Classes
 class Base(MyUtilities.common.EnsureFunctions, MyUtilities.common.CommonFunctions):
 	pass
@@ -245,25 +269,25 @@ class Base_Database(Base):
 	#Schema Factory Functions
 	#https://stackoverflow.com/questions/1827063/mysql-error-key-specification-without-a-key-length/1827099#1827099
 	dataType_catalogue = {
-		int: sqlalchemy.Integer, "int": sqlalchemy.Integer,
-		"bigint": sqlalchemy.types.BigInteger, "int+": sqlalchemy.types.BigInteger,
-		"smallint": sqlalchemy.types.SmallInteger, "int-": sqlalchemy.types.SmallInteger,
+		int: sqlalchemy.Integer, "int": sqlalchemy.Integer, 
+		"bigint": sqlalchemy.types.BigInteger, "int+": sqlalchemy.types.BigInteger, 
+		"smallint": sqlalchemy.types.SmallInteger, "int-": sqlalchemy.types.SmallInteger, 
 		
-		float: sqlalchemy.Float(), "float": sqlalchemy.Float(),
+		float: sqlalchemy.Float(), "float": sqlalchemy.Float(), 
 		decimal.Decimal: sqlalchemy.Numeric(), "decimal": sqlalchemy.Numeric(), "numeric": sqlalchemy.Numeric(), 
 		
-		bool: sqlalchemy.Boolean(), "bool": sqlalchemy.Boolean(),
+		bool: sqlalchemy.Boolean(), "bool": sqlalchemy.Boolean(), 
 
 		str: sqlalchemy.String(256), "str": sqlalchemy.String(256), "text": sqlalchemy.Text(), 
-		"unicode": sqlalchemy.Unicode(), "utext": sqlalchemy.UnicodeText(),
-		"json": sqlalchemy.JSON(),
+		"unicode": sqlalchemy.Unicode(), "utext": sqlalchemy.UnicodeText(), 
+		"json": sqlalchemy.JSON(), "json_2": _JSON, 
 		
-		datetime.date: sqlalchemy.Date, "date": sqlalchemy.Date,
+		datetime.date: sqlalchemy.Date, "date": sqlalchemy.Date, 
 		datetime.datetime: sqlalchemy.DateTime(), "datetime": sqlalchemy.DateTime(), 
 		datetime.time: sqlalchemy.Time(), "time": sqlalchemy.Time(), 
-		datetime.timedelta: sqlalchemy.Interval(), "timedelta": sqlalchemy.Interval(), "delta": sqlalchemy.Interval(), "interval": sqlalchemy.Interval(),
+		datetime.timedelta: sqlalchemy.Interval(), "timedelta": sqlalchemy.Interval(), "delta": sqlalchemy.Interval(), "interval": sqlalchemy.Interval(), 
 
-		bin: sqlalchemy.LargeBinary(), "bin": sqlalchemy.LargeBinary(), "blob": sqlalchemy.LargeBinary(), "pickle": sqlalchemy.PickleType(),
+		bin: sqlalchemy.LargeBinary(), "bin": sqlalchemy.LargeBinary(), "blob": sqlalchemy.LargeBinary(), "pickle": sqlalchemy.PickleType(), 
 	}
 
 	dataType_numbers = (
