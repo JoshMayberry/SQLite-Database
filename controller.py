@@ -415,7 +415,7 @@ class MyColumn(sqlalchemy.Column):
 class Utility_Base(Base_Database):
 	#Context Managers
 	@contextlib.contextmanager
-	def makeSession(self):
+	def makeSession(self, close = True):
 		"""Provides a transactional scope around a series of operations.
 		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
 		"""
@@ -429,8 +429,9 @@ class Utility_Base(Base_Database):
 			session.rollback()
 			raise
 		finally:
-			session.flush()
-			session.close()
+			if (close):
+				session.flush()
+				session.close()
 
 	@contextlib.contextmanager
 	def makeConnection(self, asTransaction = True, raw = False):
@@ -2726,6 +2727,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived"))
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
+		# global timeStart
 
 		if (relation is None):
 			relation = self.getRelationNames()
@@ -2747,6 +2749,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			else:
 				myTuple[_relation] = None
 
+
+		# print(f"@getAllValues, {time.perf_counter() - timeStart:.6f}")
 		return self.getValue(myTuple, exclude = excludeList, **kwargs)
 
 	@wrap_errorCheck()
@@ -2755,7 +2759,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
 		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False, noAnswer = NULL_private, 
 		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
-		foreignAsDict = False, foreignDefault = None, **locationKwargs):
+		foreignAsDict = False, foreignDefault = None, includeSession = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -2807,17 +2811,24 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		forceAttribute (bool) - Determines if the attribute is returned in the answer
 			- If True: Answers will always contain the attribute
 			- If False: Answers will omit the attribute if there is only one in the answer
-		forceTuple (bool)     - Determines if the row separator is returned in the answer
+		forceTuple (bool) - Determines if the row separator is returned in the answer
 			- If True: Answers will always contain the row separator
 			- If False: Answers will omit the row separator if there is only one in the answer
 		attributeFirst (bool) - Determines if the attribute is first in the answer
 			- If True: {relation: {attribute: {row: value}}}
 			- If False: {relation: {row: {attribute: value}}}
 
-		fromSchema (bool)     - Determines from what source the query is compiled
-			- If True: Uses the schema and returns a schema item
+		fromSchema (bool) - Determines from what source the query is compiled
+			- If True: Uses the schema and returns a schema item (slowest)
+				~ All values are lazy loaded by default, so be sure to use 'includeSession' correctly
 			- If False: Uses the schema and returns a dictionary
 			- If None: Uses the metadata and returns a dictionary (fastest)
+
+		includeSession (bool) - Determines how the session is given to the user
+			- If True: The session is in the catalogue under the relation key [None], so 'forceRelation' will be ignored
+			- If False: The returned value is a tuple where the first element is the session and the second is the answer
+			- If None: The session is not returned
+				~ If 'fromSchema' is True: All values in 'myTuple' will be eagerly loaded before the session is closed
 
 		Example Input: getValue({"Users": "name"})
 		Example Input: getValue({"Users": "name"}, valuesAsList = True)
@@ -2854,6 +2865,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue({"Users": None}, {"age": 24})
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
+		# global timeStart
 
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
@@ -2932,14 +2944,18 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						yield dict(catalogue)
 
 		elif (fromSchema):
-			contextmanager = self.makeSession()
+			contextmanager = self.makeSession(close = False)
 			def startQuery(relation, attributeList, schema, table):
 				assert connection, schema is not None
 
-				return connection.query(schema)
+				query = connection.query(schema)
+				if (includeSession is None):
+					query = query.options(sqlalchemy.orm.selectinload("*"))
+
+				return query
 
 			def yieldRow(query):
-				nonlocal count
+				nonlocal count				
 
 				if (count):
 					yield (query.count(),)
@@ -3026,7 +3042,11 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		assert myTuple
 		results_catalogue = {}
 		with contextmanager as connection:
+			if (includeSession):
+				results_catalogue[None] = connection
+
 			for relation, attributeList in myTuple.items():
+				# print(f"@getValue.1, {time.perf_counter() - timeStart:.6f}")
 				if (fromSchema):
 					attributeList = ()
 				else:
@@ -3034,16 +3054,19 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
 					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
 
+				# print(f"@getValue.2, {time.perf_counter() - timeStart:.6f}")
 				schema = self.getSchema(relation)#, forceMatch = True)
 
 				table = self.metadata.tables[relation]
 
 				
+				# print(f"@getValue.3, {time.perf_counter() - timeStart:.6f}")
 				query = startQuery(relation, attributeList, schema, table)
 				query = self.configureJoin(query, relation, schema, table, attributeList, fromSchema = fromSchema)
 				query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
 				query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
+				# print(f"@getValue.4, {time.perf_counter() - timeStart:.6f}")
 				if (limit is not None):
 					query = query.limit(limit)
 				if (not includeDuplicates):
@@ -3051,11 +3074,13 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				if (count and (fromSchema is None)):
 					query = query.count()
 
+				# print(f"@getValue.5, {time.perf_counter() - timeStart:.6f}")
 				results_catalogue[relation] = getResult(query)
+				# print(f"@getValue.6, {time.perf_counter() - timeStart:.6f}")
 		
-		if (forceRelation or (len(myTuple) > 1)):
-			return results_catalogue
-		return results_catalogue[relation]
+			if (includeSession is False):
+				return connection, self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
+		return self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
 
 	@wrap_errorCheck()
 	def createTrigger(self, label, relation,
@@ -4158,7 +4183,6 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		else:
 			return self.oneOrMany(answer.values(), forceTuple = forceTuple)
 
-
 	def set(self, contents = None, update = True, makeDirty = True):
 		"""Adds a section to the internal contents.
 
@@ -4764,6 +4788,32 @@ def sandbox():
 		quiet(database_API.getValue({"tblMaterialLog": "ContainerID"}, isIn = {"ContainerID": ("1272", "1498", "2047")}, fromSchema = None))
 
 	def test_mysql():
+		global timeStart
+
+		MyUtilities.logger.getLogger("__main__").quiet()
+		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "debugging", reset = False, openAlembic = False, settingsKwargs = {"filePath_versionDir": "M:/Versions/dev"})
+
+		timeStart = time.perf_counter()
+		answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
+			'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+			'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': True, 'includeSession': None})
+		print(f"@__main__, {time.perf_counter() - timeStart:.6f}") #0.902
+
+		# for item in answer:
+		# 	print(item.label)
+		# 	break
+
+		# session.flush()
+		# session.close()
+
+		# print(item.label)
+		# print(item.job)
+
+		sys.exit()
+
+
+
+
 		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "debugging", reset = True, openAlembic = False, settingsKwargs = {"filePath_versionDir": "M:/Versions/dev"})
 		# database_API.removeRelation()
 		# database_API.createRelation()
@@ -4902,7 +4952,7 @@ def sandbox():
 		# database_API.checkSchema()
 
 		#Backup and Restore
-		database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
+		# database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
 
 	# test_json()
 	# test_yaml()
