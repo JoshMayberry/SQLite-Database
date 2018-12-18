@@ -4119,7 +4119,9 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 	def ensure(self, *args, **kwargs):
 		pass
 
-	def get(self, section, setting, default = None, *, forceTuple = False):
+	def get(self, section, setting = None, default = None, *, 
+		forceAttribute = None, forceTuple = False, 
+		filterNone = False, useForNone = None):
 		"""Returns the value of the given setting in the given section.
 
 		setting (str) - What variable to look for
@@ -4129,19 +4131,33 @@ class Config_Base(Base, metaclass = abc.ABCMeta):
 		Example Input: get("lorem", ("ipsum", "dolor"))
 		"""
 
+		def formatValue(value):
+			nonlocal default
+
+			if (isinstance(value, dict)):
+				return value.get("value", default)
+			return value
+
 		def yieldValue():
-			nonlocal self, section, setting, default
+			nonlocal self, section, setting, filterNone, useForNone
 
 			for _setting in self.ensure_container(setting):
-				value = self.contents[section][_setting]
-				if (isinstance(value, dict)):
-					yield value.get("value", default)
-				else:
-					yield value
+				value = formatValue(self.contents[section][_setting])
+				if (filterNone and (value is useForNone)):
+					continue
+
+				yield _setting, value
 
 		####################
 
-		return self.oneOrMany(yieldValue, forceTuple = forceTuple)
+		setting = self.ensure_default(setting, lambda: self.getSettings(section))
+
+		answer = {key: value for key, value in yieldValue()}
+		if ((forceAttribute is not None) and (forceAttribute or (len(answer) is not 1))):
+			return answer
+		else:
+			return self.oneOrMany(answer.values(), forceTuple = forceTuple)
+
 
 	def set(self, contents = None, update = True, makeDirty = True):
 		"""Adds a section to the internal contents.
