@@ -2727,7 +2727,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		database_API.getAllValues("Containers", foreignAsDict = True, foreignDefault = ("label", "archived"))
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
-		# global timeStart
 
 		if (relation is None):
 			relation = self.getRelationNames()
@@ -2749,8 +2748,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			else:
 				myTuple[_relation] = None
 
-
-		# print(f"@getAllValues, {time.perf_counter() - timeStart:.6f}")
 		return self.getValue(myTuple, exclude = excludeList, **kwargs)
 
 	@wrap_errorCheck()
@@ -2865,7 +2862,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue({"Users": None}, {"age": 24})
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
-		# global timeStart
 
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
@@ -2887,14 +2883,11 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					def yieldResult():
 						nonlocal connection, query
 
-						def _yieldResult():
-							nonlocal connection, query
-							if (onlyOne):
+						if (onlyOne):
+							def _yieldResult():
 								yield connection.execute(query).first()
-								return
-
-							for item in connection.execute(query).fetchall():
-								yield item
+						else:
+							_yieldResult = connection.execute(query).fetchall
 
 						##############################
 
@@ -2912,22 +2905,17 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 								result.update(replacement_catalogue)
 
 							yield result
-				else:
+			
+				elif (onlyOne):
 					def yieldResult():
-						nonlocal connection, query
-						if (onlyOne):
-							yield connection.execute(query).first()
-							return
-
-						for item in connection.execute(query).fetchall():
-							yield item
+						yield connection.execute(query).first()
+				else:
+					yieldResult = connection.execute(query).fetchall
 
 				###################################
 
-				for result in yieldResult():
-					if (result is None):
-						continue
-					elif ((not forceAttribute) and (len(result) <= 1)):
+				for result in itertools.filterfalse(lambda x: x is None, yieldResult()):
+					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
 					elif (not foreignAsDict):
@@ -3046,7 +3034,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				results_catalogue[None] = connection
 
 			for relation, attributeList in myTuple.items():
-				# print(f"@getValue.1, {time.perf_counter() - timeStart:.6f}")
 				if (fromSchema):
 					attributeList = ()
 				else:
@@ -3054,19 +3041,14 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
 					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
 
-				# print(f"@getValue.2, {time.perf_counter() - timeStart:.6f}")
 				schema = self.getSchema(relation)#, forceMatch = True)
-
 				table = self.metadata.tables[relation]
 
-				
-				# print(f"@getValue.3, {time.perf_counter() - timeStart:.6f}")
 				query = startQuery(relation, attributeList, schema, table)
 				query = self.configureJoin(query, relation, schema, table, attributeList, fromSchema = fromSchema)
 				query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
 				query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 
-				# print(f"@getValue.4, {time.perf_counter() - timeStart:.6f}")
 				if (limit is not None):
 					query = query.limit(limit)
 				if (not includeDuplicates):
@@ -3074,9 +3056,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				if (count and (fromSchema is None)):
 					query = query.count()
 
-				# print(f"@getValue.5, {time.perf_counter() - timeStart:.6f}")
 				results_catalogue[relation] = getResult(query)
-				# print(f"@getValue.6, {time.perf_counter() - timeStart:.6f}")
 		
 			if (includeSession is False):
 				return connection, self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
@@ -4793,11 +4773,23 @@ def sandbox():
 		MyUtilities.logger.getLogger("__main__").quiet()
 		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "debugging", reset = False, openAlembic = False, settingsKwargs = {"filePath_versionDir": "M:/Versions/dev"})
 
-		timeStart = time.perf_counter()
-		answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
-			'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
-			'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': True, 'includeSession': None})
-		print(f"@__main__, {time.perf_counter() - timeStart:.6f}") #0.902
+		answer = database_API.getAllValues("Containers")
+		print(len(answer))
+		answer = database_API.getAllValues("Containers", fromSchema = None)
+		print(len(answer))
+
+		# timeStart = time.perf_counter()
+		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
+		# 	'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		# 	'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}\n") #0.8802
+		# print(len(answer))
+
+		# timeStart = time.perf_counter()
+		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
+		# 	'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		# 	'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}") #0.8587
 
 		# for item in answer:
 		# 	print(item.label)
