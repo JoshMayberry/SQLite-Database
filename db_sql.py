@@ -7,7 +7,6 @@ __version__ = "3.4.0"
 import re
 import os
 import sys
-import abc
 import time
 import shutil
 
@@ -17,7 +16,7 @@ import types
 import decimal
 import subprocess
 
-#Utility Modules
+# #Utility Modules
 import warnings
 import operator
 import datetime
@@ -32,13 +31,6 @@ import inspect
 import unidecode
 import importlib
 
-#Database Modules
-import yaml
-import json
-import pyodbc
-import sqlite3
-import configparser
-
 import sqlalchemy
 import sqlalchemy_utils
 import sqlalchemy.ext.declarative
@@ -52,7 +44,12 @@ from alembic.config import Config as alembic_config_Config
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
-import Utilities as MyUtilities
+import MyUtilities.common
+import MyUtilities.logger
+import MyUtilities.caching
+
+from utilities import json
+import db_config
 
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
@@ -174,52 +171,6 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 		return wrapper
 	return decorator
 
-#Expand JSON
-class _JSONEncoder(json.JSONEncoder):
-	"""Allows sets to be saved in JSON files.
-	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
-
-	Example Use: 
-		json.dumps(["abc", {1, 2, 3}], cls = _JSONEncoder)
-
-		json._default_encoder = _JSONEncoder()
-		json.dumps(["abc", {1, 2, 3}])
-	"""
-
-	def __init__(self, *, tag_set = None, **kwargs):
-		super().__init__(**kwargs)
-		self.tag_set = tag_set or "_set"
-
-	def default(self, item):
-		if (isinstance(item, collections.Set)):
-			return {self.tag_set: list(item)}
-		else:
-			return super().default(self, item)
-
-class _JSONDecoder(json.JSONDecoder):
-	"""Allows sets to be loaded from JSON files.
-	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
-
-	Example Use: 
-		json.loads(encoded, cls = _JSONDecoder)
-
-		json._default_decoder = _JSONDecoder()
-		json.loads(encoded)
-	"""
-
-	def __init__(self, *, object_hook = None, tag_set = None, **kwargs):
-		super().__init__(object_hook = object_hook or self.myHook, **kwargs)
-
-		self.tag_set = tag_set or "_set"
-
-	def myHook(self, catalogue):
-		if (self.tag_set in catalogue):
-			return set(catalogue[self.tag_set])
-		return catalogue
-
-json._default_encoder = _JSONEncoder()
-json._default_decoder = _JSONDecoder()
-
 sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
 sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
 
@@ -254,17 +205,17 @@ class Base(MyUtilities.common.EnsureFunctions, MyUtilities.common.CommonFunction
 class Base_Database(Base):
 	# @classmethod
 	# def getSchemaClass(cls, relation):
-	# 	"""Returns the schema class for the given relation.
-	# 	Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
+	#   """Returns the schema class for the given relation.
+	#   Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
 
-	# 	relation (str) - What relation to return the schema class for
+	#   relation (str) - What relation to return the schema class for
 
-	# 	Example Input: getSchemaClass("Customer")
-	# 	"""
+	#   Example Input: getSchemaClass("Customer")
+	#   """
 
-	# 	# # table = Mapper.metadata.tables.get("Customer")
-	# 	# # column = table.columns["name"]
-	# 	# return Mapper._decl_class_registry[column.table.name]
+	#   # # table = Mapper.metadata.tables.get("Customer")
+	#   # # column = table.columns["name"]
+	#   # return Mapper._decl_class_registry[column.table.name]
 
 	#Schema Factory Functions
 	#https://stackoverflow.com/questions/1827063/mysql-error-key-specification-without-a-key-length/1827099#1827099
@@ -386,7 +337,7 @@ class Base_Database(Base):
 				columnKwargs["nullable"] = True
 
 			# if (autoIncrement):
-			# 	columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+			#   columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
 
 		if (default is not None):
 			columnKwargs["default"] = default
@@ -729,7 +680,7 @@ class Schema_Base(Base_Database):
 		else:
 			defaultRows = cls.defaultRows
 
-		with cls.makeSession() as session:				
+		with cls.makeSession() as session:              
 			session.query(cls).delete()
 			for catalogue in cls.ensure_container(defaultRows):
 				if (not catalogue):
@@ -771,7 +722,7 @@ class Schema_Used(Schema_Base):
 
 		#Find missing rows and add them
 		index = cls.getPrimaryKey()
-		with cls.makeSession() as session:	
+		with cls.makeSession() as session:  
 			for foreignHandle, attributeList in cls.usedBy.items():
 				for foreign_attribute in attributeList:
 					for result in tuple(zip(*cls.metadata.bind.execute(f"SELECT t1.{foreign_attribute} FROM {foreignHandle.__tablename__} as t1 LEFT OUTER JOIN {cls.__tablename__} as t2 ON t1.{foreign_attribute} = t2.{index} AND t2.{index} IS NOT NULL WHERE t2.{index} IS NULL"))):
@@ -839,13 +790,13 @@ class Schema_AutoForeign(Schema_Base):
 
 	# @classmethod
 	# def _yieldColumn_noForeign(cls, attribute, exclude, alias):
-	# 	if (attribute in exclude):
-	# 		return
+	#   if (attribute in exclude):
+	#       return
 
-	# 	columnHandle = getattr(cls, attribute)
-	# 	if (alias and (attribute in alias)):
-	# 		columnHandle = columnHandle.label(alias[attribute])
-	# 	yield columnHandle
+	#   columnHandle = getattr(cls, attribute)
+	#   if (alias and (attribute in alias)):
+	#       columnHandle = columnHandle.label(alias[attribute])
+	#   yield columnHandle
 
 	@classmethod
 	def yieldColumn(cls, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
@@ -979,27 +930,8 @@ class EmptySchema():
 def build(*args, **kwargs):
 	"""Creates a Database object."""
 
-	return build_database(*args, **kwargs)
-
-def build_database(*args, **kwargs):
-	"""Creates a Database object."""
-
 	return Database(*args, **kwargs)
 
-def build_configuration(*args, **kwargs):
-	"""Creates a Configuration object."""
-
-	return Configuration(*args, **kwargs)
-
-def build_json(*args, **kwargs):
-	"""Creates a JSON_Aid object."""
-
-	return JSON_Aid(*args, **kwargs)
-
-def build_yaml(*args, **kwargs):
-	"""Creates a YAML_Aid object with YAML notation."""
-
-	return YAML_Aid(*args, **kwargs)
 
 #Dialects
 sqlalchemy.dialects.registry.register("access.fixed", "forks.sqlalchemy.dialects.access.base", "AccessDialect")
@@ -1054,7 +986,7 @@ class Alembic(Base):
 			output += f"-- .ini Path: {self.ini_path}\n"
 		return output
 
-	def __enter__(self):			
+	def __enter__(self):            
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -1394,7 +1326,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			output += f"-- File Name: {self.fileName}\n"
 		return output
 
-	def __enter__(self):			
+	def __enter__(self):            
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -1702,7 +1634,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		# schema = type("Facsimile_Schema", (EmptySchema.Mapper, Schema_Base,), {"__tablename__": relation, **{column.name: column for column in table.columns}})()
 		
 		# for column in table.columns:
-		# 	print(column.name, column.__class__)
+		#   print(column.name, column.__class__)
 		# print(dir(column))
 
 		# sys.exit()
@@ -1979,10 +1911,10 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					return sqlalchemy.desc(criteria)
 
 				# if (nullFirst is not None):
-				# 	if (nullFirst):
-				# 		criteria = criteria.nullsfirst()
-				# 	else:
-				# 		criteria = criteria.nullslast()
+				#   if (nullFirst):
+				#       criteria = criteria.nullsfirst()
+				#   else:
+				#       criteria = criteria.nullslast()
 
 		def yieldOrder():
 			for _orderBy in self.ensure_container(orderBy):
@@ -2078,7 +2010,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		self.log_info("Opening Database from config file", filePath = filePath, section = section)
 
-		config = build_configuration(default_filePath = filePath, default_section = section)
+		config = db_config.build(default_filePath = filePath, default_section = section)
 		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
 			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
 
@@ -2218,7 +2150,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		self.resultError_replacement = resultError_replacement
 
 		# if (self.resultError_replacement is None):
-		# 	self.resultError_replacement = "!!! SELECT ERROR !!!"
+		#   self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		with makeEngine() as engineKwargs:
 			self.engine = sqlalchemy.create_engine(self.fileName, **engineKwargs, echo = echo)
@@ -2449,15 +2381,15 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		# if (relation is None):
 			
 		# else:
-		# 	table = self.metadata.tables.get(relation)
-		# 	if (table is None):
-		# 		errorMessage = f"There is no table {relation} in {self.metadata.__repr__()} for removeRelation()"
-		# 		raise KeyError(errorMessage)
+		#   table = self.metadata.tables.get(relation)
+		#   if (table is None):
+		#       errorMessage = f"There is no table {relation} in {self.metadata.__repr__()} for removeRelation()"
+		#       raise KeyError(errorMessage)
 
-		# 	try:
-		# 		table.drop()
-		# 	except sqlalchemy.exc.UnboundExecutionError:
-		# 		table.drop(self.engine)
+		#   try:
+		#       table.drop()
+		#   except sqlalchemy.exc.UnboundExecutionError:
+		#       table.drop(self.engine)
 
 	@wrap_errorCheck()
 	def renameRelation(self, relation, newName, applyChanges = None):
@@ -2657,7 +2589,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					session.add_all(schema(**catalogue, session = session) for catalogue in forcedList)
 
 	@wrap_errorCheck()
-	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
+	def removeTuple(self, myTuple, applyChanges = None, checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
 
@@ -2943,7 +2875,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				return query
 
 			def yieldRow(query):
-				nonlocal count				
+				nonlocal count              
 
 				if (count):
 					yield (query.count(),)
@@ -3219,1436 +3151,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 	save = backup
 	load = restore
 
-#Monkey Patches
-configparser.ConfigParser.optionxform = str
 
-class Configuration(Base):
-	"""Used to handle .ini files.
-
-	- Both keys and values can have spaces
-	- Multi-line values must have extra lines indented one line deeper
-	- Sections and single-line values can be indented with no consequence
-
-	- Keys can be separated from values by either = or :
-	- Keys without values can have no separator
-	- The separator can have spaces on each side
-
-	- Comments can be done using # or ;
-
-	___________________ EXAMPLE INI FILE ___________________
-
-	[DEFAULT]
-	scanDelay = %(delay) %(units)
-	units = ms
-
-	[main]
-	startup_user = admin
-
-	[AutoSave]
-	delay = 1
-	units = s
-
-	[GUI]
-	delay = 500
-	________________________________________________________
-
-	Use: https://pymotw.com/3/configparser/
-	Use: https://docs.python.org/3.6/library/configparser.html
-	Use: https://martin-thoma.com/configuration-files-in-python/#configparser
-	Use: https://www.blog.pythonlibrary.org/2010/01/01/a-brief-configobj-tutorial/
-	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
-	"""
-
-	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False, forceCondition = None,
-		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None,
-		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
-		"""
-
-		allowNone (bool) - Determines what happens if a setting does not have a set value
-			- If True: Will use None
-			- If False: Will raise an error during load()
-
-		interpolation (bool) - Determines what kind of interpolation can be done in get()
-			- If True: Extended Interpolation
-			- If False: Basic Interpolation
-			- If None: No Interpolation
-
-		valid_section (list) - Which sections (excluding DEFAULT) to load
-			- If str: Will load only that section
-			- If None: Will load all sections
-			~ Optionally, variables can be defined in the section given to 'knownTypesSection'
-
-		knownTypesSection (str) - Which section is used to store knownTypes
-			- If None: Will not use a section to get knownTypes from
-
-		Example Input: Configuration(self)
-		Example Input: Configuration(self, source_directory = "database")
-		Example Input: Configuration(self, defaults = {"startup_user": "admin"})
-		"""
-
-		self.defaultFileExtension = defaultFileExtension or "ini"
-		self.default_section = default_section or "main"
-		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
-
-		if (interpolation):
-			interpolation = self.MyExtendedInterpolation()
-		elif (interpolation is not None):
-			interpolation = configparser.BasicInterpolation()
-
-		self.setReset(converters = self.converters, allow_no_value = allowNone, 
-			defaults = default_values or {}, interpolation = interpolation)
-		self.reset()
-
-		# self.config.optionxform = str
-
-		self.knownTypeDefault = knownTypeDefault or "_default_"
-		self.knownTypesSection = knownTypesSection or None
-		self.knownTypes = knownTypes or {}
-		self.readOnly = readOnly
-
-		self.set_validSection(valid_section)
-
-		if (default_filePath):
-			self.load(forceExists = forceExists, forceCondition = forceCondition)
-
-	def setReset(self, *args, **kwargs):
-		self._reset = (args, kwargs)
-
-	def reset(self):
-		self.config = configparser.ConfigParser(*self._reset[0], **self._reset[1])
-
-		self.dataType_catalogue = {
-			None: self.config.get,
-			str: self.config.get, "str": self.config.get,
-			int: self.config.getint, "int": self.config.getint,
-			float: self.config.getfloat, "float": self.config.getfloat,
-			bool: self.config.getboolean, "bool": self.config.getboolean,
-			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
-		}
-
-	def __repr__(self):
-		representation = f"{type(self).__name__}(id = {id(self)})"
-		return representation
-
-	def __str__(self):
-		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		return output
-
-	def __enter__(self):
-		return self.config
-
-	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback is not None):
-			print(exc_type, exc_value)
-			return False
-
-	def __getitem__(self, key):
-		self.check_invalidSection(key)
-
-		return self.config[key]
-
-	def __setitem__(self, key, value):
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(key)
-
-		self.config[key] = value
-
-	def __delitem__(self, key):
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(key)
-
-		del self.config[key]
-
-	def __contains__(self, key):
-		if (self.check_invalidSection(key, raiseError = False)):
-			return False
-
-		return key in self.config
-
-	def keys(self):
-		if (self.valid_section is None):
-			return tuple(self.config.keys())
-		return tuple(section for section in self.config.keys() if (section in self.valid_section))
-
-	def values(self):
-		if (self.valid_section is None):
-			return tuple(self.config.values())
-		return tuple(handle for section, handle in self.config.items() if (section in self.valid_section))
-
-	def items(self):
-		if (self.valid_section is None):
-			return tuple(self.config.items())
-		return tuple((section, handle) for section, handle in self.config.items() if (section in self.valid_section))
-
-	def _asdict(self):
-		if (self.valid_section is None):
-			return dict(self.config)
-		return {key: value for key, value in self.items()}
-
-	def check_invalidSection(self, section, *, raiseError = True, valid_section = NULL):
-		if (valid_section is NULL):
-			valid_section = self.valid_section
-		if ((valid_section is not None) and (section not in valid_section) and (not self.has_section(section, valid_section = None))):
-			if (raiseError):
-				raise InvalidSectionError(self, section)
-			return True
-
-	def _getType(self, variable, section = None, *, dataType = None):
-		"""Returns what type to use for the given variable.
-
-		Example Input: _getType("delay")
-		"""
-
-		if (dataType is None):
-			section = section or self.default_section
-			check_section = False
-			if ((self.knownTypesSection is not None) and (self.knownTypesSection in self.config.sections())):
-				if (self.has_setting(variable, self.knownTypesSection)):
-					function = self.dataType_catalogue.get(self.config[self.knownTypesSection][variable], None)
-					if (function is not None):
-						return function
-				check_section = True
-
-			if ((section in self.knownTypes) and (variable in self.knownTypes[section])):
-				return self.dataType_catalogue[self.knownTypes[section][variable]]
-
-			default_section = self.config.default_section
-			if ((default_section in self.knownTypes) and (variable in self.knownTypes[default_section])):
-				return self.dataType_catalogue[self.knownTypes[default_section][variable]]
-
-			if (variable in self.knownTypes):
-				return self.dataType_catalogue[self.knownTypes[variable]]
-
-
-			if (check_section and self.has_setting(self.knownTypeDefault, self.knownTypesSection)):
-				function = self.dataType_catalogue.get(self.config[self.knownTypesSection][self.knownTypeDefault], None)
-				if (function is not None):
-					return function
-
-		return self.dataType_catalogue[dataType]
-
-	def get(self, variable = None, section = None, *, dataType = None, default_values = None, include_defaults = True,
-		fallback = configparser._UNSET, raw = False, forceSection = False, forceSetting = False, valid_section = NULL):
-		"""Returns a setting from the given section.
-
-		variable (str) - What setting to get
-			- If list: Will return a dictionary of all settings in the list
-			- If None: Will return a dictionary of all settings in the section
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		dataType (type) - What type the data should be in
-			- If None: Will read as str, unless the variable is logged in self.knownTypes under 'section' or DEFAULT
-
-		default_values (dict) - Local default values; overrides the global default values temporarily
-		include_defaults (bool) - Determines if the default section should be used as a fallback
-		raw (bool) - Determines if the value should be returned without applying interpolation
-
-		___________________ BASIC INTERPOLATION ___________________
-		Variables are denoted with a single '%', followed by closed paren
-			Example: scanDelay = %(delay) %(units)
-
-		To use an escaped %: %%
-			Example: units = %%
-
-		___________________ EXTENDED INTERPOLATION ___________________
-		Variables are denoted with a '$', followed by braces
-			Example: scanDelay = ${delay} ${units}
-
-		Variables from other sections can be used with a ':'
-			Example: scanDelay = ${delay} ${general:units}
-
-
-		Example Input: get()
-		Example Input: get("startup_user")
-		Example Input: get("scanDelay", section = "AutoSave")
-		Example Input: get("scanDelay", section = "AutoSave", dataType = int)
-		Example Input: get("startup_window", defaults = {"startup_window": "inventory"})
-		
-		Example Input: get(("user", "password", "port"), section = "Database_Admin")
-		Example Input: get({"Database_Admin": ("user", "password", "port")})
-		Example Input: get(include_defaults = False)
-		"""
-
-		section = section or self.default_section
-		self.check_invalidSection(section, valid_section = valid_section)
-		if (not self.has_section(section)):
-			section = self.config.default_section
-
-		if (variable is None):
-			if (include_defaults):
-				variableList = tuple(self[section].keys())
-			else:
-				variableList = tuple(self.config._sections[section].keys())
-			return self.get(variableList, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section)
-
-		if (isinstance(variable, dict)):
-			answer = {_section: self.get(_variable, section = _section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _section, _variable in variable.items()}
-
-			if (forceSection or len(answer) > 1):
-				return answer
-			elif (not answer):
-				return
-			return next(iter(answer.values()))
-
-		if (not isinstance(variable, (str, int, float))):
-			answer = {_variable: self.get(_variable, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _variable in variable}
-
-			if (forceSetting or len(answer) > 1):
-				return answer
-			elif (not answer):
-				return
-			return next(iter(answer.values()))
-
-		function = self._getType(variable, section, dataType = dataType)
-
-		try:
-			return function(section, variable, vars = default_values or {}, raw = raw, fallback = fallback)
-
-		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
-			print("@Configuration.get", error)
-			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
-
-	def set(self, variable, value = None, section = None, *, valid_section = NULL):
-		"""Adds a setting to the given section.
-
-		variable (str) - What setting to get
-			- If list: Wil set each variable in the list to 'value'
-			- If dict: Will ignore 'value' and set each key to it's given value
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: set("startup_user", "admin")
-		Example Input: set("scanDelay", 1000, section = "AutoSave")
-
-		Example Input: set({"startup_user": "admin"})
-		Example Input: set({"AutoSave": {"scanDelay": 1000}})
-		"""
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		if (isinstance(variable, dict)):
-			for _variable, _value in variable.items():
-				if (isinstance(_value, dict)):
-					for __variable, __value in _value.items():
-						self.set(__variable, value = __value, section = _variable, valid_section = valid_section)
-				else:
-					self.set(_variable, value = _value, section = section, valid_section = valid_section)
-			return
-
-		if (not isinstance(variable, (str, int, float))):
-			for _variable in variable:
-				self.set(_variable, value = value, section = section, valid_section = valid_section)
-			return
-
-		section = section or self.default_section
-
-		if (not self.config.has_section(section)):
-			self.config.add_section(section)
-
-		if (value is None):
-			self.config.set(section, variable, "")
-		else:
-			self.config.set(section, variable, f"{value}")
-
-	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None):
-		"""Loads the configuration file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		valid_section (list) - Updates self.valid_section if not NULL
-
-		Example Input: load()
-		Example Input: load("database/settings_user.ini")
-		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
-		"""
-		global openPlus
-
-		if (valid_section is not NULL):
-			self.set_validSection(valid_section)
-
-		filePath = filePath or self.default_filePath
-		if (not os.path.exists(filePath)):
-			if (not forceExists):
-				raise FileExistsError(filePath)
-
-			if (isinstance(forceExists, dict)):
-				self.set(forceExists, valid_section = None)
-
-			with openPlus(filePath) as config_file:
-				self.config.write(config_file)
-
-		self.config.read(filePath)
-
-		if (forceCondition is not None):
-			for variable, value in forceCondition.items():
-				var_mustBe = self.tryInterpolation(variable, value)
-				var_isActually = self.get(variable)
-				if (var_mustBe != var_isActually):
-					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch'")
-					os.remove(filePath)
-					self.reset()
-
-					return self.load(filePath = filePath, valid_section = valid_section, forceExists = forceExists, forceCondition = None)
-
-	def tryInterpolation(self, variable, value, section = None):
-		return self.config._interpolation.before_get(self.config, section or "DEFAULT", variable, value, self.config.defaults())
-
-	def save(self, filePath = None, override_readOnly = False, **kwargs):
-		"""Saves changes to config file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save()
-		Example Input: save("database/settings_user.ini")
-		"""
-		global openPlus
-
-		if ((not override_readOnly) and self.readOnly):
-			raise ReadOnlyError(self)
-		
-		filePath = filePath or self.default_filePath
-		with openPlus(filePath or self.default_filePath, **kwargs) as config_file:
-			self.config.write(config_file)
-
-	def has_section(self, section = None, *, valid_section = NULL):
-		"""Returns True if the section exists in the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_section()
-		Example Input: has_section(section = "AutoSave")
-		"""
-
-		section = section or self.default_section
-
-		if (section == self.config.default_section):
-			return True
-
-		return section in self.getSections(valid_section = valid_section, skip_knownTypes = False)
-
-	def has_setting(self, variable, section = None, *, checkDefault = False, valid_section = NULL):
-		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		checkDefault (bool) - Determines if the section DEFAULT is taken into account
-
-		Example Input: has_setting("startup_user")
-		Example Input: has_setting("scanDelay", section = "AutoSave")
-
-		Example Input: has_setting("startup_user", checkDefault = True)
-		"""
-
-		section = section or self.default_section
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		if (checkDefault):
-			return self.config.has_option(section, variable)
-		else:
-			return variable in self.config._sections.get(section, ())
-
-	def remove_section(self, section = None, *, valid_section = NULL):
-		"""Removes a section.
-
-		section (str) - What section to write this setting in
-			- If None: Will remove all sections
-
-		Example Input: remove_section("startup_user")
-		Example Input: remove_section("scanDelay", section = "AutoSave")
-		"""
-
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-
-		if (section is None):
-			for section in self.getSections():
-				self.config.remove_section(section)
-			return
-
-		self.check_invalidSection(section, valid_section = valid_section)
-		self.config.remove_section(section or self.default_section)
-
-	def remove_setting(self, variable, section = None, *, valid_section = NULL):
-		"""Removes a setting from the given section.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: remove_setting("startup_user")
-		Example Input: remove_setting("scanDelay", section = "AutoSave")
-		"""
-
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		self.config.remove_option(section or self.default_section, variable)
-
-	def getSections(self, *, valid_section = NULL, skip_knownTypes = True):
-		"""Returns a list of existing sections.
-
-		Example Input: getSections()
-		"""
-
-		def yieldSection():
-			nonlocal self, valid_section, skip_knownTypes
-
-			for section in self.config.sections():
-				if (self.check_invalidSection(section, raiseError = False, valid_section = valid_section)):
-					continue
-
-				if (skip_knownTypes and (section == self.knownTypesSection)):
-					continue
-
-				yield section
-
-		###################################
-
-		return tuple(yieldSection())
-
-	def getDefaults(self):
-		"""Returns the defaults that will be used if a setting does not exist.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: getDefaults()
-		"""
-
-		return self.config.defaults()
-
-	def extraBool(self, value, state):
-		"""Adds a value as an extra possible bool.
-		Default cases (case-insensative): yes/no, on/off, true/false, 1/0
-
-		Example Input: extraBool("sure", True)
-		Example Input: extraBool("nope", False)
-		"""
-
-		self.ConfigParser.BOOLEAN_STATES.update({value: state})
-
-	def set_validSection(self, valid_section = None):
-		if (valid_section is None):
-			self.valid_section = None
-		else:
-			self.valid_section = (self.config.default_section, *((self.knownTypesSection,) if (self.knownTypesSection is not None) else ()), *self.ensure_container(valid_section))
-
-	#Converters
-	@staticmethod
-	def convert_datetime(value):
-		return datetime.datetime.strptime(s, "%Y/%m/%d %H:%M:%S.%f")
-
-	converters = {
-		"datetime": convert_datetime,
-	}
-
-	#Interpolators
-	class MyExtendedInterpolation(configparser.ExtendedInterpolation):
-		"""Modified ExtendedInterpolation from configparser.py"""
-
-		def _interpolate_some(self, parser, option, accum, rest, section, mapping, depth):
-			"""The default ExtendedInterpolation does not account for default values in nested interpolations.
-			ie: The following does not work when get() is given the kwargs 'section = "debugging"' and 'vars = {"filePath_versionDir": "C:/"}').
-				[admin]
-				alembicPath = ${filePath_versionDir}/Schema/main/
-
-				[debugging]
-				alembicPath = ${admin:alembicPath}
-			"""
-
-			rawval = parser.get(section, option, raw = True, fallback = rest)
-			if (depth > configparser.MAX_INTERPOLATION_DEPTH):
-				raise InterpolationDepthError(option, section, rawval)
-			while rest:
-				p = rest.find("$")
-				if p < 0:
-					accum.append(rest)
-					return
-				if p > 0:
-					accum.append(rest[:p])
-					rest = rest[p:]
-				# p is no longer used
-				c = rest[1:2]
-				if c == "$":
-					accum.append("$")
-					rest = rest[2:]
-				elif c == "{":
-					m = self._KEYCRE.match(rest)
-					if m is None:
-						raise InterpolationSyntaxError(option, section,
-							"bad interpolation variable reference %r" % rest)
-					path = m.group(1).split(':')
-					rest = rest[m.end():]
-					sect = section
-					opt = option
-					try:
-						if (len(path) is 1):
-							opt = parser.optionxform(path[0])
-							v = mapping[opt]
-
-						elif (len(path) is 2):
-							sect = path[0]
-							opt = parser.optionxform(path[1])
-							v = parser.get(sect, opt, raw = True)
-
-						else:
-							raise configparser.InterpolationSyntaxError(option, section, "More than one ':' found: %r" % (rest,))
-
-					except (KeyError, NoSectionError, NoOptionError):
-						raise configparser.InterpolationMissingOptionError(option, section, rawval, ":".join(path)) from None
-					
-					if ("$" in v):
-						self._interpolate_some(parser, opt, accum, v, sect, {**mapping, **dict(parser.items(sect, raw = True))}, depth + 1) # <- This was the only change
-					else:
-						accum.append(v)
-				else:
-					raise InterpolationSyntaxError(
-						option, section,
-						"'$' must be followed by '$' or '{', "
-						"found: %r" % (rest,))
-
-class Config_Base(Base, metaclass = abc.ABCMeta):
-	"""Utility API for json and yaml scripts."""
-
-	def __init__(self, default_filePath = None, *, defaultFileExtension = None, override = None, overrideIsSave = None, forceExists = False):
-		"""
-		Example Input: JSON_Aid()
-		Example Input: YAML_Aid()
-		"""
-
-		self.defaultFileExtension = defaultFileExtension
-		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
-		self.filePath_lastLoad = self.default_filePath
-
-		self.dirty = None
-		self.contents = {}
-		self.contents_override = {}
-
-		self.setOverride(override = override, overrideIsSave = overrideIsSave)
-
-		if (default_filePath):
-			self.load(default_filePath, forceExists = forceExists)
-
-	def __repr__(self):
-		representation = f"{type(self).__name__}(id = {id(self)})"
-		return representation
-
-	def __str__(self):
-		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		return output
-
-	def __enter__(self):
-		return self
-
-	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback is not None):
-			print(exc_type, exc_value)
-			return False
-
-	def __getitem__(self, key):
-		return self.contents[key]
-
-	def __setitem__(self, key, value):
-		self.contents[key] = value
-
-	def __delitem__(self, key):
-		del self.contents[key]
-
-	def __contains__(self, key):
-		return key in self.contents
-
-	def read(self, default = None):
-		for section, catalogue in self.contents.items():
-			for setting, value in catalogue.items():
-				if (isinstance(value, dict)):
-					yield section, setting, value.get("value", default)
-				else:
-					yield section, setting, value
-
-	def setOverride(self, override = None, overrideIsSave = None):
-		"""Applies override settings for advanced save and load managment.
-
-		override (str) - A .json file that will override sections in the given filePath
-			- If None: Will ignore all override conditions
-			- If dict: Will use the given dictionary instead of a .json file for saving and loading; can be empty
-			- If str: Will use the .json file located there (it will be created if neccissary)
-
-		overrideIsSave (bool) - Determines what happens when no file path is given to save()
-			- If True: Saves any changes to 'override', unless that value exists in 'default_filePath' in which case it will be removed from 'override'
-			- If False: Saves any changes to 'override'
-			- If None: Saves any changes to 'default_filePath'
-			~ Removed sections or settings are ignored
-
-		Example Input: setOverride()
-		Example Input: setOverride(override = "")
-		Example Input: setOverride(override = "settings_user_override.json")
-		Example Input: setOverride(override = {"Lorem": {"ipsum": 1}})
-		Example Input: setOverride(override = {}, overrideIsSave = True)
-		Example Input: setOverride(override = {}, overrideIsSave = False)
-		"""
-
-		if (override is None):
-			self.override = None
-			self.overrideIsSave = None
-			self.contents_override = {}
-			self.default_filePath_override = None
-			return
-
-		self.overrideIsSave = overrideIsSave
-		if (isinstance(override, dict)):
-			self.override = False
-			self.contents_override = override
-			self.default_filePath_override = None
-			return
-
-		self.override = True
-		self.default_filePath_override = override or f"settings_override.{self.defaultFileExtension}"
-		self.contents_override = {}
-
-	@contextlib.contextmanager
-	def _load(self, filePath = None, removeDirty = True, applyOverride = True, forceExists = False):
-		"""Loads the json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.json")
-		"""
-
-		if (isinstance(filePath, dict)):
-			self.contents = {**filePath}
-			self.filePath_lastLoad = None
-			yield None
-		else:
-			filePath = filePath or self.default_filePath
-			self.filePath_lastLoad = filePath
-
-			if (not os.path.exists(filePath)):
-				if (not forceExists):
-					raise FileExistsError(filePath)
-
-				if (isinstance(forceExists, dict)):
-					self.set(forceExists, valid_section = None)
-
-				self.save(filePath = filePath, applyOverride = False, removeDirty = False)
-
-			with open(filePath) as fileHandle:
-				yield fileHandle
-		
-		if (removeDirty):
-			self.dirty = False
-
-		if (applyOverride):
-			self.load_override()
-
-	@contextlib.contextmanager
-	def _load_override(self, filePath = None):
-		"""Loads the override json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.json")
-		"""
-
-		if (self.override is None):
-			yield None
-			return
-
-		filePath = filePath or self.default_filePath_override
-		if (isinstance(filePath, dict)):
-			self.contents_override = {**filePath}
-			yield None
-		else:
-			if (self.override and (os.path.exists(filePath))):
-				with open(filePath) as fileHandle:
-					yield fileHandle
-			else:
-				yield None
-
-		MyUtilities.common.nestedUpdate(self.contents, self.contents_override, preserveNone = False)
-
-	@contextlib.contextmanager
-	def _save(self, filePath = None, ifDirty = True, removeDirty = True, 
-		applyOverride = True, overrideKwargs = None, **kwargs):
-		"""Saves changes to json file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.json")
-		"""
-		global openPlus
-
-		filePath = filePath or self.default_filePath
-		if (ifDirty and (not self.dirty) and (os.path.exists(filePath))):
-			yield None
-			return
-
-		try:
-			if (applyOverride and self.save_override(**(overrideKwargs or {}))):
-				yield None
-				return
-
-			with openPlus(filePath, **kwargs) as fileHandle:
-				yield fileHandle
-
-		except Exception as error:
-			raise error
-
-		finally:
-			if (removeDirty):
-				self.dirty = False
-
-	@contextlib.contextmanager
-	def _save_override(self, filePath = None, *, base = None):
-		"""Saves changes to json file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.json")
-		"""
-		global openPlus
-
-		def formatCatalogue(catalogue):
-			if (not isinstance(catalogue, dict)):
-				return {"value": catalogue}
-			return catalogue
-
-		#######################################
-
-		if (self.overrideIsSave is None):
-			yield None
-			return
-
-		base = base or {}
-		changes = collections.defaultdict(lambda: collections.defaultdict(dict))
-		for section, new in self.contents.items():
-			old = base.get(section, {})
-
-			for setting, new_catalogue in new.items():
-				new_catalogue = formatCatalogue(new_catalogue)
-				old_catalogue = formatCatalogue(old.get(setting, {}))
-
-				for option, new_value in new_catalogue.items():
-					old_value = old_catalogue.get(option, NULL)
-
-					if ((new_value or (option != "comment")) and ((old_value is NULL) or (new_value != old_value))):
-						changes[section][setting][option] = new_value
-
-		self.contents_override.clear()
-		MyUtilities.common.nestedUpdate(self.contents_override, changes) #Filter out defaultdict
-
-		if (self.override):
-			with openPlus(filePath or self.default_filePath_override) as fileHandle:
-				yield fileHandle
-		else:
-			yield None
-
-	def _ensure(self, section, variable = None, value = None, *, comment = None, 
-		forceAttribute = False, makeDirty = True):
-		"""Makes sure that the given variable exists in the given section.
-
-		section (str) - Which section to ensure 'variable' for
-			- If list: Will ensure all given sections have 'variable'
-			- If dict: Will ignore 'variable' and 'value'
-
-		variable (str) - Which variable to ensure
-			- If list: Will ensure all given variables
-			- If dict: Will ignore 'value' and use the key as 'variable' and the value as 'value'
-
-		value (any) - The default value that 'variable' should have if it does not exist
-		comment (str) - Optional comment string for 'variable'
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", {"label": False})
-		Example Input: ensure({"containers": {"label": False}})
-		"""
-
-		for sectionCatalogue in self.ensure_container(section):
-			for _section, variableCatalogue in self.ensure_dict(sectionCatalogue, variable).items():
-				if (not self.has_section(_section)):
-					self.contents[_section] = {}
-
-				for _variableCatalogue in self.ensure_container(variableCatalogue):
-					for _variable, _value in self.ensure_dict(_variableCatalogue, value).items():
-
-						if (not self.has_setting(_variable, _section)):
-							if (makeDirty):
-								self.dirty = True
-							if (comment):
-								yield _section, _variable, {"value": _value, "comment": comment}
-							elif (forceAttribute):
-								yield _section, _variable, {"value": _value}
-							else:
-								yield _section, _variable, {_value}
-
-	@abc.abstractmethod
-	def load(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def load_override(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def save(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def save_override(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def ensure(self, *args, **kwargs):
-		pass
-
-	def get(self, section, setting = None, default = None, *, 
-		forceAttribute = None, forceTuple = False, 
-		filterNone = False, useForNone = None):
-		"""Returns the value of the given setting in the given section.
-
-		setting (str) - What variable to look for
-			- If list: Will return the value for each variable given
-
-		Example Input: get("lorem", "ipsum")
-		Example Input: get("lorem", ("ipsum", "dolor"))
-		"""
-
-		def formatValue(value):
-			nonlocal default
-
-			if (isinstance(value, dict)):
-				return value.get("value", default)
-			return value
-
-		def yieldValue():
-			nonlocal self, section, setting, filterNone, useForNone
-
-			for _setting in self.ensure_container(setting):
-				value = formatValue(self.contents[section][_setting])
-				if (filterNone and (value is useForNone)):
-					continue
-
-				yield _setting, value
-
-		####################
-
-		setting = self.ensure_default(setting, lambda: self.getSettings(section))
-
-		answer = {key: value for key, value in yieldValue()}
-		if ((forceAttribute is not None) and (forceAttribute or (len(answer) is not 1))):
-			return answer
-		else:
-			return self.oneOrMany(answer.values(), forceTuple = forceTuple)
-
-	def set(self, contents = None, update = True, makeDirty = True):
-		"""Adds a section to the internal contents.
-
-		contents (dict) - What to add
-		update (bool) - Determines what happens if a key already exists for the given 'contents'
-			- If True: Will update nested dictionaries
-			- If False: Will replace nested dictionaries
-			- If None: Will replace entire self.contents
-
-		Example Input: set()
-		Example Input: set({"lorem": 1})
-		Example Input: set({"ipsum": {"dolor": 4}})
-		Example Input: set({"ipsum": {"dolor": 5}}, update = False)
-		Example Input: set({"lorem": 1, "ipsum": {"dolor": 2, "sit": 3}}, update = None)
-		"""
-
-		contents = contents or {}
-
-		assert isinstance(contents, dict)
-
-		if (update is None):
-			self.contents = contents
-		elif (not update):
-			self.contents.update(contents)
-		else:
-			MyUtilities.common.nestedUpdate(self.contents, contents)
-
-		if (makeDirty):
-			self.dirty = True
-
-	def apply(self, handle, section, include = None, exclude = None, handleTypes = None):
-		"""Places default values into the supplied handle.
-
-		___________________ REQUIRED FORMAT ___________________
-
-		self.contents = {
-			section (str): {
-				variable (str): value (any),
-
-				variable (str): {
-					"value": value (any),
-					"comment": docstring (str), #optional
-				},
-			},
-		}
-		_______________________________________________________
-
-		section (str) - Which section to apply variables for
-			- If list: Will apply all given sections
-
-		handle (object) - What to apply the given sections to
-			- If list: will apply to all
-
-		include (str) - What variable is allowed to be applied
-			- If list: Will apply all variables in the section
-
-		handleTypes (list) - Place the type for 'section' here
-
-		Example Input: apply(test_1, "GUI_Manager", handleTypes = Test)
-		Example Input: apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
-		Example Input: apply(self, {"FrameSettings": self.label}, handleTypes = (self.__class__,))
-		Example Input: apply(self, {"FrameSettings": {self.label: "title"}}, handleTypes = (self.__class__,))
-		Example Input: apply((test1, test_2), {"Settings": ("debugging_default", "debugging_enabled")}, handleTypes = Test)
-		"""
-
-		def yieldApplied():
-			nonlocal self, handle, section, handleTypes
-
-			for _handle in self.ensure_container(handle, elementTypes = handleTypes):
-				for _section in self.ensure_container(section):
-					for item in setValue(_handle, _section, self.contents):
-						yield item
-
-		def setValue(_handle, _section, catalogue):
-			nonlocal self, include, exclude
-
-			if (isinstance(_section, dict)):
-				for key, value in _section.items():
-					for item in setValue(_handle, value, catalogue.get(key)):
-						yield item
-				return 
-			
-			if (_section not in catalogue):
-				print("@apply", f"{_section} does not exist in catalogue\n  -- keys: {tuple(catalogue.keys())}")
-				raise NotImplementedError()
-				return
-
-			for variable, _catalogue in catalogue[_section].items():
-				if (include and (variable not in include)):
-					continue
-				if (exclude and (variable in exclude)):
-					continue
-
-				if ((not isinstance(_catalogue, dict) or ("value" not in _catalogue))):
-					setattr(_handle, variable, _catalogue)
-				else:
-					setattr(_handle, variable, _catalogue["value"])
-
-				yield variable
-
-		#######################################################
-		
-		include = self.ensure_container(include)
-		exclude = self.ensure_container(exclude)
-
-		return tuple(yieldApplied())
-
-	def has_section(self, section = None):
-		"""Returns True if the section exists in the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_section()
-		Example Input: has_section(section = "AutoSave")
-		"""
-
-		return (section or self.default_section) in self.contents
-
-	def has_setting(self, variable, section = None):
-		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_setting("startup_user")
-		Example Input: has_setting("scanDelay", section = "AutoSave")
-		"""
-
-		return variable in self.contents.get(section or self.default_section, {})
-
-	def is_dirty(self):
-		"""Returns True if changes have been made that are not yet saved, otherwise returns False.
-
-		Example Input: is_dirty()
-		"""
-
-		return self.dirty
-
-	def getSections(self, variable = None):
-		"""Returns a list of existing sections.
-
-		variable (str) - What variable must exist in the section
-			- If None: Will not search for sections by variable
-
-		Example Input: getSections()
-		Example Input: getSections(variable = "debugging_default")
-		"""
-
-		if (variable is None):
-			return tuple(self.contents.keys())
-
-		return tuple(key for key, catalogue in self.contents.items() if (variable in catalogue.keys()))
-
-	def getSettings(self, section = None, valuesAsSet = False):
-		"""Returns a list of existing settings for the given section.
-
-		section (str) - What section to write this setting in
-			- If list: Will use all in list
-			- If None: Will use all existing sections
-
-		Example Input: getSettings()
-		Example Input: getSettings("AutoSave")
-		"""
-
-		if (valuesAsSet):
-			container = set
-		else:
-			container = tuple
-
-		return container(variable for key in (self.ensure_container(section) or self.contents.keys()) for variable in self.contents[key].keys())
-
-class JSON_Aid(Config_Base):
-	"""Utility API for json scripts.
-
-	Use: https://martin-thoma.com/configuration-files-in-python/#json
-	"""
-
-	def __init__(self, default_filePath = None, **kwargs):
-		"""
-		Example Input: JSON_Aid()
-		"""
-
-		super().__init__(default_filePath = default_filePath or "settings.json", defaultFileExtension = "json", **kwargs)
-
-	def load(self, *args, **kwargs):
-		"""Loads the json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.json")
-		"""
-
-		with self._load(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents = json.load(fileHandle) or {}
-			
-		return self.contents
-
-	def load_override(self, *args, **kwargs):
-		"""Loads the override json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.json")
-		"""
-
-		with self._load_override(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents_override = json.load(fileHandle) or {}
-
-	def save(self, *args, **kwargs):
-		"""Saves changes to json file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.json")
-		"""
-
-		with self._save(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				json.dump(self.contents or None, fileHandle, indent = "\t")
-
-	def save_override(self, *args, base = None, **kwargs):
-		"""Saves changes to json file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.json")
-		"""
-
-		if (base is None):
-			with open(self.filePath_lastLoad) as fileHandle:
-				base = json.load(fileHandle) or {}
-
-		with self._save_override(*args, base = base, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				json.dump(self.contents_override or None, fileHandle, indent = "\t")
-
-		return True
-
-	def ensure(self, *args, saveToOverride = None, **kwargs):
-		"""Makes sure that the given variable exists in the given section.
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
-		"""
-		global openPlus
-
-		if (saveToOverride is None):
-			for section, variable, value in self._ensure(*args, **kwargs):
-				self.contents[section][variable] = value
-			return True
-
-		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
-		with open(filePath) as fileHandle:
-			base = json.load(fileHandle) or {}
-
-		changed = False
-		for section, variable, value in self._ensure(*args, **kwargs):
-			self.contents[section][variable] = value
-			changed = True
-
-			if (section not in base):
-				base[section] = {}
-			base[section][variable] = value
-
-		if (changed):
-			with openPlus(filePath) as fileHandle:
-				json.dump(base or None, fileHandle, indent = "\t")
-
-		return True
-
-class YAML_Aid(Config_Base):
-	"""Utility API for yaml scripts.
-
-	Use: https://pyyaml.org/wiki/PyYAMLDocumentation
-	Use: https://martin-thoma.com/configuration-files-in-python/#yaml
-	"""
-
-	def __init__(self, default_filePath = None, **kwargs):
-		"""
-		Example Input: YAML_Aid()
-		"""
-
-		super().__init__(default_filePath = default_filePath or "settings.yaml", defaultFileExtension = "yaml", **kwargs)
-
-	def load(self, *args, **kwargs):
-		"""Loads the yaml file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.yaml")
-		"""
-
-		with self._load(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents = yaml.load(fileHandle) or {}
-			
-		return self.contents
-
-	def load_override(self, *args, **kwargs):
-		"""Loads the override yaml file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.yaml")
-		"""
-
-		with self._load_override(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents_override = yaml.load(fileHandle) or {}
-
-	def save(self, *args, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Saves changes to yaml file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.yaml")
-		"""
-
-		with self._save(*args, overrideKwargs = {"explicit_start": explicit_start, "width": width, "indent": indent, 
-			"canonical": canonical, "default_flow_style": default_flow_style}, **kwargs) as fileHandle:
-
-			if (fileHandle is not None):
-				yaml.dump(self.contents or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-	def save_override(self, *args, base = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Saves changes to yaml file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.yaml")
-		"""
-
-		if (base is None):
-			with open(self.filePath_lastLoad) as fileHandle:
-				base = yaml.load(fileHandle) or {}
-
-		with self._save_override(*args, base = base, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				yaml.dump(self.contents_override or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-		return True
-
-	def ensure(self, *args, saveToOverride = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Makes sure that the given variable exists in the given section.
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
-		"""
-
-		global openPlus
-
-		if (saveToOverride is None):
-			for section, variable, value in self._ensure(*args, **kwargs):
-				self.contents[section][variable] = value
-			return True
-
-		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
-		with open(filePath) as fileHandle:
-			base = yaml.load(fileHandle) or {}
-
-		changed = False
-		for section, variable, value in self._ensure(*args, **kwargs):
-			self.contents[section][variable] = value
-			changed = True
-
-			if (section not in base):
-				base[section] = {}
-			base[section][variable] = value
-
-		if (changed):
-			with openPlus(filePath) as fileHandle:
-				yaml.dump(base or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-		return True
-
-def quiet(*args):
-	pass
-	print(*args)
 
 def sandbox():
-	def test_yaml():
-		class Test(): pass
-		test_1 = Test()
-		test_2 = Test()
-
-		# yaml_api = build_yaml(default_filePath = "test/settings.yaml", forceExists = True)
-		# print(yaml_api)
-
-		# yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = {"GUI_Manager": {"startup_window": "settings"}})
-		yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = "M:/Versions/dev/Settings/temp_default_user.yaml", overrideIsSave = True)
-		quiet(yaml_api.apply(test_1, "GUI_Manager", handleTypes = Test))
-		quiet(yaml_api.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,)))
-		quiet(yaml_api.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,)))
-
-		quiet(vars(test_1))
-		quiet(vars(test_2))
-		quiet(yaml_api.getSettings())
-		quiet(yaml_api.getSettings("Users"))
-		quiet(yaml_api.getSections(variable = "debugging_default"))
-
-		yaml_api.set({"GUI_Manager": {"startup_window": "main"}})
-		yaml_api.save()
-
-	def test_json():
-		class Test(): pass
-		test_1 = Test()
-		test_2 = Test()
-
-		# json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = {"GUI_Manager": {"startup_window": "settings"}})
-		json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = "M:/Versions/dev/Settings/temp_default_user.json", overrideIsSave = True)
-		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
-		json_API.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
-		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
-
-		quiet(vars(test_1))
-		quiet(vars(test_2))
-		quiet(json_API.getSettings("Users"))
-		quiet(json_API.getSections(variable = "debugging_default"))
-
-		json_API.set({"GUI_Manager": {"startup_window": "main"}})
-		json_API.save()
-
-	def test_config():
-		# config_API = build_configuration()
-		# # config_API.set("startup_user", "admin")
-		# # config_API.save("test/test.ini")
-
-		# config_API.load("test/test.ini")
-		# # quiet(config_API.get("startup_user"))
-		
-		# with config_API as config:
-		# 	for section, sectionHandle in config.items():
-		# 		for key, value in sectionHandle.items():
-		# 			quiet(section, key, value)
-
-		user = os.environ.get('username')
-		config_API = build_configuration("M:/Versions/dev/Settings/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
-
-		value = config_API.get("startup_user")
-		print(value, type(value))
-
-		# value = config_API.get("x")
-		# print(value, type(value))
-
-		# value = config_API.get("y")
-		# print(value, type(value))
-
 	def test_sqlite():
 		database_API = build()
 		# database_API.openDatabase(None, "M:/Schema/main/schema_main.py") 
@@ -4780,20 +3285,20 @@ def sandbox():
 
 		# timeStart = time.perf_counter()
 		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
-		# 	'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
-		# 	'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		#   'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		#   'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
 		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}\n") #0.8802
 		# print(len(answer))
 
 		# timeStart = time.perf_counter()
 		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
-		# 	'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
-		# 	'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		#   'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		#   'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
 		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}") #0.8587
 
 		# for item in answer:
-		# 	print(item.label)
-		# 	break
+		#   print(item.label)
+		#   break
 
 		# session.flush()
 		# session.close()
@@ -4949,9 +3454,9 @@ def sandbox():
 	# test_json()
 	# test_yaml()
 	# test_config()
-	# test_sqlite()
+	test_sqlite()
 	# test_access()
-	test_mysql()
+	# test_mysql()
 
 def main():
 	"""The main program controller."""
