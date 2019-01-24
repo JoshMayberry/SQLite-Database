@@ -31,6 +31,7 @@ import inspect
 import unidecode
 import importlib
 
+import urllib
 import sqlalchemy
 import sqlalchemy_utils
 import sqlalchemy.ext.declarative
@@ -48,8 +49,8 @@ import MyUtilities.common
 import MyUtilities.logger
 import MyUtilities.caching
 
-from utilities import json
-import db_config
+from API_Database.utilities import json
+import API_Database.db_config as db_config
 
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
@@ -2012,12 +2013,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		config = db_config.build(default_filePath = filePath, default_section = section)
 		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
-			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
+			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass", "refresh_metaData")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
 		openAlembic = False, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None, override_resetBypass = False,
-		port = None, host = None, user = None, password = None, echo = False,
+		port = None, host = None, user = None, password = None, echo = False, refresh_metaData = True, 
 		resultError_replacement = None, aliasError_replacement = None):
 
 		"""Opens a database.If it does not exist, then one is created.
@@ -2028,6 +2029,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Use: https://stackoverflow.com/questions/9233912/connecting-sqlalchemy-to-msaccess/13849359#13849359
 		Use: https://docs.sqlalchemy.org/en/latest/core/connections.html#registering-new-dialects
 		Use: http://www.blog.pythonlibrary.org/2010/10/10/sqlalchemy-and-microsoft-access/
+
+		Special thanks to jmagnusson for how to connect to a mssql database on: https://stackoverflow.com/questions/4493614/sqlalchemy-equivalent-of-pyodbc-connect-string-using-freetds/7399585#7399585
 
 		fileName (str)      - The name of the database file
 			- If None: Will create a new database that only exists in RAM and not on ROM
@@ -2055,10 +2058,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
 		"""
 
+		assert not isinstance(reset, str)
+
 		@contextlib.contextmanager
 		def makeEngine():
 			global sessionMaker
-			nonlocal self, user, password, host, port, fileName, schemaPath, openAlembic, alembicPath
+			nonlocal self, user, password, host, port, fileName, schemaPath, openAlembic, alembicPath, refresh_metaData
 
 			self.isAccess = self.connectionType == "access"
 			self.isSQLite = self.connectionType == "sqlite3"
@@ -2080,9 +2085,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				self.fileName = f"access+fixed:///{fileName}?charset={engineKwargs['encoding']}"
 
 			elif (self.isMsSQL):
-				raise NotImplementedError()
 				engineKwargs = {}
-				self.fileName = f"mssql+pyodbc://{user}:{password}@{host or localhost}:{port or 3306}/{fileName}?driver=SQL+Server+Native+Client+11.0"
+				self.fileName = "mssql+pyodbc:///?odbc_connect={}".format(urllib.parse.quote_plus(f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={host or localhost};PORT={port or 3306};DATABASE={fileName};UID={user};PWD={password}"))
 
 			else:
 				errorMessage = f"Unknown connection type {connectionType}"
@@ -2109,7 +2113,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				self.createDatabase()
 				_reset = True
 
-			self.loadSchema(schemaPath)
+			self.loadSchema(schemaPath, refresh_metaData = refresh_metaData)
 
 			if (openAlembic or ((openAlembic is None) and fileName)):
 				self.loadAlembic(alembicPath)
@@ -2153,6 +2157,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		#   self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		with makeEngine() as engineKwargs:
+			self.log_info("Creating Engine", fileName = self.fileName, **engineKwargs)
 			self.engine = sqlalchemy.create_engine(self.fileName, **engineKwargs, echo = echo)
 
 	def _fk_pragma_on_connect(self, connection, record):
@@ -2217,7 +2222,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		if (applyChanges or ((applyChanges is None) and self.defaultCommit)):
 			self.saveDatabase()
 
-	def loadSchema(self, schemaPath = None):
+	def loadSchema(self, schemaPath = None, refresh_metaData = True):
 		"""Loads in a schema from the given schemaPath.
 
 		Example Input: loadSchema(schemaPath)
@@ -2294,7 +2299,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		self.schemaPath = schemaPath
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
-		self.refresh()
+		
+		if (refresh_metaData is not False):
+			self.refresh()
 
 	def checkSchema(self):
 		"""Checks the loaded schema against what is in the meta data."""
@@ -2404,7 +2411,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		"""
 	
 	@wrap_errorCheck()
-	def createRelation(self, relation = None, schemaPath = None):
+	def createRelation(self, relation = None, schemaPath = None, refresh_metaData = True):
 		"""Adds a relation (table) to the database.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 		
@@ -2437,7 +2444,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		if (schemaPath is None):
 			schema = self.schema
 		else:
-			schema = self.loadSchema(schemaPath)
+			schema = self.loadSchema(schemaPath, refresh_metaData = refresh_metaData)
 
 	def copyAttribute(self, source_relation, source_attribute, destination_relation, destination_attribute = None):
 		"""Copies an attribute from an existing table to another.
