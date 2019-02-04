@@ -421,9 +421,9 @@ class Utility_Base(Base_Database):
 
 	def yieldColumn_fromTable(self, relation, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+		#Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#accessing-tables-and-columns
 
 		def formatAttribute(foreignKey, attribute):
-			raise NotImplementedError() #Untested
 			if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
 				if (foreignAsDict):
 					return f"zfk_{foreignKey}_zfk_{alias[foreignKey][attribute]}"
@@ -457,15 +457,17 @@ class Utility_Base(Base_Database):
 						yield columnHandle
 					continue
 
-				raise NotImplementedError() #Untested
 				if (foreignDefault is None):
-					catalogue = {catalogue: tuple(attribute for attribute in columnHandle.foreign_keys[catalogue].__mapper__.columns.keys() if (attribute not in exclude))}
+					if (len(columnHandle.foreign_keys) > 1):
+						raise NotImplementedError()
+
+					for foreignKey in columnHandle.foreign_keys: break
+					catalogue = {catalogue: tuple(attribute for attribute in foreignKey.column.table.columns.keys() if (attribute not in exclude))}
 				else:
 					catalogue = {catalogue: foreignDefault}
 
-			raise NotImplementedError() #Untested
-			for foreignKey, attributeList in catalogue.items():
-				for attribute in cls.ensure_container(attributeList):
+			for attribute, foreignKeyList in catalogue.items():
+				for foreignKey in self.ensure_container(foreignKeyList):
 					yield getattr(table.columns, attribute).label(formatAttribute(foreignKey, attribute))
 
 class Schema_Base(Base_Database):
@@ -1930,41 +1932,168 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		return handle.order_by(*yieldOrder())
 
-	def configureJoin(self, query, relation, schema, table, attribute, fromSchema = False):
-		"""Sets up the JOIN portion of the SQL message."""
+	def configureJoinForeign(self, query, relation, schema, table, attribute, fromSchema = False):
+		"""Sets up the JOIN portion of the SQL message (with respect to foreign keys)."""
+
+		if (schema is None):
+			if (not table.foreign_keys):
+				return query
+		elif (fromSchema or (not schema.foreignKeys)):
+			return query
+
+		###############################################
+
+		if (schema is None):
+			foreignCatalogue = {foreignKey.column.name: foreignKey.column.table for foreignKey in table.foreign_keys}
+		else:
+			foreignCatalogue = schema.foreignKeys
 
 		def augmentHandle(_handle, attributeList):
 			for variable in self.ensure_container(attributeList):
 				if (isinstance(variable, dict)):
 					_handle = augmentHandle(_handle, variable.keys())
 					continue
-				if (variable not in schema.foreignKeys):
+				if (variable not in foreignCatalogue):
 					continue
 
-				_handle = _handle.join(schema.foreignKeys[variable])
+				_handle = _handle.join(foreignCatalogue[variable])
 			return _handle
 
 		###############################################
-
-		if (schema is None):
-			if (not table.foreign_keys):
-				return query
-			raise NotImplementedError() #Untested
-
-		elif (fromSchema or (not schema.foreignKeys)):
-			return query
-
-		if (fromSchema is None):
-			handle = self.metadata.tables[relation]
-		else:
-			handle = query
-
-		handle = augmentHandle(handle, attribute)
 		
 		if (fromSchema is None):
-			return query.select_from(handle)
-		return handle
-	
+			return query.select_from(augmentHandle(self.metadata.tables[relation], attribute))
+		return augmentHandle(query, attribute)
+
+	def configureJoinDomestic(self, query, relation, schema, table, connection, fromSchema, join, foreignAsDict):
+		"""Sets up the JOIN portion of the SQL message (with respect to other relations).
+
+		join (tuple) - Joins the yielded queries when this dictionary is given to yieldValueQuery() as kwargs
+			~ (variable from this relation (str), relation to join with (str), variable from joined relation (str), what variables from joined relation to take (tuple of strings))
+		"""
+
+		if (join is None):
+			return query
+
+		# if (schema is None):
+		# 	_handle = self.metadata.tables[relation]
+		# 	relationHandle = self.metadata.tables[relation].columns
+		# else:
+		# 	_handle = query
+		# 	relationHandle = schema.relationCatalogue[relation]
+
+		relationHandle = self.metadata.tables[relation]
+		_handle = relationHandle
+		for attribute, foreign_relation, foreign_attribute, attributeList in self.ensure_container(join, elementCriteria = (4, (str, str, str, tuple))):
+			foreignRelationHandle = self.metadata.tables[foreign_relation]
+			_handle = _handle.join(foreignRelationHandle, getattr(relationHandle.columns, attribute) == getattr(foreignRelationHandle.columns, foreign_attribute))
+
+		return query.select_from(_handle)
+
+
+			# attributeHandle = getattr(relationHandle, attribute)
+			# kwargs["fromSchema"] = fromSchema
+			# kwargs["connection"] = connection
+			# kwargs["foreignAsDict"] = foreignAsDict
+			# print("@1", attribute, join_attribute)
+			# print([query])
+			# print(query)
+			# print()
+
+			# relationHandle.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+			# for _query in self.yieldValueQuery(**kwargs, yieldQueryOnly = True):
+
+			# 	print([_query])
+			# 	print(_query)
+			# 	print()
+
+			# 	# __query = _query.join(query)
+			# 	# print([__query])
+			# 	# print(__query)
+			# 	# print()
+			# 	# return query.select_from(__query)
+
+			# 	with self.makeSession(close = True) as session:
+			# 		__query = session.query(_query)
+					
+			# 		print([__query])
+			# 		print(__query)
+			# 		print()
+
+			# 		subquery = __query.subquery()
+
+			# 		___query = _handle.join(subquery)
+					
+			# 		print([___query])
+			# 		print(___query)
+			# 		print()
+
+			# 		return query.select_from(___query)
+
+
+
+			# 	# raise NotImplementedError()
+
+			# 	# if (isinstance(join_attribute, str)):
+			# 	# 	foreign_attribute = None
+			# 	# else:
+			# 	# 	join_attribute, foreign_attribute = join_attribute
+
+			# 	# if (join_attribute in _query.columns):
+			# 	# 	foreignHandle = _query.columns[join_attribute]
+			# 	# else:
+			# 	# 	for column in _query.columns:
+			# 	# 		foreignMatch = re.search("zfk_(.*)_zfk_(.*)", column.name)
+			# 	# 		if (not foreignMatch):
+			# 	# 			continue
+
+			# 	# 		if (foreign_attribute is None):
+			# 	# 			_foreign_attribute = column.table.name
+			# 	# 		else:
+			# 	# 			_foreign_attribute = foreign_attribute
+
+			# 	# 		if ((foreignMatch.group(1) == join_attribute) and (foreignMatch.group(1) == _foreign_attribute)):
+			# 	# 			foreignHandle = column
+			# 	# 			break
+			# 	# 	else:
+			# 	# 		raise NotImplementedError()
+
+
+
+			# 	# # print("@5", tuple(yieldAttribute(_query)))
+
+			# 	# # print("@5", _query.where(attributeHandle == getattr(_query.columns, join_attribute)))
+
+			# 	# if (fromSchema is None):
+			# 	# 	print()
+			# 	# 	print(_query)
+			# 	# 	print()
+			# 	# 	print(_query.where(attributeHandle == foreignHandle))
+			# 	# 	print()
+			# 	# 	handle = handle.join(_query.where(attributeHandle == foreignHandle))
+			# 	# 	print(handle) #Not working yet. Gives a syntax error. I am doing something wrong with how these two are joined.
+			# 	# 	raise NotImplementedError()
+			# 	# else:
+			# 	# 	subquery = _query.subquery()
+			# 	# 	handle = handle.join(subquery, attributeHandle == getattr(subquery.columns, join_attribute))
+		
 	#Interaction Functions
 	def setDefaultCommit(self, state):
 		self.defaultCommit = state
@@ -2641,7 +2770,49 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 						query.delete()
 
+	def _setupYieldAllValues(self, relation = None, attribute = None, exclude = None):
+		if (relation is None):
+			relation = self.getRelationNames()
+		else:
+			relation = self.ensure_container(relation)
+
+		if (isinstance(exclude, dict)):
+			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+		else:
+			excludeList = self.ensure_container(exclude, convertNone = True)
+
+		myTuple = {}
+		for _relation in relation:
+			if (attribute):
+				if (isinstance(attribute, dict)):
+					myTuple[_relation] = attribute.get(_relation, None)
+				else:
+					myTuple[_relation] = attribute
+			else:
+				myTuple[_relation] = None
+
+		return myTuple, excludeList
+
 	@wrap_errorCheck()
+	def yieldAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
+		"""
+		Example Use:
+			for relation, attributeList, query in database_API.yieldAllValues(None):
+				print([relation, attributeList, query])
+				for result in query.all():
+					print("   ", result)
+
+		Example Use:
+			with database_API._yieldValue_getConnection(fromSchema = None) as connection:
+				for relation, attributeList, query in database_API.yieldAllValues(None, fromSchema = None, connection = connection):
+					print([relation, attributeList, query])
+					for result in connection.execute(query).fetchall():
+						print("   ", result)
+		"""
+		myTuple, excludeList = self._setupYieldAllValues(relation = relation, attribute = attribute, exclude = exclude)
+		for item in self.yieldValueQuery(myTuple, exclude = excludeList, **kwargs):
+			yield item
+
 	def getAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
 		"""Returns all values in the given relation (table) that match the filter conditions.
 
@@ -2667,35 +2838,19 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
 
-		if (relation is None):
-			relation = self.getRelationNames()
-		else:
-			relation = self.ensure_container(relation)
-
-		if (isinstance(exclude, dict)):
-			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-		else:
-			excludeList = self.ensure_container(exclude, convertNone = True)
-
-		myTuple = {}
-		for _relation in relation:
-			if (attribute):
-				if (isinstance(attribute, dict)):
-					myTuple[_relation] = attribute.get(_relation, None)
-				else:
-					myTuple[_relation] = attribute
-			else:
-				myTuple[_relation] = None
-
+		myTuple, excludeList = self._setupYieldAllValues(relation = relation, attribute = attribute, exclude = exclude)
 		return self.getValue(myTuple, exclude = excludeList, **kwargs)
 
+	def _yieldValue_getConnection(self, fromSchema):
+		if (fromSchema is None or (self.schema is None) or (isinstance(self.schema, EmptySchema))):
+			return self.makeConnection(asTransaction = True)
+		return self.makeSession(close = not fromSchema)
+
 	@wrap_errorCheck()
-	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
-		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
-		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
-		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False, noAnswer = NULL_private, 
-		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
-		foreignAsDict = False, foreignDefault = None, includeSession = None, **locationKwargs):
+	def yieldValueQuery(self, myTuple, nextTo = None, *, connection = None, yieldQueryOnly = False,
+		count = False, fromSchema = False, foreignAsDict = False, includeSession = None, 
+		orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, join = None,
+		includeDuplicates = True, exclude = None, forceMatch = None, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -2784,9 +2939,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue({"Users": "name", "Names": "first_name"}, filterRelation = False)
 		Example Input: getValue({"Users": "name", "Names": ["first_name", "extra_data"]})
 
-		Example Input: getValue({"Users": "name"}, filterForeign = None)
-		Example Input: getValue({"Users": "name"}, filterForeign = False)
-
 		Example Input: getValue({"Users": "name"}, {"age": 24})
 		Example Input: getValue({"Users": "name"}, {"age": 24, height: 6})
 		Example Input: getValue({"Users": "name"}, {"age": 24, height: 6}, nextToCondition = False)
@@ -2802,20 +2954,148 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
 
+		if (connection is None):
+			with self._yieldValue_getConnection(fromSchema = fromSchema) as _connection:
+				for item in self.yieldValueQuery(myTuple, nextTo, connection = _connection, yieldQueryOnly = yieldQueryOnly, 
+					count = count, fromSchema = fromSchema, foreignAsDict = foreignAsDict, includeSession = includeSession, 
+					orderBy = orderBy, limit = limit, direction = direction, nullFirst = nullFirst, alias = alias, join = join, 
+					includeDuplicates = includeDuplicates, exclude = exclude, forceMatch = forceMatch, foreignDefault = foreignDefault, **locationKwargs):
+					
+					yield item
+			return
+
+		#####################################################################
+
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
 
 		if (fromSchema is None):
-			contextmanager = self.makeConnection(asTransaction = True)
 			def startQuery(relation, attributeList, schema, table):
 				nonlocal self, excludeList, alias
 
 				if (schema is not None):
 					return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
 				return sqlalchemy.select(columns = self.yieldColumn_fromTable(table, attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
-					
+
+		elif (fromSchema):
+			def startQuery(relation, attributeList, schema, table):
+				nonlocal connection, includeSession
+				assert schema is not None
+
+				query = connection.query(schema)
+				if (includeSession is None):
+					query = query.options(sqlalchemy.orm.selectinload("*"))
+				return query
+		else:
+			def startQuery(relation, attributeList, schema, table):
+				nonlocal connection, excludeList, alias
+				assert schema is not None
+
+				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
+
+		########################################################################
+
+		if (not isinstance(exclude, dict)):
+			excludeList = self.ensure_container(exclude, convertNone = True)
+
+		assert myTuple
+		for relation, attributeList in myTuple.items():
+			if (fromSchema):
+				attributeList = ()
+			else:
+				if (isinstance(exclude, dict)):
+					excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
+
+			schema = self.getSchema(relation)#, forceMatch = True)
+			table = self.metadata.tables[relation]
+
+			query = startQuery(relation, attributeList, schema, table)
+			query = self.configureJoinForeign(query, relation, schema, table, attributeList, fromSchema = fromSchema)
+			query = self.configureJoinDomestic(query, relation, schema, table, connection, fromSchema, join, foreignAsDict)
+			query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+			query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+
+			if (limit is not None):
+				query = query.limit(limit)
+			if (not includeDuplicates):
+				query = query.distinct()
+			if (count and (fromSchema is None)):
+				query = query.count()
+
+			if (yieldQueryOnly):
+				yield query
+			else:
+				yield relation, attributeList, query
+
+	def getValue(self, myTuple, nextTo = None, *args, 
+		count = False, fromSchema = False, foreignAsDict = False, includeSession = None, 
+		valuesAsSet = False, onlyOne = False, attributeFirst = False, noAnswer = NULL_private, 
+		forceRelation = False, forceAttribute = False, forceTuple = False, **kwargs):
+		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
+			fromSchema = None
+
+
+
+		def _makeCatalogue(result):
+			nonlocal attributeList
+
+			class _dict(dict):
+				"""Used to allow value to be a dict without messing up the process below."""
+			class _list(list):
+				"""Used to allow value to be a list without messing up the process below."""
+
+			def _formatValue(existingValue, newValue):
+
+				if (isinstance(existingValue, _list)):
+					existingValue.append(newValue)
+				else:
+					existingValue = _list(existingValue, newValue)
+				return existingValue
+
+			############################################
+			
+			catalogue = collections.defaultdict(_dict)
+			if (fromSchema is None):
+				iterator = result.items()
+			else:
+				iterator = result._asdict().items()
+
+			for key, value in iterator:
+				foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
+
+				if (foreignMatch):
+					attribute = foreignMatch.group(1)
+					foreign_attribute = foreignMatch.group(2)
+				else:
+					attribute = key
+					foreign_attribute = None
+
+				# if (attribute not in attributeList):
+				# 	continue
+
+				if (attribute not in catalogue):
+					if (foreign_attribute is None):
+						catalogue[attribute] = value
+					else:
+						catalogue[attribute][foreign_attribute] = value
+					continue
+
+				if (not isinstance(catalogue[attribute], _dict)):
+					_value = catalogue[attribute]
+					catalogue[attribute] = _dict()
+					catalogue[attribute][foreign_attribute] = _formatValue(_value, value)
+					continue
+
+				if (foreign_attribute not in catalogue[attribute]):
+					catalogue[attribute][foreign_attribute] = value
+				else:
+					catalogue[attribute][foreign_attribute] = _formatValue(catalogue[attribute][foreign_attribute], value)
+			return dict(catalogue)
+
+		if (fromSchema is None):
 			def yieldRow(query):
-				nonlocal connection
+				nonlocal connection, attributeList
 
 				catalogue = self.engine.url.query
 				if (("charset" in catalogue) and (catalogue["charset"] != "utf8")):
@@ -2861,26 +3141,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						yield dict(result)
 
 					else:
-						catalogue = collections.defaultdict(dict)
-						for key, value in result.items():
-							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
-							if (not foreignMatch):
-								catalogue[key] = value
-							else:
-								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
-						yield dict(catalogue)
+						yield _makeCatalogue(result)
 
 		elif (fromSchema):
-			contextmanager = self.makeSession(close = False)
-			def startQuery(relation, attributeList, schema, table):
-				assert connection, schema is not None
-
-				query = connection.query(schema)
-				if (includeSession is None):
-					query = query.options(sqlalchemy.orm.selectinload("*"))
-
-				return query
-
 			def yieldRow(query):
 				nonlocal count              
 
@@ -2896,13 +3159,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					yield result
 
 		else:
-			contextmanager = self.makeSession()
-			def startQuery(relation, attributeList, schema, table):
-				nonlocal connection, excludeList, alias
-				assert schema is not None
-
-				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
-
 			def yieldRow(query):
 				nonlocal count
 
@@ -2918,6 +3174,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				for result in answer:
 					if (result is None):
 						continue
+
 					elif ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
@@ -2925,17 +3182,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						yield result._asdict()
 
 					else:
-						catalogue = collections.defaultdict(dict)
-						for key, value in result._asdict().items():
-							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
-							if (not foreignMatch):
-								catalogue[key] = value
-							else:
-								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
-						yield dict(catalogue)
+						yield _makeCatalogue(result)
 
 		container = (tuple, set)[valuesAsSet]
-
 		def getResult(query):
 			nonlocal forceTuple, container, noAnswer
 
@@ -2963,38 +3212,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		########################################################################
 
-		if (not isinstance(exclude, dict)):
-			excludeList = self.ensure_container(exclude, convertNone = True)
-
-		assert myTuple
 		results_catalogue = {}
-		with contextmanager as connection:
+		with self._yieldValue_getConnection(fromSchema = fromSchema) as connection:
 			if (includeSession):
 				results_catalogue[None] = connection
 
-			for relation, attributeList in myTuple.items():
-				if (fromSchema):
-					attributeList = ()
-				else:
-					if (isinstance(exclude, dict)):
-						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
-
-				schema = self.getSchema(relation)#, forceMatch = True)
-				table = self.metadata.tables[relation]
-
-				query = startQuery(relation, attributeList, schema, table)
-				query = self.configureJoin(query, relation, schema, table, attributeList, fromSchema = fromSchema)
-				query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
-				query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
-
-				if (limit is not None):
-					query = query.limit(limit)
-				if (not includeDuplicates):
-					query = query.distinct()
-				if (count and (fromSchema is None)):
-					query = query.count()
-
+			for relation, attributeList, query in self.yieldValueQuery(myTuple, nextTo, *args, connection = connection, count = count, fromSchema = fromSchema, foreignAsDict = foreignAsDict, includeSession = includeSession, **kwargs):
 				results_catalogue[relation] = getResult(query)
 		
 			if (includeSession is False):
@@ -3161,12 +3384,39 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 
 def sandbox():
+	def test_sqlite_2():
+		database_API = build()
+		# database_API.openDatabase("test/test_map_example.db", "M:/Versions/dev/Schema/config/schema_config.py", openAlembic = False)
+		database_API.openDatabase(None, "M:/Versions/dev/Schema/config/schema_config.py", openAlembic = False)
+		database_API.removeRelation()
+		database_API.createRelation()
+		database_API.resetRelation()
+
+		# print(database_API.getValue({"Maintainance": None}))
+
+		# print()
+		# for item in database_API.yieldValueQuery({"Maintainance": None}):
+		# 	print(item)
+
+		# print()
+		# for relation, attributeList, query in database_API.yieldAllValues(None):
+		# 	print([relation, attributeList, query])
+		# 	for result in query.all():
+		# 		print("   ", result)
+
+
+		with database_API._yieldValue_getConnection(fromSchema = None) as connection:
+			for relation, attributeList, query in database_API.yieldAllValues(None, fromSchema = None, connection = connection):
+				print([relation, attributeList, query])
+				for result in connection.execute(query).fetchall():
+					print("   ", result)
+
 	def test_sqlite():
 		database_API = build()
 		# database_API.openDatabase(None, "M:/Schema/main/schema_main.py") 
 		# database_API.openDatabase("test/test_map_example.db", "M:/Schema/main/schema_main.py", openAlembic = False)
 		# database_API.openDatabase("M:/Versions/dev/Settings/data.db", "M:/Schema/main/schema_main.py", openAlembic = False)
-		database_API.openDatabase(None, "M:/Schema/main/schema_main.py", openAlembic = False)
+		database_API.openDatabase(None, "M:/Versions/dev/Schema/main/schema_main.py", openAlembic = False)
 		database_API.removeRelation()
 		database_API.createRelation()
 		database_API.resetRelation()
@@ -3458,10 +3708,8 @@ def sandbox():
 		#Backup and Restore
 		# database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
 
-	# test_json()
-	# test_yaml()
-	# test_config()
-	test_sqlite()
+	# test_sqlite()
+	test_sqlite_2()
 	# test_access()
 	# test_mysql()
 
