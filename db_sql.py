@@ -7,7 +7,6 @@ __version__ = "3.4.0"
 import re
 import os
 import sys
-import abc
 import time
 import shutil
 
@@ -17,7 +16,7 @@ import types
 import decimal
 import subprocess
 
-#Utility Modules
+# #Utility Modules
 import warnings
 import operator
 import datetime
@@ -32,13 +31,7 @@ import inspect
 import unidecode
 import importlib
 
-#Database Modules
-import yaml
-import json
-import pyodbc
-import sqlite3
-import configparser
-
+import urllib
 import sqlalchemy
 import sqlalchemy_utils
 import sqlalchemy.ext.declarative
@@ -52,7 +45,12 @@ from alembic.config import Config as alembic_config_Config
 import threading
 from forks.pypubsub.src.pubsub import pub as pubsub_pub #Use my own fork
 
-import Utilities as MyUtilities
+import MyUtilities.common
+import MyUtilities.logger
+import MyUtilities.caching
+
+from API_Database.utilities import json
+import API_Database.db_config as db_config
 
 sessionMaker = sqlalchemy.orm.sessionmaker(autoflush = False)
 
@@ -174,52 +172,6 @@ def wrap_errorCheck(fileName = "error_log.log", timestamp = True, raiseError = T
 		return wrapper
 	return decorator
 
-#Expand JSON
-class _JSONEncoder(json.JSONEncoder):
-	"""Allows sets to be saved in JSON files.
-	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
-
-	Example Use: 
-		json.dumps(["abc", {1, 2, 3}], cls = _JSONEncoder)
-
-		json._default_encoder = _JSONEncoder()
-		json.dumps(["abc", {1, 2, 3}])
-	"""
-
-	def __init__(self, *, tag_set = None, **kwargs):
-		super().__init__(**kwargs)
-		self.tag_set = tag_set or "_set"
-
-	def default(self, item):
-		if (isinstance(item, collections.Set)):
-			return {self.tag_set: list(item)}
-		else:
-			return super().default(self, item)
-
-class _JSONDecoder(json.JSONDecoder):
-	"""Allows sets to be loaded from JSON files.
-	Modified code from Raymond Hettinger and simlmx on: https://stackoverflow.com/questions/8230315/how-to-json-serialize-sets/36252257#36252257
-
-	Example Use: 
-		json.loads(encoded, cls = _JSONDecoder)
-
-		json._default_decoder = _JSONDecoder()
-		json.loads(encoded)
-	"""
-
-	def __init__(self, *, object_hook = None, tag_set = None, **kwargs):
-		super().__init__(object_hook = object_hook or self.myHook, **kwargs)
-
-		self.tag_set = tag_set or "_set"
-
-	def myHook(self, catalogue):
-		if (self.tag_set in catalogue):
-			return set(catalogue[self.tag_set])
-		return catalogue
-
-json._default_encoder = _JSONEncoder()
-json._default_decoder = _JSONDecoder()
-
 sqlalchemy.sql.sqltypes.json._default_encoder = json._default_encoder
 sqlalchemy.sql.sqltypes.json._default_decoder = json._default_decoder
 
@@ -254,17 +206,17 @@ class Base(MyUtilities.common.EnsureFunctions, MyUtilities.common.CommonFunction
 class Base_Database(Base):
 	# @classmethod
 	# def getSchemaClass(cls, relation):
-	# 	"""Returns the schema class for the given relation.
-	# 	Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
+	#   """Returns the schema class for the given relation.
+	#   Special thanks to OrangeTux for how to get schema class from tablename on: https://stackoverflow.com/questions/11668355/sqlalchemy-get-model-from-table-name-this-may-imply-appending-some-function-to/23754464#23754464
 
-	# 	relation (str) - What relation to return the schema class for
+	#   relation (str) - What relation to return the schema class for
 
-	# 	Example Input: getSchemaClass("Customer")
-	# 	"""
+	#   Example Input: getSchemaClass("Customer")
+	#   """
 
-	# 	# # table = Mapper.metadata.tables.get("Customer")
-	# 	# # column = table.columns["name"]
-	# 	# return Mapper._decl_class_registry[column.table.name]
+	#   # # table = Mapper.metadata.tables.get("Customer")
+	#   # # column = table.columns["name"]
+	#   # return Mapper._decl_class_registry[column.table.name]
 
 	#Schema Factory Functions
 	#https://stackoverflow.com/questions/1827063/mysql-error-key-specification-without-a-key-length/1827099#1827099
@@ -386,7 +338,7 @@ class Base_Database(Base):
 				columnKwargs["nullable"] = True
 
 			# if (autoIncrement):
-			# 	columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+			#   columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
 
 		if (default is not None):
 			columnKwargs["default"] = default
@@ -415,7 +367,7 @@ class MyColumn(sqlalchemy.Column):
 class Utility_Base(Base_Database):
 	#Context Managers
 	@contextlib.contextmanager
-	def makeSession(self):
+	def makeSession(self, close = True):
 		"""Provides a transactional scope around a series of operations.
 		Modified code from: https://docs.sqlalchemy.org/en/latest/orm/session_basics.html
 		"""
@@ -429,8 +381,9 @@ class Utility_Base(Base_Database):
 			session.rollback()
 			raise
 		finally:
-			session.flush()
-			session.close()
+			if (close):
+				session.flush()
+				session.close()
 
 	@contextlib.contextmanager
 	def makeConnection(self, asTransaction = True, raw = False):
@@ -468,9 +421,9 @@ class Utility_Base(Base_Database):
 
 	def yieldColumn_fromTable(self, relation, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
 		#Use: https://docs.sqlalchemy.org/en/latest/core/selectable.html#sqlalchemy.sql.expression.except_
+		#Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#accessing-tables-and-columns
 
 		def formatAttribute(foreignKey, attribute):
-			raise NotImplementedError() #Untested
 			if (alias and (foreignKey in alias) and (attribute in alias[foreignKey])):
 				if (foreignAsDict):
 					return f"zfk_{foreignKey}_zfk_{alias[foreignKey][attribute]}"
@@ -504,15 +457,17 @@ class Utility_Base(Base_Database):
 						yield columnHandle
 					continue
 
-				raise NotImplementedError() #Untested
 				if (foreignDefault is None):
-					catalogue = {catalogue: tuple(attribute for attribute in columnHandle.foreign_keys[catalogue].__mapper__.columns.keys() if (attribute not in exclude))}
+					if (len(columnHandle.foreign_keys) > 1):
+						raise NotImplementedError()
+
+					for foreignKey in columnHandle.foreign_keys: break
+					catalogue = {catalogue: tuple(attribute for attribute in foreignKey.column.table.columns.keys() if (attribute not in exclude))}
 				else:
 					catalogue = {catalogue: foreignDefault}
 
-			raise NotImplementedError() #Untested
-			for foreignKey, attributeList in catalogue.items():
-				for attribute in cls.ensure_container(attributeList):
+			for attribute, foreignKeyList in catalogue.items():
+				for foreignKey in self.ensure_container(foreignKeyList):
 					yield getattr(table.columns, attribute).label(formatAttribute(foreignKey, attribute))
 
 class Schema_Base(Base_Database):
@@ -728,7 +683,7 @@ class Schema_Base(Base_Database):
 		else:
 			defaultRows = cls.defaultRows
 
-		with cls.makeSession() as session:				
+		with cls.makeSession() as session:              
 			session.query(cls).delete()
 			for catalogue in cls.ensure_container(defaultRows):
 				if (not catalogue):
@@ -770,7 +725,7 @@ class Schema_Used(Schema_Base):
 
 		#Find missing rows and add them
 		index = cls.getPrimaryKey()
-		with cls.makeSession() as session:	
+		with cls.makeSession() as session:  
 			for foreignHandle, attributeList in cls.usedBy.items():
 				for foreign_attribute in attributeList:
 					for result in tuple(zip(*cls.metadata.bind.execute(f"SELECT t1.{foreign_attribute} FROM {foreignHandle.__tablename__} as t1 LEFT OUTER JOIN {cls.__tablename__} as t2 ON t1.{foreign_attribute} = t2.{index} AND t2.{index} IS NOT NULL WHERE t2.{index} IS NULL"))):
@@ -838,13 +793,13 @@ class Schema_AutoForeign(Schema_Base):
 
 	# @classmethod
 	# def _yieldColumn_noForeign(cls, attribute, exclude, alias):
-	# 	if (attribute in exclude):
-	# 		return
+	#   if (attribute in exclude):
+	#       return
 
-	# 	columnHandle = getattr(cls, attribute)
-	# 	if (alias and (attribute in alias)):
-	# 		columnHandle = columnHandle.label(alias[attribute])
-	# 	yield columnHandle
+	#   columnHandle = getattr(cls, attribute)
+	#   if (alias and (attribute in alias)):
+	#       columnHandle = columnHandle.label(alias[attribute])
+	#   yield columnHandle
 
 	@classmethod
 	def yieldColumn(cls, catalogueList, exclude, alias, foreignAsDict = False, foreignDefault = None):
@@ -978,27 +933,8 @@ class EmptySchema():
 def build(*args, **kwargs):
 	"""Creates a Database object."""
 
-	return build_database(*args, **kwargs)
-
-def build_database(*args, **kwargs):
-	"""Creates a Database object."""
-
 	return Database(*args, **kwargs)
 
-def build_configuration(*args, **kwargs):
-	"""Creates a Configuration object."""
-
-	return Configuration(*args, **kwargs)
-
-def build_json(*args, **kwargs):
-	"""Creates a JSON_Aid object."""
-
-	return JSON_Aid(*args, **kwargs)
-
-def build_yaml(*args, **kwargs):
-	"""Creates a YAML_Aid object with YAML notation."""
-
-	return YAML_Aid(*args, **kwargs)
 
 #Dialects
 sqlalchemy.dialects.registry.register("access.fixed", "forks.sqlalchemy.dialects.access.base", "AccessDialect")
@@ -1053,7 +989,7 @@ class Alembic(Base):
 			output += f"-- .ini Path: {self.ini_path}\n"
 		return output
 
-	def __enter__(self):			
+	def __enter__(self):            
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -1393,7 +1329,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 			output += f"-- File Name: {self.fileName}\n"
 		return output
 
-	def __enter__(self):			
+	def __enter__(self):            
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -1701,7 +1637,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		# schema = type("Facsimile_Schema", (EmptySchema.Mapper, Schema_Base,), {"__tablename__": relation, **{column.name: column for column in table.columns}})()
 		
 		# for column in table.columns:
-		# 	print(column.name, column.__class__)
+		#   print(column.name, column.__class__)
 		# print(dir(column))
 
 		# sys.exit()
@@ -1978,10 +1914,10 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					return sqlalchemy.desc(criteria)
 
 				# if (nullFirst is not None):
-				# 	if (nullFirst):
-				# 		criteria = criteria.nullsfirst()
-				# 	else:
-				# 		criteria = criteria.nullslast()
+				#   if (nullFirst):
+				#       criteria = criteria.nullsfirst()
+				#   else:
+				#       criteria = criteria.nullslast()
 
 		def yieldOrder():
 			for _orderBy in self.ensure_container(orderBy):
@@ -1996,41 +1932,168 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		return handle.order_by(*yieldOrder())
 
-	def configureJoin(self, query, relation, schema, table, attribute, fromSchema = False):
-		"""Sets up the JOIN portion of the SQL message."""
+	def configureJoinForeign(self, query, relation, schema, table, attribute, fromSchema = False):
+		"""Sets up the JOIN portion of the SQL message (with respect to foreign keys)."""
+
+		if (schema is None):
+			if (not table.foreign_keys):
+				return query
+		elif (fromSchema or (not schema.foreignKeys)):
+			return query
+
+		###############################################
+
+		if (schema is None):
+			foreignCatalogue = {foreignKey.column.name: foreignKey.column.table for foreignKey in table.foreign_keys}
+		else:
+			foreignCatalogue = schema.foreignKeys
 
 		def augmentHandle(_handle, attributeList):
 			for variable in self.ensure_container(attributeList):
 				if (isinstance(variable, dict)):
 					_handle = augmentHandle(_handle, variable.keys())
 					continue
-				if (variable not in schema.foreignKeys):
+				if (variable not in foreignCatalogue):
 					continue
 
-				_handle = _handle.join(schema.foreignKeys[variable])
+				_handle = _handle.join(foreignCatalogue[variable])
 			return _handle
 
 		###############################################
-
-		if (schema is None):
-			if (not table.foreign_keys):
-				return query
-			raise NotImplementedError() #Untested
-
-		elif (fromSchema or (not schema.foreignKeys)):
-			return query
-
-		if (fromSchema is None):
-			handle = self.metadata.tables[relation]
-		else:
-			handle = query
-
-		handle = augmentHandle(handle, attribute)
 		
 		if (fromSchema is None):
-			return query.select_from(handle)
-		return handle
-	
+			return query.select_from(augmentHandle(self.metadata.tables[relation], attribute))
+		return augmentHandle(query, attribute)
+
+	def configureJoinDomestic(self, query, relation, schema, table, connection, fromSchema, join, foreignAsDict):
+		"""Sets up the JOIN portion of the SQL message (with respect to other relations).
+
+		join (tuple) - Joins the yielded queries when this dictionary is given to yieldValueQuery() as kwargs
+			~ (variable from this relation (str), relation to join with (str), variable from joined relation (str), what variables from joined relation to take (tuple of strings))
+		"""
+
+		if (join is None):
+			return query
+
+		# if (schema is None):
+		# 	_handle = self.metadata.tables[relation]
+		# 	relationHandle = self.metadata.tables[relation].columns
+		# else:
+		# 	_handle = query
+		# 	relationHandle = schema.relationCatalogue[relation]
+
+		relationHandle = self.metadata.tables[relation]
+		_handle = relationHandle
+		for attribute, foreign_relation, foreign_attribute, attributeList in self.ensure_container(join, elementCriteria = (4, (str, str, str, tuple))):
+			foreignRelationHandle = self.metadata.tables[foreign_relation]
+			_handle = _handle.join(foreignRelationHandle, getattr(relationHandle.columns, attribute) == getattr(foreignRelationHandle.columns, foreign_attribute))
+
+		return query.select_from(_handle)
+
+
+			# attributeHandle = getattr(relationHandle, attribute)
+			# kwargs["fromSchema"] = fromSchema
+			# kwargs["connection"] = connection
+			# kwargs["foreignAsDict"] = foreignAsDict
+			# print("@1", attribute, join_attribute)
+			# print([query])
+			# print(query)
+			# print()
+
+			# relationHandle.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+			# for _query in self.yieldValueQuery(**kwargs, yieldQueryOnly = True):
+
+			# 	print([_query])
+			# 	print(_query)
+			# 	print()
+
+			# 	# __query = _query.join(query)
+			# 	# print([__query])
+			# 	# print(__query)
+			# 	# print()
+			# 	# return query.select_from(__query)
+
+			# 	with self.makeSession(close = True) as session:
+			# 		__query = session.query(_query)
+					
+			# 		print([__query])
+			# 		print(__query)
+			# 		print()
+
+			# 		subquery = __query.subquery()
+
+			# 		___query = _handle.join(subquery)
+					
+			# 		print([___query])
+			# 		print(___query)
+			# 		print()
+
+			# 		return query.select_from(___query)
+
+
+
+			# 	# raise NotImplementedError()
+
+			# 	# if (isinstance(join_attribute, str)):
+			# 	# 	foreign_attribute = None
+			# 	# else:
+			# 	# 	join_attribute, foreign_attribute = join_attribute
+
+			# 	# if (join_attribute in _query.columns):
+			# 	# 	foreignHandle = _query.columns[join_attribute]
+			# 	# else:
+			# 	# 	for column in _query.columns:
+			# 	# 		foreignMatch = re.search("zfk_(.*)_zfk_(.*)", column.name)
+			# 	# 		if (not foreignMatch):
+			# 	# 			continue
+
+			# 	# 		if (foreign_attribute is None):
+			# 	# 			_foreign_attribute = column.table.name
+			# 	# 		else:
+			# 	# 			_foreign_attribute = foreign_attribute
+
+			# 	# 		if ((foreignMatch.group(1) == join_attribute) and (foreignMatch.group(1) == _foreign_attribute)):
+			# 	# 			foreignHandle = column
+			# 	# 			break
+			# 	# 	else:
+			# 	# 		raise NotImplementedError()
+
+
+
+			# 	# # print("@5", tuple(yieldAttribute(_query)))
+
+			# 	# # print("@5", _query.where(attributeHandle == getattr(_query.columns, join_attribute)))
+
+			# 	# if (fromSchema is None):
+			# 	# 	print()
+			# 	# 	print(_query)
+			# 	# 	print()
+			# 	# 	print(_query.where(attributeHandle == foreignHandle))
+			# 	# 	print()
+			# 	# 	handle = handle.join(_query.where(attributeHandle == foreignHandle))
+			# 	# 	print(handle) #Not working yet. Gives a syntax error. I am doing something wrong with how these two are joined.
+			# 	# 	raise NotImplementedError()
+			# 	# else:
+			# 	# 	subquery = _query.subquery()
+			# 	# 	handle = handle.join(subquery, attributeHandle == getattr(subquery.columns, join_attribute))
+		
 	#Interaction Functions
 	def setDefaultCommit(self, state):
 		self.defaultCommit = state
@@ -2077,14 +2140,14 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		self.log_info("Opening Database from config file", filePath = filePath, section = section)
 
-		config = build_configuration(default_filePath = filePath, default_section = section)
+		config = db_config.build(default_filePath = filePath, default_section = section)
 		return self.openDatabase(**{**config.get({section: ("port", "host", "user", "password", "fileName", "readOnly", "schemaPath", 
-			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
+			"alembicPath", "openAlembic", "connectionType", "reset", "override_resetBypass", "refresh_metaData")}, fallback = None, default_values = settingsKwargs or {}), **kwargs})
 
 	@wrap_errorCheck()
 	def openDatabase(self, fileName = None, schemaPath = None, alembicPath = None, *, applyChanges = True, multiThread = False, connectionType = None, 
 		openAlembic = False, readOnly = False, multiProcess = -1, multiProcess_delay = 100, forceExtension = False, reset = None, override_resetBypass = False,
-		port = None, host = None, user = None, password = None, echo = False,
+		port = None, host = None, user = None, password = None, echo = False, refresh_metaData = True, 
 		resultError_replacement = None, aliasError_replacement = None):
 
 		"""Opens a database.If it does not exist, then one is created.
@@ -2095,6 +2158,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Use: https://stackoverflow.com/questions/9233912/connecting-sqlalchemy-to-msaccess/13849359#13849359
 		Use: https://docs.sqlalchemy.org/en/latest/core/connections.html#registering-new-dialects
 		Use: http://www.blog.pythonlibrary.org/2010/10/10/sqlalchemy-and-microsoft-access/
+
+		Special thanks to jmagnusson for how to connect to a mssql database on: https://stackoverflow.com/questions/4493614/sqlalchemy-equivalent-of-pyodbc-connect-string-using-freetds/7399585#7399585
 
 		fileName (str)      - The name of the database file
 			- If None: Will create a new database that only exists in RAM and not on ROM
@@ -2122,10 +2187,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: openDatabase("emaildb", multiThread = True, multiProcess = 10)
 		"""
 
+		assert not isinstance(reset, str)
+
 		@contextlib.contextmanager
 		def makeEngine():
 			global sessionMaker
-			nonlocal self, user, password, host, port, fileName, schemaPath, openAlembic, alembicPath
+			nonlocal self, user, password, host, port, fileName, schemaPath, openAlembic, alembicPath, refresh_metaData
 
 			self.isAccess = self.connectionType == "access"
 			self.isSQLite = self.connectionType == "sqlite3"
@@ -2147,9 +2214,8 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				self.fileName = f"access+fixed:///{fileName}?charset={engineKwargs['encoding']}"
 
 			elif (self.isMsSQL):
-				raise NotImplementedError()
 				engineKwargs = {}
-				self.fileName = f"mssql+pyodbc://{user}:{password}@{host or localhost}:{port or 3306}/{fileName}?driver=SQL+Server+Native+Client+11.0"
+				self.fileName = "mssql+pyodbc:///?odbc_connect={}".format(urllib.parse.quote_plus(f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={host or localhost};PORT={port or 3306};DATABASE={fileName};UID={user};PWD={password}"))
 
 			else:
 				errorMessage = f"Unknown connection type {connectionType}"
@@ -2176,7 +2242,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				self.createDatabase()
 				_reset = True
 
-			self.loadSchema(schemaPath)
+			self.loadSchema(schemaPath, refresh_metaData = refresh_metaData)
 
 			if (openAlembic or ((openAlembic is None) and fileName)):
 				self.loadAlembic(alembicPath)
@@ -2217,9 +2283,10 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		self.resultError_replacement = resultError_replacement
 
 		# if (self.resultError_replacement is None):
-		# 	self.resultError_replacement = "!!! SELECT ERROR !!!"
+		#   self.resultError_replacement = "!!! SELECT ERROR !!!"
 
 		with makeEngine() as engineKwargs:
+			self.log_info("Creating Engine", fileName = self.fileName, **engineKwargs)
 			self.engine = sqlalchemy.create_engine(self.fileName, **engineKwargs, echo = echo)
 
 	def _fk_pragma_on_connect(self, connection, record):
@@ -2284,7 +2351,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		if (applyChanges or ((applyChanges is None) and self.defaultCommit)):
 			self.saveDatabase()
 
-	def loadSchema(self, schemaPath = None):
+	def loadSchema(self, schemaPath = None, refresh_metaData = True):
 		"""Loads in a schema from the given schemaPath.
 
 		Example Input: loadSchema(schemaPath)
@@ -2361,7 +2428,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		self.schemaPath = schemaPath
 		self.schema.Mapper.metadata.bind = self.engine
 		self.metadata = self.schema.Mapper.metadata
-		self.refresh()
+		
+		if (refresh_metaData is not False):
+			self.refresh()
 
 	def checkSchema(self):
 		"""Checks the loaded schema against what is in the meta data."""
@@ -2448,15 +2517,15 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		# if (relation is None):
 			
 		# else:
-		# 	table = self.metadata.tables.get(relation)
-		# 	if (table is None):
-		# 		errorMessage = f"There is no table {relation} in {self.metadata.__repr__()} for removeRelation()"
-		# 		raise KeyError(errorMessage)
+		#   table = self.metadata.tables.get(relation)
+		#   if (table is None):
+		#       errorMessage = f"There is no table {relation} in {self.metadata.__repr__()} for removeRelation()"
+		#       raise KeyError(errorMessage)
 
-		# 	try:
-		# 		table.drop()
-		# 	except sqlalchemy.exc.UnboundExecutionError:
-		# 		table.drop(self.engine)
+		#   try:
+		#       table.drop()
+		#   except sqlalchemy.exc.UnboundExecutionError:
+		#       table.drop(self.engine)
 
 	@wrap_errorCheck()
 	def renameRelation(self, relation, newName, applyChanges = None):
@@ -2471,7 +2540,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		"""
 	
 	@wrap_errorCheck()
-	def createRelation(self, relation = None, schemaPath = None):
+	def createRelation(self, relation = None, schemaPath = None, refresh_metaData = True):
 		"""Adds a relation (table) to the database.
 		Special thanks to Jimbo for help with spaces in database names on http://stackoverflow.com/questions/10920671/how-do-you-deal-with-blank-spaces-in-column-names-in-sql-server
 		
@@ -2504,7 +2573,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		if (schemaPath is None):
 			schema = self.schema
 		else:
-			schema = self.loadSchema(schemaPath)
+			schema = self.loadSchema(schemaPath, refresh_metaData = refresh_metaData)
 
 	def copyAttribute(self, source_relation, source_attribute, destination_relation, destination_attribute = None):
 		"""Copies an attribute from an existing table to another.
@@ -2656,7 +2725,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					session.add_all(schema(**catalogue, session = session) for catalogue in forcedList)
 
 	@wrap_errorCheck()
-	def removeTuple(self, myTuple, applyChanges = None,	checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
+	def removeTuple(self, myTuple, applyChanges = None, checkForeign = True, incrementForeign = True, fromSchema = None, **locationKwargs):
 		"""Removes a tuple (row) for a given relation (table).
 		Note: If multiple entries match the criteria, then all of those tuples will be removed.
 
@@ -2701,7 +2770,49 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						query = self.configureLocation(query, schema, None, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
 						query.delete()
 
+	def _setupYieldAllValues(self, relation = None, attribute = None, exclude = None):
+		if (relation is None):
+			relation = self.getRelationNames()
+		else:
+			relation = self.ensure_container(relation)
+
+		if (isinstance(exclude, dict)):
+			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+		else:
+			excludeList = self.ensure_container(exclude, convertNone = True)
+
+		myTuple = {}
+		for _relation in relation:
+			if (attribute):
+				if (isinstance(attribute, dict)):
+					myTuple[_relation] = attribute.get(_relation, None)
+				else:
+					myTuple[_relation] = attribute
+			else:
+				myTuple[_relation] = None
+
+		return myTuple, excludeList
+
 	@wrap_errorCheck()
+	def yieldAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
+		"""
+		Example Use:
+			for relation, attributeList, query in database_API.yieldAllValues(None):
+				print([relation, attributeList, query])
+				for result in query.all():
+					print("   ", result)
+
+		Example Use:
+			with database_API._yieldValue_getConnection(fromSchema = None) as connection:
+				for relation, attributeList, query in database_API.yieldAllValues(None, fromSchema = None, connection = connection):
+					print([relation, attributeList, query])
+					for result in connection.execute(query).fetchall():
+						print("   ", result)
+		"""
+		myTuple, excludeList = self._setupYieldAllValues(relation = relation, attribute = attribute, exclude = exclude)
+		for item in self.yieldValueQuery(myTuple, exclude = excludeList, **kwargs):
+			yield item
+
 	def getAllValues(self, relation = None, attribute = None, exclude = None, **kwargs):
 		"""Returns all values in the given relation (table) that match the filter conditions.
 
@@ -2727,35 +2838,19 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		database_API.getAllValues("Containers", foreignDefault = ("label", "archived"))
 		"""
 
-		if (relation is None):
-			relation = self.getRelationNames()
-		else:
-			relation = self.ensure_container(relation)
-
-		if (isinstance(exclude, dict)):
-			excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-		else:
-			excludeList = self.ensure_container(exclude, convertNone = True)
-
-		myTuple = {}
-		for _relation in relation:
-			if (attribute):
-				if (isinstance(attribute, dict)):
-					myTuple[_relation] = attribute.get(_relation, None)
-				else:
-					myTuple[_relation] = attribute
-			else:
-				myTuple[_relation] = None
-
+		myTuple, excludeList = self._setupYieldAllValues(relation = relation, attribute = attribute, exclude = exclude)
 		return self.getValue(myTuple, exclude = excludeList, **kwargs)
 
+	def _yieldValue_getConnection(self, fromSchema):
+		if (fromSchema is None or (self.schema is None) or (isinstance(self.schema, EmptySchema))):
+			return self.makeConnection(asTransaction = True)
+		return self.makeSession(close = not fromSchema)
+
 	@wrap_errorCheck()
-	def getValue(self, myTuple, nextTo = None, orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, 
-		returnNull = False, includeDuplicates = True, checkForeign = True, formatValue = None, valuesAsSet = False, count = False,
-		maximum = None, minimum = None, average = None, summation = None, variableLength = True, variableLength_default = None,
-		forceRelation = False, forceAttribute = False, forceTuple = False, attributeFirst = False, noAnswer = NULL_private, 
-		filterForeign = True, filterNone = False, exclude = None, forceMatch = None, fromSchema = False, onlyOne = False,
-		foreignAsDict = False, foreignDefault = None, **locationKwargs):
+	def yieldValueQuery(self, myTuple, nextTo = None, *, connection = None, yieldQueryOnly = False,
+		count = False, fromSchema = False, foreignAsDict = False, includeSession = None, 
+		orderBy = None, limit = None, direction = None, nullFirst = None, alias = None, join = None,
+		includeDuplicates = True, exclude = None, forceMatch = None, foreignDefault = None, **locationKwargs):
 		"""Gets the value of an attribute in a tuple for a given relation.
 		If multiple attributes match the criteria, then all of the values will be returned.
 		If you order the list and limit it; you can get things such as the 'top ten occurrences', etc.
@@ -2807,17 +2902,24 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		forceAttribute (bool) - Determines if the attribute is returned in the answer
 			- If True: Answers will always contain the attribute
 			- If False: Answers will omit the attribute if there is only one in the answer
-		forceTuple (bool)     - Determines if the row separator is returned in the answer
+		forceTuple (bool) - Determines if the row separator is returned in the answer
 			- If True: Answers will always contain the row separator
 			- If False: Answers will omit the row separator if there is only one in the answer
 		attributeFirst (bool) - Determines if the attribute is first in the answer
 			- If True: {relation: {attribute: {row: value}}}
 			- If False: {relation: {row: {attribute: value}}}
 
-		fromSchema (bool)     - Determines from what source the query is compiled
-			- If True: Uses the schema and returns a schema item
+		fromSchema (bool) - Determines from what source the query is compiled
+			- If True: Uses the schema and returns a schema item (slowest)
+				~ All values are lazy loaded by default, so be sure to use 'includeSession' correctly
 			- If False: Uses the schema and returns a dictionary
 			- If None: Uses the metadata and returns a dictionary (fastest)
+
+		includeSession (bool) - Determines how the session is given to the user
+			- If True: The session is in the catalogue under the relation key [None], so 'forceRelation' will be ignored
+			- If False: The returned value is a tuple where the first element is the session and the second is the answer
+			- If None: The session is not returned
+				~ If 'fromSchema' is True: All values in 'myTuple' will be eagerly loaded before the session is closed
 
 		Example Input: getValue({"Users": "name"})
 		Example Input: getValue({"Users": "name"}, valuesAsList = True)
@@ -2837,9 +2939,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue({"Users": "name", "Names": "first_name"}, filterRelation = False)
 		Example Input: getValue({"Users": "name", "Names": ["first_name", "extra_data"]})
 
-		Example Input: getValue({"Users": "name"}, filterForeign = None)
-		Example Input: getValue({"Users": "name"}, filterForeign = False)
-
 		Example Input: getValue({"Users": "name"}, {"age": 24})
 		Example Input: getValue({"Users": "name"}, {"age": 24, height: 6})
 		Example Input: getValue({"Users": "name"}, {"age": 24, height: 6}, nextToCondition = False)
@@ -2855,34 +2954,159 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		Example Input: getValue([({"Users": "name"}, {"age": 24}), ({"Users": "height"}, {"age": 25})])
 		"""
 
+		if (connection is None):
+			with self._yieldValue_getConnection(fromSchema = fromSchema) as _connection:
+				for item in self.yieldValueQuery(myTuple, nextTo, connection = _connection, yieldQueryOnly = yieldQueryOnly, 
+					count = count, fromSchema = fromSchema, foreignAsDict = foreignAsDict, includeSession = includeSession, 
+					orderBy = orderBy, limit = limit, direction = direction, nullFirst = nullFirst, alias = alias, join = join, 
+					includeDuplicates = includeDuplicates, exclude = exclude, forceMatch = forceMatch, foreignDefault = foreignDefault, **locationKwargs):
+					
+					yield item
+			return
+
+		#####################################################################
+
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
 
 		if (fromSchema is None):
-			contextmanager = self.makeConnection(asTransaction = True)
 			def startQuery(relation, attributeList, schema, table):
 				nonlocal self, excludeList, alias
 
 				if (schema is not None):
 					return sqlalchemy.select(columns = schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
 				return sqlalchemy.select(columns = self.yieldColumn_fromTable(table, attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault))
-					
+
+		elif (fromSchema):
+			def startQuery(relation, attributeList, schema, table):
+				nonlocal connection, includeSession
+				assert schema is not None
+
+				query = connection.query(schema)
+				if (includeSession is None):
+					query = query.options(sqlalchemy.orm.selectinload("*"))
+				return query
+		else:
+			def startQuery(relation, attributeList, schema, table):
+				nonlocal connection, excludeList, alias
+				assert schema is not None
+
+				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
+
+		########################################################################
+
+		if (not isinstance(exclude, dict)):
+			excludeList = self.ensure_container(exclude, convertNone = True)
+
+		assert myTuple
+		for relation, attributeList in myTuple.items():
+			if (fromSchema):
+				attributeList = ()
+			else:
+				if (isinstance(exclude, dict)):
+					excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
+				attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
+
+			schema = self.getSchema(relation)#, forceMatch = True)
+			table = self.metadata.tables[relation]
+
+			query = startQuery(relation, attributeList, schema, table)
+			query = self.configureJoinForeign(query, relation, schema, table, attributeList, fromSchema = fromSchema)
+			query = self.configureJoinDomestic(query, relation, schema, table, connection, fromSchema, join, foreignAsDict)
+			query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
+			query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
+
+			if (limit is not None):
+				query = query.limit(limit)
+			if (not includeDuplicates):
+				query = query.distinct()
+			if (count and (fromSchema is None)):
+				query = query.count()
+
+			if (yieldQueryOnly):
+				yield query
+			else:
+				yield relation, attributeList, query
+
+	def getValue(self, myTuple, nextTo = None, *args, 
+		count = False, fromSchema = False, foreignAsDict = False, includeSession = None, 
+		valuesAsSet = False, onlyOne = False, attributeFirst = False, noAnswer = NULL_private, 
+		forceRelation = False, forceAttribute = False, forceTuple = False, **kwargs):
+		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
+			fromSchema = None
+
+
+
+		def _makeCatalogue(result):
+			nonlocal attributeList
+
+			class _dict(dict):
+				"""Used to allow value to be a dict without messing up the process below."""
+			class _list(list):
+				"""Used to allow value to be a list without messing up the process below."""
+
+			def _formatValue(existingValue, newValue):
+
+				if (isinstance(existingValue, _list)):
+					existingValue.append(newValue)
+				else:
+					existingValue = _list(existingValue, newValue)
+				return existingValue
+
+			############################################
+			
+			catalogue = collections.defaultdict(_dict)
+			if (fromSchema is None):
+				iterator = result.items()
+			else:
+				iterator = result._asdict().items()
+
+			for key, value in iterator:
+				foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
+
+				if (foreignMatch):
+					attribute = foreignMatch.group(1)
+					foreign_attribute = foreignMatch.group(2)
+				else:
+					attribute = key
+					foreign_attribute = None
+
+				# if (attribute not in attributeList):
+				# 	continue
+
+				if (attribute not in catalogue):
+					if (foreign_attribute is None):
+						catalogue[attribute] = value
+					else:
+						catalogue[attribute][foreign_attribute] = value
+					continue
+
+				if (not isinstance(catalogue[attribute], _dict)):
+					_value = catalogue[attribute]
+					catalogue[attribute] = _dict()
+					catalogue[attribute][foreign_attribute] = _formatValue(_value, value)
+					continue
+
+				if (foreign_attribute not in catalogue[attribute]):
+					catalogue[attribute][foreign_attribute] = value
+				else:
+					catalogue[attribute][foreign_attribute] = _formatValue(catalogue[attribute][foreign_attribute], value)
+			return dict(catalogue)
+
+		if (fromSchema is None):
 			def yieldRow(query):
-				nonlocal connection
+				nonlocal connection, attributeList
 
 				catalogue = self.engine.url.query
 				if (("charset" in catalogue) and (catalogue["charset"] != "utf8")):
 					def yieldResult():
 						nonlocal connection, query
 
-						def _yieldResult():
-							nonlocal connection, query
-							if (onlyOne):
+						if (onlyOne):
+							def _yieldResult():
 								yield connection.execute(query).first()
-								return
-
-							for item in connection.execute(query).fetchall():
-								yield item
+						else:
+							_yieldResult = connection.execute(query).fetchall
 
 						##############################
 
@@ -2900,46 +3124,28 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 								result.update(replacement_catalogue)
 
 							yield result
-				else:
+			
+				elif (onlyOne):
 					def yieldResult():
-						nonlocal connection, query
-						if (onlyOne):
-							yield connection.execute(query).first()
-							return
-
-						for item in connection.execute(query).fetchall():
-							yield item
+						yield connection.execute(query).first()
+				else:
+					yieldResult = connection.execute(query).fetchall
 
 				###################################
 
-				for result in yieldResult():
-					if (result is None):
-						continue
-					elif ((not forceAttribute) and (len(result) <= 1)):
+				for result in itertools.filterfalse(lambda x: x is None, yieldResult()):
+					if ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
 					elif (not foreignAsDict):
 						yield dict(result)
 
 					else:
-						catalogue = collections.defaultdict(dict)
-						for key, value in result.items():
-							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
-							if (not foreignMatch):
-								catalogue[key] = value
-							else:
-								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
-						yield dict(catalogue)
+						yield _makeCatalogue(result)
 
 		elif (fromSchema):
-			contextmanager = self.makeSession()
-			def startQuery(relation, attributeList, schema, table):
-				assert connection, schema is not None
-
-				return connection.query(schema)
-
 			def yieldRow(query):
-				nonlocal count
+				nonlocal count              
 
 				if (count):
 					yield (query.count(),)
@@ -2953,13 +3159,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 					yield result
 
 		else:
-			contextmanager = self.makeSession()
-			def startQuery(relation, attributeList, schema, table):
-				nonlocal connection, excludeList, alias
-				assert schema is not None
-
-				return connection.query(*schema.yieldColumn(attributeList, excludeList, alias, foreignAsDict = foreignAsDict, foreignDefault = foreignDefault)).select_from(schema)
-
 			def yieldRow(query):
 				nonlocal count
 
@@ -2975,6 +3174,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				for result in answer:
 					if (result is None):
 						continue
+
 					elif ((not forceAttribute) and (len(result) <= 1)):
 						yield result[0]
 
@@ -2982,17 +3182,9 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 						yield result._asdict()
 
 					else:
-						catalogue = collections.defaultdict(dict)
-						for key, value in result._asdict().items():
-							foreignMatch = re.search("zfk_(.*)_zfk_(.*)", key)
-							if (not foreignMatch):
-								catalogue[key] = value
-							else:
-								catalogue[foreignMatch.group(1)][foreignMatch.group(2)] = value
-						yield dict(catalogue)
+						yield _makeCatalogue(result)
 
 		container = (tuple, set)[valuesAsSet]
-
 		def getResult(query):
 			nonlocal forceTuple, container, noAnswer
 
@@ -3020,42 +3212,17 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		########################################################################
 
-		if (not isinstance(exclude, dict)):
-			excludeList = self.ensure_container(exclude, convertNone = True)
-
-		assert myTuple
 		results_catalogue = {}
-		with contextmanager as connection:
-			for relation, attributeList in myTuple.items():
-				if (fromSchema):
-					attributeList = ()
-				else:
-					if (isinstance(exclude, dict)):
-						excludeList = {item for _relation in relation for item in exclude.get(_relation, ())}
-					attributeList = self.ensure_container(attributeList) or self.getAttributeNames(relation, foreignAsDict = foreignAsDict)
+		with self._yieldValue_getConnection(fromSchema = fromSchema) as connection:
+			if (includeSession):
+				results_catalogue[None] = connection
 
-				schema = self.getSchema(relation)#, forceMatch = True)
-
-				table = self.metadata.tables[relation]
-
-				
-				query = startQuery(relation, attributeList, schema, table)
-				query = self.configureJoin(query, relation, schema, table, attributeList, fromSchema = fromSchema)
-				query = self.configureOrder(query, relation, schema, table, orderBy = orderBy, direction = direction, nullFirst = nullFirst)
-				query = self.configureLocation(query, schema, table, fromSchema = fromSchema, nextTo = nextTo, **locationKwargs)
-
-				if (limit is not None):
-					query = query.limit(limit)
-				if (not includeDuplicates):
-					query = query.distinct()
-				if (count and (fromSchema is None)):
-					query = query.count()
-
+			for relation, attributeList, query in self.yieldValueQuery(myTuple, nextTo, *args, connection = connection, count = count, fromSchema = fromSchema, foreignAsDict = foreignAsDict, includeSession = includeSession, **kwargs):
 				results_catalogue[relation] = getResult(query)
 		
-		if (forceRelation or (len(myTuple) > 1)):
-			return results_catalogue
-		return results_catalogue[relation]
+			if (includeSession is False):
+				return connection, self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
+		return self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
 
 	@wrap_errorCheck()
 	def createTrigger(self, label, relation,
@@ -3214,1443 +3381,42 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 	save = backup
 	load = restore
 
-#Monkey Patches
-configparser.ConfigParser.optionxform = str
 
-class Configuration(Base):
-	"""Used to handle .ini files.
-
-	- Both keys and values can have spaces
-	- Multi-line values must have extra lines indented one line deeper
-	- Sections and single-line values can be indented with no consequence
-
-	- Keys can be separated from values by either = or :
-	- Keys without values can have no separator
-	- The separator can have spaces on each side
-
-	- Comments can be done using # or ;
-
-	___________________ EXAMPLE INI FILE ___________________
-
-	[DEFAULT]
-	scanDelay = %(delay) %(units)
-	units = ms
-
-	[main]
-	startup_user = admin
-
-	[AutoSave]
-	delay = 1
-	units = s
-
-	[GUI]
-	delay = 500
-	________________________________________________________
-
-	Use: https://pymotw.com/3/configparser/
-	Use: https://docs.python.org/3.6/library/configparser.html
-	Use: https://martin-thoma.com/configuration-files-in-python/#configparser
-	Use: https://www.blog.pythonlibrary.org/2010/01/01/a-brief-configobj-tutorial/
-	use: https://www.blog.pythonlibrary.org/2013/10/25/python-101-an-intro-to-configparser/
-	"""
-
-	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False, forceCondition = None,
-		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None,
-		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
-		"""
-
-		allowNone (bool) - Determines what happens if a setting does not have a set value
-			- If True: Will use None
-			- If False: Will raise an error during load()
-
-		interpolation (bool) - Determines what kind of interpolation can be done in get()
-			- If True: Extended Interpolation
-			- If False: Basic Interpolation
-			- If None: No Interpolation
-
-		valid_section (list) - Which sections (excluding DEFAULT) to load
-			- If str: Will load only that section
-			- If None: Will load all sections
-			~ Optionally, variables can be defined in the section given to 'knownTypesSection'
-
-		knownTypesSection (str) - Which section is used to store knownTypes
-			- If None: Will not use a section to get knownTypes from
-
-		Example Input: Configuration(self)
-		Example Input: Configuration(self, source_directory = "database")
-		Example Input: Configuration(self, defaults = {"startup_user": "admin"})
-		"""
-
-		self.defaultFileExtension = defaultFileExtension or "ini"
-		self.default_section = default_section or "main"
-		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
-
-		if (interpolation):
-			interpolation = self.MyExtendedInterpolation()
-		elif (interpolation is not None):
-			interpolation = configparser.BasicInterpolation()
-
-		self.setReset(converters = self.converters, allow_no_value = allowNone, 
-			defaults = default_values or {}, interpolation = interpolation)
-		self.reset()
-
-		# self.config.optionxform = str
-
-		self.knownTypeDefault = knownTypeDefault or "_default_"
-		self.knownTypesSection = knownTypesSection or None
-		self.knownTypes = knownTypes or {}
-		self.readOnly = readOnly
-
-		self.set_validSection(valid_section)
-
-		if (default_filePath):
-			self.load(forceExists = forceExists, forceCondition = forceCondition)
-
-	def setReset(self, *args, **kwargs):
-		self._reset = (args, kwargs)
-
-	def reset(self):
-		self.config = configparser.ConfigParser(*self._reset[0], **self._reset[1])
-
-		self.dataType_catalogue = {
-			None: self.config.get,
-			str: self.config.get, "str": self.config.get,
-			int: self.config.getint, "int": self.config.getint,
-			float: self.config.getfloat, "float": self.config.getfloat,
-			bool: self.config.getboolean, "bool": self.config.getboolean,
-			datetime.datetime: self.config.getdatetime, "datetime": self.config.getdatetime,
-		}
-
-	def __repr__(self):
-		representation = f"{type(self).__name__}(id = {id(self)})"
-		return representation
-
-	def __str__(self):
-		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		return output
-
-	def __enter__(self):
-		return self.config
-
-	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback is not None):
-			print(exc_type, exc_value)
-			return False
-
-	def __getitem__(self, key):
-		self.check_invalidSection(key)
-
-		return self.config[key]
-
-	def __setitem__(self, key, value):
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(key)
-
-		self.config[key] = value
-
-	def __delitem__(self, key):
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(key)
-
-		del self.config[key]
-
-	def __contains__(self, key):
-		if (self.check_invalidSection(key, raiseError = False)):
-			return False
-
-		return key in self.config
-
-	def keys(self):
-		if (self.valid_section is None):
-			return tuple(self.config.keys())
-		return tuple(section for section in self.config.keys() if (section in self.valid_section))
-
-	def values(self):
-		if (self.valid_section is None):
-			return tuple(self.config.values())
-		return tuple(handle for section, handle in self.config.items() if (section in self.valid_section))
-
-	def items(self):
-		if (self.valid_section is None):
-			return tuple(self.config.items())
-		return tuple((section, handle) for section, handle in self.config.items() if (section in self.valid_section))
-
-	def _asdict(self):
-		if (self.valid_section is None):
-			return dict(self.config)
-		return {key: value for key, value in self.items()}
-
-	def check_invalidSection(self, section, *, raiseError = True, valid_section = NULL):
-		if (valid_section is NULL):
-			valid_section = self.valid_section
-		if ((valid_section is not None) and (section not in valid_section) and (not self.has_section(section, valid_section = None))):
-			if (raiseError):
-				raise InvalidSectionError(self, section)
-			return True
-
-	def _getType(self, variable, section = None, *, dataType = None):
-		"""Returns what type to use for the given variable.
-
-		Example Input: _getType("delay")
-		"""
-
-		if (dataType is None):
-			section = section or self.default_section
-			check_section = False
-			if ((self.knownTypesSection is not None) and (self.knownTypesSection in self.config.sections())):
-				if (self.has_setting(variable, self.knownTypesSection)):
-					function = self.dataType_catalogue.get(self.config[self.knownTypesSection][variable], None)
-					if (function is not None):
-						return function
-				check_section = True
-
-			if ((section in self.knownTypes) and (variable in self.knownTypes[section])):
-				return self.dataType_catalogue[self.knownTypes[section][variable]]
-
-			default_section = self.config.default_section
-			if ((default_section in self.knownTypes) and (variable in self.knownTypes[default_section])):
-				return self.dataType_catalogue[self.knownTypes[default_section][variable]]
-
-			if (variable in self.knownTypes):
-				return self.dataType_catalogue[self.knownTypes[variable]]
-
-
-			if (check_section and self.has_setting(self.knownTypeDefault, self.knownTypesSection)):
-				function = self.dataType_catalogue.get(self.config[self.knownTypesSection][self.knownTypeDefault], None)
-				if (function is not None):
-					return function
-
-		return self.dataType_catalogue[dataType]
-
-	def get(self, variable = None, section = None, *, dataType = None, default_values = None, include_defaults = True,
-		fallback = configparser._UNSET, raw = False, forceSection = False, forceSetting = False, valid_section = NULL):
-		"""Returns a setting from the given section.
-
-		variable (str) - What setting to get
-			- If list: Will return a dictionary of all settings in the list
-			- If None: Will return a dictionary of all settings in the section
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		dataType (type) - What type the data should be in
-			- If None: Will read as str, unless the variable is logged in self.knownTypes under 'section' or DEFAULT
-
-		default_values (dict) - Local default values; overrides the global default values temporarily
-		include_defaults (bool) - Determines if the default section should be used as a fallback
-		raw (bool) - Determines if the value should be returned without applying interpolation
-
-		___________________ BASIC INTERPOLATION ___________________
-		Variables are denoted with a single '%', followed by closed paren
-			Example: scanDelay = %(delay) %(units)
-
-		To use an escaped %: %%
-			Example: units = %%
-
-		___________________ EXTENDED INTERPOLATION ___________________
-		Variables are denoted with a '$', followed by braces
-			Example: scanDelay = ${delay} ${units}
-
-		Variables from other sections can be used with a ':'
-			Example: scanDelay = ${delay} ${general:units}
-
-
-		Example Input: get()
-		Example Input: get("startup_user")
-		Example Input: get("scanDelay", section = "AutoSave")
-		Example Input: get("scanDelay", section = "AutoSave", dataType = int)
-		Example Input: get("startup_window", defaults = {"startup_window": "inventory"})
-		
-		Example Input: get(("user", "password", "port"), section = "Database_Admin")
-		Example Input: get({"Database_Admin": ("user", "password", "port")})
-		Example Input: get(include_defaults = False)
-		"""
-
-		section = section or self.default_section
-		self.check_invalidSection(section, valid_section = valid_section)
-		if (not self.has_section(section)):
-			section = self.config.default_section
-
-		if (variable is None):
-			if (include_defaults):
-				variableList = tuple(self[section].keys())
-			else:
-				variableList = tuple(self.config._sections[section].keys())
-			return self.get(variableList, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section)
-
-		if (isinstance(variable, dict)):
-			answer = {_section: self.get(_variable, section = _section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _section, _variable in variable.items()}
-
-			if (forceSection or len(answer) > 1):
-				return answer
-			elif (not answer):
-				return
-			return next(iter(answer.values()))
-
-		if (not isinstance(variable, (str, int, float))):
-			answer = {_variable: self.get(_variable, section = section, dataType = dataType, default_values = default_values, fallback = fallback,
-				raw = raw, forceSetting = forceSetting, forceSection = forceSection, include_defaults = include_defaults, valid_section = valid_section) for _variable in variable}
-
-			if (forceSetting or len(answer) > 1):
-				return answer
-			elif (not answer):
-				return
-			return next(iter(answer.values()))
-
-		function = self._getType(variable, section, dataType = dataType)
-
-		try:
-			return function(section, variable, vars = default_values or {}, raw = raw, fallback = fallback)
-
-		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
-			print("@Configuration.get", error)
-			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
-
-	def set(self, variable, value = None, section = None, *, valid_section = NULL):
-		"""Adds a setting to the given section.
-
-		variable (str) - What setting to get
-			- If list: Wil set each variable in the list to 'value'
-			- If dict: Will ignore 'value' and set each key to it's given value
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: set("startup_user", "admin")
-		Example Input: set("scanDelay", 1000, section = "AutoSave")
-
-		Example Input: set({"startup_user": "admin"})
-		Example Input: set({"AutoSave": {"scanDelay": 1000}})
-		"""
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		if (isinstance(variable, dict)):
-			for _variable, _value in variable.items():
-				if (isinstance(_value, dict)):
-					for __variable, __value in _value.items():
-						self.set(__variable, value = __value, section = _variable, valid_section = valid_section)
-				else:
-					self.set(_variable, value = _value, section = section, valid_section = valid_section)
-			return
-
-		if (not isinstance(variable, (str, int, float))):
-			for _variable in variable:
-				self.set(_variable, value = value, section = section, valid_section = valid_section)
-			return
-
-		section = section or self.default_section
-
-		if (not self.config.has_section(section)):
-			self.config.add_section(section)
-
-		if (value is None):
-			self.config.set(section, variable, "")
-		else:
-			self.config.set(section, variable, f"{value}")
-
-	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None):
-		"""Loads the configuration file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		valid_section (list) - Updates self.valid_section if not NULL
-
-		Example Input: load()
-		Example Input: load("database/settings_user.ini")
-		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
-		"""
-		global openPlus
-
-		if (valid_section is not NULL):
-			self.set_validSection(valid_section)
-
-		filePath = filePath or self.default_filePath
-		if (not os.path.exists(filePath)):
-			if (not forceExists):
-				raise FileExistsError(filePath)
-
-			if (isinstance(forceExists, dict)):
-				self.set(forceExists, valid_section = None)
-
-			with openPlus(filePath) as config_file:
-				self.config.write(config_file)
-
-		self.config.read(filePath)
-
-		if (forceCondition is not None):
-			for variable, value in forceCondition.items():
-				var_mustBe = self.tryInterpolation(variable, value)
-				var_isActually = self.get(variable)
-				if (var_mustBe != var_isActually):
-					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch'")
-					os.remove(filePath)
-					self.reset()
-
-					return self.load(filePath = filePath, valid_section = valid_section, forceExists = forceExists, forceCondition = None)
-
-	def tryInterpolation(self, variable, value, section = None):
-		return self.config._interpolation.before_get(self.config, section or "DEFAULT", variable, value, self.config.defaults())
-
-	def save(self, filePath = None, override_readOnly = False, **kwargs):
-		"""Saves changes to config file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save()
-		Example Input: save("database/settings_user.ini")
-		"""
-		global openPlus
-
-		if ((not override_readOnly) and self.readOnly):
-			raise ReadOnlyError(self)
-		
-		filePath = filePath or self.default_filePath
-		with openPlus(filePath or self.default_filePath, **kwargs) as config_file:
-			self.config.write(config_file)
-
-	def has_section(self, section = None, *, valid_section = NULL):
-		"""Returns True if the section exists in the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_section()
-		Example Input: has_section(section = "AutoSave")
-		"""
-
-		section = section or self.default_section
-
-		if (section == self.config.default_section):
-			return True
-
-		return section in self.getSections(valid_section = valid_section, skip_knownTypes = False)
-
-	def has_setting(self, variable, section = None, *, checkDefault = False, valid_section = NULL):
-		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		checkDefault (bool) - Determines if the section DEFAULT is taken into account
-
-		Example Input: has_setting("startup_user")
-		Example Input: has_setting("scanDelay", section = "AutoSave")
-
-		Example Input: has_setting("startup_user", checkDefault = True)
-		"""
-
-		section = section or self.default_section
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		if (checkDefault):
-			return self.config.has_option(section, variable)
-		else:
-			return variable in self.config._sections.get(section, ())
-
-	def remove_section(self, section = None, *, valid_section = NULL):
-		"""Removes a section.
-
-		section (str) - What section to write this setting in
-			- If None: Will remove all sections
-
-		Example Input: remove_section("startup_user")
-		Example Input: remove_section("scanDelay", section = "AutoSave")
-		"""
-
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-
-		if (section is None):
-			for section in self.getSections():
-				self.config.remove_section(section)
-			return
-
-		self.check_invalidSection(section, valid_section = valid_section)
-		self.config.remove_section(section or self.default_section)
-
-	def remove_setting(self, variable, section = None, *, valid_section = NULL):
-		"""Removes a setting from the given section.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: remove_setting("startup_user")
-		Example Input: remove_setting("scanDelay", section = "AutoSave")
-		"""
-
-		if (self.readOnly):
-			raise ReadOnlyError(self)
-		self.check_invalidSection(section, valid_section = valid_section)
-
-		self.config.remove_option(section or self.default_section, variable)
-
-	def getSections(self, *, valid_section = NULL, skip_knownTypes = True):
-		"""Returns a list of existing sections.
-
-		Example Input: getSections()
-		"""
-
-		def yieldSection():
-			nonlocal self, valid_section, skip_knownTypes
-
-			for section in self.config.sections():
-				if (self.check_invalidSection(section, raiseError = False, valid_section = valid_section)):
-					continue
-
-				if (skip_knownTypes and (section == self.knownTypesSection)):
-					continue
-
-				yield section
-
-		###################################
-
-		return tuple(yieldSection())
-
-	def getDefaults(self):
-		"""Returns the defaults that will be used if a setting does not exist.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: getDefaults()
-		"""
-
-		return self.config.defaults()
-
-	def extraBool(self, value, state):
-		"""Adds a value as an extra possible bool.
-		Default cases (case-insensative): yes/no, on/off, true/false, 1/0
-
-		Example Input: extraBool("sure", True)
-		Example Input: extraBool("nope", False)
-		"""
-
-		self.ConfigParser.BOOLEAN_STATES.update({value: state})
-
-	def set_validSection(self, valid_section = None):
-		if (valid_section is None):
-			self.valid_section = None
-		else:
-			self.valid_section = (self.config.default_section, *((self.knownTypesSection,) if (self.knownTypesSection is not None) else ()), *self.ensure_container(valid_section))
-
-	#Converters
-	@staticmethod
-	def convert_datetime(value):
-		return datetime.datetime.strptime(s, "%Y/%m/%d %H:%M:%S.%f")
-
-	converters = {
-		"datetime": convert_datetime,
-	}
-
-	#Interpolators
-	class MyExtendedInterpolation(configparser.ExtendedInterpolation):
-		"""Modified ExtendedInterpolation from configparser.py"""
-
-		def _interpolate_some(self, parser, option, accum, rest, section, mapping, depth):
-			"""The default ExtendedInterpolation does not account for default values in nested interpolations.
-			ie: The following does not work when get() is given the kwargs 'section = "debugging"' and 'vars = {"filePath_versionDir": "C:/"}').
-				[admin]
-				alembicPath = ${filePath_versionDir}/Schema/main/
-
-				[debugging]
-				alembicPath = ${admin:alembicPath}
-			"""
-
-			rawval = parser.get(section, option, raw = True, fallback = rest)
-			if (depth > configparser.MAX_INTERPOLATION_DEPTH):
-				raise InterpolationDepthError(option, section, rawval)
-			while rest:
-				p = rest.find("$")
-				if p < 0:
-					accum.append(rest)
-					return
-				if p > 0:
-					accum.append(rest[:p])
-					rest = rest[p:]
-				# p is no longer used
-				c = rest[1:2]
-				if c == "$":
-					accum.append("$")
-					rest = rest[2:]
-				elif c == "{":
-					m = self._KEYCRE.match(rest)
-					if m is None:
-						raise InterpolationSyntaxError(option, section,
-							"bad interpolation variable reference %r" % rest)
-					path = m.group(1).split(':')
-					rest = rest[m.end():]
-					sect = section
-					opt = option
-					try:
-						if (len(path) is 1):
-							opt = parser.optionxform(path[0])
-							v = mapping[opt]
-
-						elif (len(path) is 2):
-							sect = path[0]
-							opt = parser.optionxform(path[1])
-							v = parser.get(sect, opt, raw = True)
-
-						else:
-							raise configparser.InterpolationSyntaxError(option, section, "More than one ':' found: %r" % (rest,))
-
-					except (KeyError, NoSectionError, NoOptionError):
-						raise configparser.InterpolationMissingOptionError(option, section, rawval, ":".join(path)) from None
-					
-					if ("$" in v):
-						self._interpolate_some(parser, opt, accum, v, sect, {**mapping, **dict(parser.items(sect, raw = True))}, depth + 1) # <- This was the only change
-					else:
-						accum.append(v)
-				else:
-					raise InterpolationSyntaxError(
-						option, section,
-						"'$' must be followed by '$' or '{', "
-						"found: %r" % (rest,))
-
-class Config_Base(Base, metaclass = abc.ABCMeta):
-	"""Utility API for json and yaml scripts."""
-
-	def __init__(self, default_filePath = None, *, defaultFileExtension = None, override = None, overrideIsSave = None, forceExists = False):
-		"""
-		Example Input: JSON_Aid()
-		Example Input: YAML_Aid()
-		"""
-
-		self.defaultFileExtension = defaultFileExtension
-		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
-		self.filePath_lastLoad = self.default_filePath
-
-		self.dirty = None
-		self.contents = {}
-		self.contents_override = {}
-
-		self.setOverride(override = override, overrideIsSave = overrideIsSave)
-
-		if (default_filePath):
-			self.load(default_filePath, forceExists = forceExists)
-
-	def __repr__(self):
-		representation = f"{type(self).__name__}(id = {id(self)})"
-		return representation
-
-	def __str__(self):
-		output = f"{type(self).__name__}()\n-- id: {id(self)}\n"
-		return output
-
-	def __enter__(self):
-		return self
-
-	def __exit__(self, exc_type, exc_value, traceback):
-		if (traceback is not None):
-			print(exc_type, exc_value)
-			return False
-
-	def __getitem__(self, key):
-		return self.contents[key]
-
-	def __setitem__(self, key, value):
-		self.contents[key] = value
-
-	def __delitem__(self, key):
-		del self.contents[key]
-
-	def __contains__(self, key):
-		return key in self.contents
-
-	def read(self, default = None):
-		for section, catalogue in self.contents.items():
-			for setting, value in catalogue.items():
-				if (isinstance(value, dict)):
-					yield section, setting, value.get("value", default)
-				else:
-					yield section, setting, value
-
-	def setOverride(self, override = None, overrideIsSave = None):
-		"""Applies override settings for advanced save and load managment.
-
-		override (str) - A .json file that will override sections in the given filePath
-			- If None: Will ignore all override conditions
-			- If dict: Will use the given dictionary instead of a .json file for saving and loading; can be empty
-			- If str: Will use the .json file located there (it will be created if neccissary)
-
-		overrideIsSave (bool) - Determines what happens when no file path is given to save()
-			- If True: Saves any changes to 'override', unless that value exists in 'default_filePath' in which case it will be removed from 'override'
-			- If False: Saves any changes to 'override'
-			- If None: Saves any changes to 'default_filePath'
-			~ Removed sections or settings are ignored
-
-		Example Input: setOverride()
-		Example Input: setOverride(override = "")
-		Example Input: setOverride(override = "settings_user_override.json")
-		Example Input: setOverride(override = {"Lorem": {"ipsum": 1}})
-		Example Input: setOverride(override = {}, overrideIsSave = True)
-		Example Input: setOverride(override = {}, overrideIsSave = False)
-		"""
-
-		if (override is None):
-			self.override = None
-			self.overrideIsSave = None
-			self.contents_override = {}
-			self.default_filePath_override = None
-			return
-
-		self.overrideIsSave = overrideIsSave
-		if (isinstance(override, dict)):
-			self.override = False
-			self.contents_override = override
-			self.default_filePath_override = None
-			return
-
-		self.override = True
-		self.default_filePath_override = override or f"settings_override.{self.defaultFileExtension}"
-		self.contents_override = {}
-
-	@contextlib.contextmanager
-	def _load(self, filePath = None, removeDirty = True, applyOverride = True, forceExists = False):
-		"""Loads the json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.json")
-		"""
-
-		if (isinstance(filePath, dict)):
-			self.contents = {**filePath}
-			self.filePath_lastLoad = None
-			yield None
-		else:
-			filePath = filePath or self.default_filePath
-			self.filePath_lastLoad = filePath
-
-			if (not os.path.exists(filePath)):
-				if (not forceExists):
-					raise FileExistsError(filePath)
-
-				if (isinstance(forceExists, dict)):
-					self.set(forceExists, valid_section = None)
-
-				self.save(filePath = filePath, applyOverride = False, removeDirty = False)
-
-			with open(filePath) as fileHandle:
-				yield fileHandle
-		
-		if (removeDirty):
-			self.dirty = False
-
-		if (applyOverride):
-			self.load_override()
-
-	@contextlib.contextmanager
-	def _load_override(self, filePath = None):
-		"""Loads the override json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.json")
-		"""
-
-		if (self.override is None):
-			yield None
-			return
-
-		filePath = filePath or self.default_filePath_override
-		if (isinstance(filePath, dict)):
-			self.contents_override = {**filePath}
-			yield None
-		else:
-			if (self.override and (os.path.exists(filePath))):
-				with open(filePath) as fileHandle:
-					yield fileHandle
-			else:
-				yield None
-
-		MyUtilities.common.nestedUpdate(self.contents, self.contents_override, preserveNone = False)
-
-	@contextlib.contextmanager
-	def _save(self, filePath = None, ifDirty = True, removeDirty = True, 
-		applyOverride = True, overrideKwargs = None, **kwargs):
-		"""Saves changes to json file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.json")
-		"""
-		global openPlus
-
-		filePath = filePath or self.default_filePath
-		if (ifDirty and (not self.dirty) and (os.path.exists(filePath))):
-			yield None
-			return
-
-		try:
-			if (applyOverride and self.save_override(**(overrideKwargs or {}))):
-				yield None
-				return
-
-			with openPlus(filePath, **kwargs) as fileHandle:
-				yield fileHandle
-
-		except Exception as error:
-			raise error
-
-		finally:
-			if (removeDirty):
-				self.dirty = False
-
-	@contextlib.contextmanager
-	def _save_override(self, filePath = None, *, base = None):
-		"""Saves changes to json file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.json")
-		"""
-		global openPlus
-
-		def formatCatalogue(catalogue):
-			if (not isinstance(catalogue, dict)):
-				return {"value": catalogue}
-			return catalogue
-
-		#######################################
-
-		if (self.overrideIsSave is None):
-			yield None
-			return
-
-		base = base or {}
-		changes = collections.defaultdict(lambda: collections.defaultdict(dict))
-		for section, new in self.contents.items():
-			old = base.get(section, {})
-
-			for setting, new_catalogue in new.items():
-				new_catalogue = formatCatalogue(new_catalogue)
-				old_catalogue = formatCatalogue(old.get(setting, {}))
-
-				for option, new_value in new_catalogue.items():
-					old_value = old_catalogue.get(option, NULL)
-
-					if ((new_value or (option != "comment")) and ((old_value is NULL) or (new_value != old_value))):
-						changes[section][setting][option] = new_value
-
-		self.contents_override.clear()
-		MyUtilities.common.nestedUpdate(self.contents_override, changes) #Filter out defaultdict
-
-		if (self.override):
-			with openPlus(filePath or self.default_filePath_override) as fileHandle:
-				yield fileHandle
-		else:
-			yield None
-
-	def _ensure(self, section, variable = None, value = None, *, comment = None, 
-		forceAttribute = False, makeDirty = True):
-		"""Makes sure that the given variable exists in the given section.
-
-		section (str) - Which section to ensure 'variable' for
-			- If list: Will ensure all given sections have 'variable'
-			- If dict: Will ignore 'variable' and 'value'
-
-		variable (str) - Which variable to ensure
-			- If list: Will ensure all given variables
-			- If dict: Will ignore 'value' and use the key as 'variable' and the value as 'value'
-
-		value (any) - The default value that 'variable' should have if it does not exist
-		comment (str) - Optional comment string for 'variable'
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", {"label": False})
-		Example Input: ensure({"containers": {"label": False}})
-		"""
-
-		for sectionCatalogue in self.ensure_container(section):
-			for _section, variableCatalogue in self.ensure_dict(sectionCatalogue, variable).items():
-				if (not self.has_section(_section)):
-					self.contents[_section] = {}
-
-				for _variableCatalogue in self.ensure_container(variableCatalogue):
-					for _variable, _value in self.ensure_dict(_variableCatalogue, value).items():
-
-						if (not self.has_setting(_variable, _section)):
-							if (makeDirty):
-								self.dirty = True
-							if (comment):
-								yield _section, _variable, {"value": _value, "comment": comment}
-							elif (forceAttribute):
-								yield _section, _variable, {"value": _value}
-							else:
-								yield _section, _variable, {_value}
-
-	@abc.abstractmethod
-	def load(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def load_override(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def save(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def save_override(self, *args, **kwargs):
-		pass
-
-	@abc.abstractmethod
-	def ensure(self, *args, **kwargs):
-		pass
-
-	def get(self, section, setting = None, default = None, *, 
-		forceAttribute = None, forceTuple = False, 
-		filterNone = False, useForNone = None):
-		"""Returns the value of the given setting in the given section.
-
-		setting (str) - What variable to look for
-			- If list: Will return the value for each variable given
-
-		Example Input: get("lorem", "ipsum")
-		Example Input: get("lorem", ("ipsum", "dolor"))
-		"""
-
-		def formatValue(value):
-			nonlocal default
-
-			if (isinstance(value, dict)):
-				return value.get("value", default)
-			return value
-
-		def yieldValue():
-			nonlocal self, section, setting, filterNone, useForNone
-
-			for _setting in self.ensure_container(setting):
-				value = formatValue(self.contents[section][_setting])
-				if (filterNone and (value is useForNone)):
-					continue
-
-				yield _setting, value
-
-		####################
-
-		setting = self.ensure_default(setting, lambda: self.getSettings(section))
-
-		answer = {key: value for key, value in yieldValue()}
-		if ((forceAttribute is not None) and (forceAttribute or (len(answer) is not 1))):
-			return answer
-		else:
-			return self.oneOrMany(answer.values(), forceTuple = forceTuple)
-
-
-	def set(self, contents = None, update = True, makeDirty = True):
-		"""Adds a section to the internal contents.
-
-		contents (dict) - What to add
-		update (bool) - Determines what happens if a key already exists for the given 'contents'
-			- If True: Will update nested dictionaries
-			- If False: Will replace nested dictionaries
-			- If None: Will replace entire self.contents
-
-		Example Input: set()
-		Example Input: set({"lorem": 1})
-		Example Input: set({"ipsum": {"dolor": 4}})
-		Example Input: set({"ipsum": {"dolor": 5}}, update = False)
-		Example Input: set({"lorem": 1, "ipsum": {"dolor": 2, "sit": 3}}, update = None)
-		"""
-
-		contents = contents or {}
-
-		assert isinstance(contents, dict)
-
-		if (update is None):
-			self.contents = contents
-		elif (not update):
-			self.contents.update(contents)
-		else:
-			MyUtilities.common.nestedUpdate(self.contents, contents)
-
-		if (makeDirty):
-			self.dirty = True
-
-	def apply(self, handle, section, include = None, exclude = None, handleTypes = None):
-		"""Places default values into the supplied handle.
-
-		___________________ REQUIRED FORMAT ___________________
-
-		self.contents = {
-			section (str): {
-				variable (str): value (any),
-
-				variable (str): {
-					"value": value (any),
-					"comment": docstring (str), #optional
-				},
-			},
-		}
-		_______________________________________________________
-
-		section (str) - Which section to apply variables for
-			- If list: Will apply all given sections
-
-		handle (object) - What to apply the given sections to
-			- If list: will apply to all
-
-		include (str) - What variable is allowed to be applied
-			- If list: Will apply all variables in the section
-
-		handleTypes (list) - Place the type for 'section' here
-
-		Example Input: apply(test_1, "GUI_Manager", handleTypes = Test)
-		Example Input: apply(test_2, ("DatabaseInfo", "Users"), handleTypes = (Test,))
-		Example Input: apply(self, {"FrameSettings": self.label}, handleTypes = (self.__class__,))
-		Example Input: apply(self, {"FrameSettings": {self.label: "title"}}, handleTypes = (self.__class__,))
-		Example Input: apply((test1, test_2), {"Settings": ("debugging_default", "debugging_enabled")}, handleTypes = Test)
-		"""
-
-		def yieldApplied():
-			nonlocal self, handle, section, handleTypes
-
-			for _handle in self.ensure_container(handle, elementTypes = handleTypes):
-				for _section in self.ensure_container(section):
-					for item in setValue(_handle, _section, self.contents):
-						yield item
-
-		def setValue(_handle, _section, catalogue):
-			nonlocal self, include, exclude
-
-			if (isinstance(_section, dict)):
-				for key, value in _section.items():
-					for item in setValue(_handle, value, catalogue.get(key)):
-						yield item
-				return 
-			
-			if (_section not in catalogue):
-				print("@apply", f"{_section} does not exist in catalogue\n  -- keys: {tuple(catalogue.keys())}")
-				raise NotImplementedError()
-				return
-
-			for variable, _catalogue in catalogue[_section].items():
-				if (include and (variable not in include)):
-					continue
-				if (exclude and (variable in exclude)):
-					continue
-
-				if ((not isinstance(_catalogue, dict) or ("value" not in _catalogue))):
-					setattr(_handle, variable, _catalogue)
-				else:
-					setattr(_handle, variable, _catalogue["value"])
-
-				yield variable
-
-		#######################################################
-		
-		include = self.ensure_container(include)
-		exclude = self.ensure_container(exclude)
-
-		return tuple(yieldApplied())
-
-	def has_section(self, section = None):
-		"""Returns True if the section exists in the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_section()
-		Example Input: has_section(section = "AutoSave")
-		"""
-
-		return (section or self.default_section) in self.contents
-
-	def has_setting(self, variable, section = None):
-		"""Returns True if the setting exists in given section of the config file, otherwise returns False.
-
-		section (str) - What section to write this setting in
-			- If None: Will use the default section
-
-		Example Input: has_setting("startup_user")
-		Example Input: has_setting("scanDelay", section = "AutoSave")
-		"""
-
-		return variable in self.contents.get(section or self.default_section, {})
-
-	def is_dirty(self):
-		"""Returns True if changes have been made that are not yet saved, otherwise returns False.
-
-		Example Input: is_dirty()
-		"""
-
-		return self.dirty
-
-	def getSections(self, variable = None):
-		"""Returns a list of existing sections.
-
-		variable (str) - What variable must exist in the section
-			- If None: Will not search for sections by variable
-
-		Example Input: getSections()
-		Example Input: getSections(variable = "debugging_default")
-		"""
-
-		if (variable is None):
-			return tuple(self.contents.keys())
-
-		return tuple(key for key, catalogue in self.contents.items() if (variable in catalogue.keys()))
-
-	def getSettings(self, section = None, valuesAsSet = False):
-		"""Returns a list of existing settings for the given section.
-
-		section (str) - What section to write this setting in
-			- If list: Will use all in list
-			- If None: Will use all existing sections
-
-		Example Input: getSettings()
-		Example Input: getSettings("AutoSave")
-		"""
-
-		if (valuesAsSet):
-			container = set
-		else:
-			container = tuple
-
-		return container(variable for key in (self.ensure_container(section) or self.contents.keys()) for variable in self.contents[key].keys())
-
-class JSON_Aid(Config_Base):
-	"""Utility API for json scripts.
-
-	Use: https://martin-thoma.com/configuration-files-in-python/#json
-	"""
-
-	def __init__(self, default_filePath = None, **kwargs):
-		"""
-		Example Input: JSON_Aid()
-		"""
-
-		super().__init__(default_filePath = default_filePath or "settings.json", defaultFileExtension = "json", **kwargs)
-
-	def load(self, *args, **kwargs):
-		"""Loads the json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.json")
-		"""
-
-		with self._load(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents = json.load(fileHandle) or {}
-			
-		return self.contents
-
-	def load_override(self, *args, **kwargs):
-		"""Loads the override json file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.json")
-		"""
-
-		with self._load_override(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents_override = json.load(fileHandle) or {}
-
-	def save(self, *args, **kwargs):
-		"""Saves changes to json file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.json")
-		"""
-
-		with self._save(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				json.dump(self.contents or None, fileHandle, indent = "\t")
-
-	def save_override(self, *args, base = None, **kwargs):
-		"""Saves changes to json file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.json")
-		"""
-
-		if (base is None):
-			with open(self.filePath_lastLoad) as fileHandle:
-				base = json.load(fileHandle) or {}
-
-		with self._save_override(*args, base = base, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				json.dump(self.contents_override or None, fileHandle, indent = "\t")
-
-		return True
-
-	def ensure(self, *args, saveToOverride = None, **kwargs):
-		"""Makes sure that the given variable exists in the given section.
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
-		"""
-		global openPlus
-
-		if (saveToOverride is None):
-			for section, variable, value in self._ensure(*args, **kwargs):
-				self.contents[section][variable] = value
-			return True
-
-		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
-		with open(filePath) as fileHandle:
-			base = json.load(fileHandle) or {}
-
-		changed = False
-		for section, variable, value in self._ensure(*args, **kwargs):
-			self.contents[section][variable] = value
-			changed = True
-
-			if (section not in base):
-				base[section] = {}
-			base[section][variable] = value
-
-		if (changed):
-			with openPlus(filePath) as fileHandle:
-				json.dump(base or None, fileHandle, indent = "\t")
-
-		return True
-
-class YAML_Aid(Config_Base):
-	"""Utility API for yaml scripts.
-
-	Use: https://pyyaml.org/wiki/PyYAMLDocumentation
-	Use: https://martin-thoma.com/configuration-files-in-python/#yaml
-	"""
-
-	def __init__(self, default_filePath = None, **kwargs):
-		"""
-		Example Input: YAML_Aid()
-		"""
-
-		super().__init__(default_filePath = default_filePath or "settings.yaml", defaultFileExtension = "yaml", **kwargs)
-
-	def load(self, *args, **kwargs):
-		"""Loads the yaml file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load()
-		Example Input: load("database/settings_user.yaml")
-		"""
-
-		with self._load(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents = yaml.load(fileHandle) or {}
-			
-		return self.contents
-
-	def load_override(self, *args, **kwargs):
-		"""Loads the override yaml file.
-
-		filePath (str) - Where to load the config file from
-			- If None: Will use the default file path
-
-		Example Input: load_override()
-		Example Input: load_override("database/settings_user_override.yaml")
-		"""
-
-		with self._load_override(*args, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				self.contents_override = yaml.load(fileHandle) or {}
-
-	def save(self, *args, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Saves changes to yaml file.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		ifDirty (bool) - Determines if the file should be saved only if changes have been made
-
-		Example Input: save()
-		Example Input: save("database/settings_user.yaml")
-		"""
-
-		with self._save(*args, overrideKwargs = {"explicit_start": explicit_start, "width": width, "indent": indent, 
-			"canonical": canonical, "default_flow_style": default_flow_style}, **kwargs) as fileHandle:
-
-			if (fileHandle is not None):
-				yaml.dump(self.contents or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-	def save_override(self, *args, base = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Saves changes to yaml file.
-		Note: Only looks at changes and additions, not removals.
-
-		filePath (str) - Where to save the config file to
-			- If None: Will use the default file path
-
-		Example Input: save_override()
-		Example Input: save_override("database/settings_user_override.yaml")
-		"""
-
-		if (base is None):
-			with open(self.filePath_lastLoad) as fileHandle:
-				base = yaml.load(fileHandle) or {}
-
-		with self._save_override(*args, base = base, **kwargs) as fileHandle:
-			if (fileHandle is not None):
-				yaml.dump(self.contents_override or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-		return True
-
-	def ensure(self, *args, saveToOverride = None, explicit_start = True, explicit_end = True, width = None, indent = 4, 
-		default_style = None, default_flow_style = None, canonical = None, line_break = None, 
-		encoding = None, allow_unicode = None, version = None, tags = None, **kwargs):
-		"""Makes sure that the given variable exists in the given section.
-
-		Example Input: ensure("containers", "label", value = False)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = True)
-		Example Input: ensure("containers", "label", value = False, saveToOverride = False)
-		"""
-
-		global openPlus
-
-		if (saveToOverride is None):
-			for section, variable, value in self._ensure(*args, **kwargs):
-				self.contents[section][variable] = value
-			return True
-
-		filePath = (self.filePath_lastLoad, self.default_filePath_override)[saveToOverride]
-		with open(filePath) as fileHandle:
-			base = yaml.load(fileHandle) or {}
-
-		changed = False
-		for section, variable, value in self._ensure(*args, **kwargs):
-			self.contents[section][variable] = value
-			changed = True
-
-			if (section not in base):
-				base[section] = {}
-			base[section][variable] = value
-
-		if (changed):
-			with openPlus(filePath) as fileHandle:
-				yaml.dump(base or None, fileHandle, explicit_start = explicit_start, explicit_end = explicit_end, width = width, 
-					default_style = default_style, default_flow_style = default_flow_style, canonical = canonical, indent = indent, 
-					encoding = encoding, allow_unicode = allow_unicode, version = version, tags = tags, line_break = line_break)
-
-		return True
-
-def quiet(*args):
-	pass
-	print(*args)
 
 def sandbox():
-	def test_yaml():
-		class Test(): pass
-		test_1 = Test()
-		test_2 = Test()
+	def test_sqlite_2():
+		database_API = build()
+		# database_API.openDatabase("test/test_map_example.db", "M:/Versions/dev/Schema/config/schema_config.py", openAlembic = False)
+		database_API.openDatabase(None, "M:/Versions/dev/Schema/config/schema_config.py", openAlembic = False)
+		database_API.removeRelation()
+		database_API.createRelation()
+		database_API.resetRelation()
 
-		# yaml_api = build_yaml(default_filePath = "test/settings.yaml", forceExists = True)
-		# print(yaml_api)
+		# print(database_API.getValue({"Maintainance": None}))
 
-		# yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = {"GUI_Manager": {"startup_window": "settings"}})
-		yaml_api = build_yaml(default_filePath = "M:/Versions/dev/Settings/default_user.yaml", override = "M:/Versions/dev/Settings/temp_default_user.yaml", overrideIsSave = True)
-		quiet(yaml_api.apply(test_1, "GUI_Manager", handleTypes = Test))
-		quiet(yaml_api.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,)))
-		quiet(yaml_api.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,)))
+		# print()
+		# for item in database_API.yieldValueQuery({"Maintainance": None}):
+		# 	print(item)
 
-		quiet(vars(test_1))
-		quiet(vars(test_2))
-		quiet(yaml_api.getSettings())
-		quiet(yaml_api.getSettings("Users"))
-		quiet(yaml_api.getSections(variable = "debugging_default"))
+		# print()
+		# for relation, attributeList, query in database_API.yieldAllValues(None):
+		# 	print([relation, attributeList, query])
+		# 	for result in query.all():
+		# 		print("   ", result)
 
-		yaml_api.set({"GUI_Manager": {"startup_window": "main"}})
-		yaml_api.save()
 
-	def test_json():
-		class Test(): pass
-		test_1 = Test()
-		test_2 = Test()
-
-		# json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = {"GUI_Manager": {"startup_window": "settings"}})
-		json_API = build_json(default_filePath = "M:/Versions/dev/Settings/default_user.json", override = "M:/Versions/dev/Settings/temp_default_user.json", overrideIsSave = True)
-		json_API.apply(test_1, "GUI_Manager", handleTypes = Test)
-		json_API.apply(test_2, ("Barcodes", "Users"), handleTypes = (Test,))
-		json_API.apply((test_1, test_2), "Settings", ("debugging_default", "debugging_enabled"), handleTypes = (Test,))
-
-		quiet(vars(test_1))
-		quiet(vars(test_2))
-		quiet(json_API.getSettings("Users"))
-		quiet(json_API.getSections(variable = "debugging_default"))
-
-		json_API.set({"GUI_Manager": {"startup_window": "main"}})
-		json_API.save()
-
-	def test_config():
-		# config_API = build_configuration()
-		# # config_API.set("startup_user", "admin")
-		# # config_API.save("test/test.ini")
-
-		# config_API.load("test/test.ini")
-		# # quiet(config_API.get("startup_user"))
-		
-		# with config_API as config:
-		# 	for section, sectionHandle in config.items():
-		# 		for key, value in sectionHandle.items():
-		# 			quiet(section, key, value)
-
-		user = os.environ.get('username')
-		config_API = build_configuration("M:/Versions/dev/Settings/settings_user.ini", valid_section = user, default_section = user, knownTypes = {"x": bool, "y": bool})
-
-		value = config_API.get("startup_user")
-		print(value, type(value))
-
-		# value = config_API.get("x")
-		# print(value, type(value))
-
-		# value = config_API.get("y")
-		# print(value, type(value))
+		with database_API._yieldValue_getConnection(fromSchema = None) as connection:
+			for relation, attributeList, query in database_API.yieldAllValues(None, fromSchema = None, connection = connection):
+				print([relation, attributeList, query])
+				for result in connection.execute(query).fetchall():
+					print("   ", result)
 
 	def test_sqlite():
 		database_API = build()
 		# database_API.openDatabase(None, "M:/Schema/main/schema_main.py") 
 		# database_API.openDatabase("test/test_map_example.db", "M:/Schema/main/schema_main.py", openAlembic = False)
 		# database_API.openDatabase("M:/Versions/dev/Settings/data.db", "M:/Schema/main/schema_main.py", openAlembic = False)
-		database_API.openDatabase(None, "M:/Schema/main/schema_main.py", openAlembic = False)
+		database_API.openDatabase(None, "M:/Versions/dev/Schema/main/schema_main.py", openAlembic = False)
 		database_API.removeRelation()
 		database_API.createRelation()
 		database_API.resetRelation()
@@ -4764,6 +3530,44 @@ def sandbox():
 		quiet(database_API.getValue({"tblMaterialLog": "ContainerID"}, isIn = {"ContainerID": ("1272", "1498", "2047")}, fromSchema = None))
 
 	def test_mysql():
+		global timeStart
+
+		MyUtilities.logger.getLogger("__main__").quiet()
+		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "debugging", reset = False, openAlembic = False, settingsKwargs = {"filePath_versionDir": "M:/Versions/dev"})
+
+		answer = database_API.getAllValues("Containers")
+		print(len(answer))
+		answer = database_API.getAllValues("Containers", fromSchema = None)
+		print(len(answer))
+
+		# timeStart = time.perf_counter()
+		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
+		#   'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		#   'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}\n") #0.8802
+		# print(len(answer))
+
+		# timeStart = time.perf_counter()
+		# answer = database_API.getAllValues('Containers', [], None, **{'valuesAsSet': False, 'attributeFirst': False, 'forceAttribute': True, 'forceTuple': True, 
+		#   'filterNone': False, 'nextToCondition': True, 'nextToCondition_None': False, 'notNextTo': collections.defaultdict(list, {'removePending': [1], 'archived': [1]}), 
+		#   'alias': {}, 'direction': True, 'foreignAsDict': True, 'foreignDefault': None, 'fromSchema': None})
+		# print(f"@__main__, {time.perf_counter() - timeStart:.6f}") #0.8587
+
+		# for item in answer:
+		#   print(item.label)
+		#   break
+
+		# session.flush()
+		# session.close()
+
+		# print(item.label)
+		# print(item.job)
+
+		sys.exit()
+
+
+
+
 		database_API = build(fileName = "M:/Versions/dev/Settings/config_mysql.ini", section = "debugging", reset = True, openAlembic = False, settingsKwargs = {"filePath_versionDir": "M:/Versions/dev"})
 		# database_API.removeRelation()
 		# database_API.createRelation()
@@ -4902,14 +3706,12 @@ def sandbox():
 		# database_API.checkSchema()
 
 		#Backup and Restore
-		database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
+		# database_API.backup(username = "backup", password = "KHG7Suh*X+cvb#Y5")
 
-	# test_json()
-	# test_yaml()
-	# test_config()
 	# test_sqlite()
+	test_sqlite_2()
 	# test_access()
-	test_mysql()
+	# test_mysql()
 
 def main():
 	"""The main program controller."""
