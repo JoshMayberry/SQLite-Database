@@ -1779,9 +1779,12 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				return
 
 			if (_schema is None):
-				handle = getattr(table.columns, key)
+				handle = getattr(table.columns, key, None)
 			else:
-				handle = getattr(_schema, key)
+				handle = getattr(_schema, key, None)
+
+			if (handle is None):
+				return
 
 			if (mode is 1):
 				yield function(handle, value)
@@ -1956,7 +1959,11 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 				if (variable not in foreignCatalogue):
 					continue
 
-				_handle = _handle.join(foreignCatalogue[variable])
+				try:
+					_handle = _handle.join(foreignCatalogue[variable])
+				except sqlalchemy.exc.AmbiguousForeignKeysError as error:
+					# self.log_error(error, includeTraceback = True)
+					print(error)
 			return _handle
 
 		###############################################
@@ -3034,8 +3041,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		forceRelation = False, forceAttribute = False, forceTuple = False, **kwargs):
 		if ((self.schema is None) or (isinstance(self.schema, EmptySchema))):
 			fromSchema = None
-
-
 
 		def _makeCatalogue(result):
 			nonlocal attributeList

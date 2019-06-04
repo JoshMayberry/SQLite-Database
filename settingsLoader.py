@@ -13,13 +13,26 @@ NULL = MyUtilities.common.NULL
 wrap_skipEvent = MyUtilities.wxPython.wrap_skipEvent
 
 def build(*args, **kwargs):
-	return Controller(*args, **kwargs)
+	return LoadingController(*args, **kwargs)
 
-class Controller(MyUtilities.common.EnsureFunctions):
-	def __init__(self, module = None, filePath = "settings.ini", section = "parameters"):
+class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.LoggingFunctions):
+	logger_config = {
+		None: {
+			"level": 1,
+		},
 
+		"console": {
+			"type": "stream",
+			"level": 1,
+		},
+	}
+
+	def __init__(self, module = None, filePath = "settings.ini", section = "parameters", *, logger_name = None, logger_config = None):
+		MyUtilities.common.EnsureFunctions.__init__(self)
+		MyUtilities.logger.LoggingFunctions.__init__(self, label = logger_name or __name__, config = logger_config or self.logger_config, force_quietRoot = __name__ == "__main__")
+	
 		self.building = True
-		self.updateFrames = None
+		self.updateFrames = set()
 		self.app_widgets = {} #Widgets that access setting values, but do not modify them
 		self.setting_widgets = {} #Widgets that modify setting values
 		self.checkFunctions = {} #{setting_widgets label (str): function}
@@ -91,6 +104,11 @@ class Controller(MyUtilities.common.EnsureFunctions):
 		"""Changes a setting for this application."""
 
 		variable = myWidget.getLabel()
+
+		if (variable is None):
+			errorMessage = "Setting widgets must have labels that are the variable name"
+			raise ValueError(errorMessage)
+
 		if (variable in self.setting_widgets):
 			return self.onGUIParameter(event, variable, myWidget, save = save, getIndex = getIndex, **kwargs)
 
@@ -127,7 +145,7 @@ class Controller(MyUtilities.common.EnsureFunctions):
 
 		self.updateFrames = self.ensure_container(myFrame)
 
-	def _setStatusText(self, text):
+	def _setStatusText(self, text = None):
 		for myFrame in self.updateFrames:
 			myFrame.setStatusText(text)
 
@@ -239,22 +257,43 @@ class Controller(MyUtilities.common.EnsureFunctions):
 
 		return errorMessage
 
-	def _canContinue(self, variable, value):
-		toggleWidget = self.setting_widgets[variable]["toggleWidget"]
+	def checkAll(self, exclude = (), updateGUI = True):
+		for variable in self.checkFunctions.keys():
+			if (variable in exclude):
+				continue
+
+			myWidget = self.setting_widgets[variable]["myWidget"]
+			if (not self._canContinue(variable, myWidget.getValue(), updateGUI = updateGUI)):
+				return False
+		return True
+
+	def _canContinue(self, variable, value, updateGUI = True):
 		errorMessage = self.checkFunctions[variable](value)
-		
+
+		if (not updateGUI):
+			return not bool(errorMessage)
+
 		if (errorMessage):
-			if (toggleWidget is not None):
-				toggleWidget.disable()
 			self._setStatusText(errorMessage)
+
+		toggleWidget = self.setting_widgets[variable]["toggleWidget"]
+
+		if (toggleWidget is None):
+			return not bool(errorMessage)
+
+		if (errorMessage):
+			toggleWidget.disable()
 			return False
 
-		elif ((toggleWidget is not None) and (toggleWidget.checkEnabled())):
+		if (toggleWidget.checkEnabled() or self.checkAll(exclude = (variable,), updateGUI = False)):
 			self._setStatusText()
+			toggleWidget.enable()
+
 		return True
 
 	@wrap_skipEvent()
-	def onGUIParameter(self, event, variable, myWidget, *, check = False, save = False, getIndex = False, checkBuilding = True):
+	def onGUIParameter(self, event, variable, myWidget, *, check = False, save = False, getIndex = False, checkBuilding = True,
+		setterFunction = None, setterFunctionArgs = None, setterFunctionKwargs = None):
 		"""The GUI is modifying a parameter."""
 
 		if (checkBuilding and self.building):
@@ -264,6 +303,9 @@ class Controller(MyUtilities.common.EnsureFunctions):
 			value = myWidget.getIndex()
 		else:
 			value = myWidget.getValue()
+
+		if (setterFunction is not None):
+			value = self.oneOrMany(self.ensure_functionInput(myFunction = setterFunction, myFunctionArgs = setterFunctionArgs, myFunctionKwargs = setterFunctionKwargs), forceContainer = False)
 
 		if (check and (not self._canContinue(variable, value))):
 			return
