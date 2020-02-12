@@ -530,7 +530,16 @@ class Schema_Base(Base_Database):
 		command += f"LEFT JOIN {relation} as t2 ON t1.{attribute} + 1 = t2.{attribute} "
 		command += f"WHERE ({' AND '.join(yieldLocation())})"
 
-		answer = int((cls.metadata.bind.execute(command).first() or (None,))[0] or default)
+		answer = (cls.metadata.bind.execute(command).first() or (None,))[0]
+
+		if (answer is None):
+			#There is no available minimum, so get the next maximum
+			command = f"SELECT MAX(t1.answer) FROM (SELECT MAX({attribute} + 1) as answer FROM {relation} "
+			for key, foreignHandle in cls.usedCatalogue.items():
+				command += f"UNION SELECT MAX({foreignHandle.getPrimaryKey()} + 1) as answer FROM {foreignHandle.__tablename__} "
+			command += ") as t1"
+	
+			answer = int((cls.metadata.bind.execute(command).first() or (None,))[0] or default)
 		
 		if ((minimum is not None) and (answer < minimum)):
 			answer = minimum
