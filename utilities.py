@@ -82,3 +82,43 @@ class _JSONDecoder(json.JSONDecoder):
 
 json._default_encoder = _JSONEncoder()
 json._default_decoder = _JSONDecoder()
+
+original_dump = json.dump
+def mp_dump(*args, cls = None, **kwargs):
+	"""Defaults to *_JSONEncoder* when kwargs are given"""
+
+	if (cls is None):
+		cls = _JSONEncoder
+
+	return original_dump(*args, cls = cls, **kwargs)
+json.dump = mp_dump
+
+original_dumps = json.dumps
+def mp_dumps(*args, cls = None, **kwargs):
+	"""Defaults to *_JSONEncoder* when kwargs are given"""
+
+	if (cls is None):
+		cls = _JSONEncoder
+
+	return original_dumps(*args, cls = cls, **kwargs)
+json.dumps = mp_dumps
+
+original_loads = json.load
+def mp_load(*args, cls = None, **kwargs):
+	"""Defaults to *_JSONDecoder* when kwargs are given"""
+
+	if (cls is None):
+		cls = _JSONDecoder
+
+	return original_load(*args, cls = cls, **kwargs)
+json.load = mp_load
+
+original_loads = json.loads
+def mp_loads(*args, cls = None, **kwargs):
+	"""Defaults to *_JSONDecoder* when kwargs are given"""
+
+	if (cls is None):
+		cls = _JSONDecoder
+
+	return original_loads(*args, cls = cls, **kwargs)
+json.loads = mp_loads
