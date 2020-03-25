@@ -1,4 +1,5 @@
 import os
+import ast
 import datetime
 import configparser
 import MyUtilities.common
@@ -102,11 +103,16 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 	def setReset(self, *args, **kwargs):
 		self._reset = (args, kwargs)
 
+	def _eval(self, *args, **kwargs):
+		value = self.config.get(*args, **kwargs)
+		return ast.literal_eval(value)
+
 	def reset(self):
 		self.config = configparser.ConfigParser(*self._reset[0], **self._reset[1])
 
 		self.dataType_catalogue = {
 			None: self.config.get,
+			eval: self._eval, "eval": self._eval, 
 			str: self.config.get, "str": self.config.get,
 			int: self.config.getint, "int": self.config.getint,
 			float: self.config.getfloat, "float": self.config.getfloat,
@@ -302,6 +308,10 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		except (configparser.InterpolationDepthError, configparser.InterpolationMissingOptionError) as error:
 			print("@Configuration.get", error)
 			return function(section, variable, vars = default_values or {}, raw = True, fallback = fallback)
+
+		except Exception as error:
+			print("ERROR", [function, section, variable, default_values or {}, raw, fallback])
+			raise error
 
 	def set(self, variable, value = None, section = None, *, valid_section = NULL, save = False):
 		"""Adds a setting to the given section.

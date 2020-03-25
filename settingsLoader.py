@@ -55,6 +55,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		self.module.onChangeSetting = self.onChangeSetting
 		self.module.onResetSettings = self.onResetSettings
 		self.module.setUpdateWindow = self.setUpdateWindow
+		self.module.setToggleWidget = self.setToggleWidget
 		self.module.addSettingWidget = self.addSettingWidget
 		self.module.addCheckFunction = self.addCheckFunction
 		self.module.refresh_settings = self.refresh_settings
@@ -115,7 +116,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		if (getIndex):
 			value = myWidget.getIndex()
 		else:
-			value = myWidget.getValue()
+			value = myWidget._getter()
 
 		self.setSetting(variable, value)
 		event.Skip()
@@ -149,7 +150,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		for myFrame in self.updateFrames:
 			myFrame.setStatusText(text)
 
-	def addAppWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True):
+	def addAppWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True, setter = None, getter = None):
 		"""Marks the given widget as one that can NOT change settings, but accesses it's value by default.
 
 		Example Input: addAppWidget("offsets", myWidget)
@@ -158,29 +159,41 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		if (variable in self.app_widgets):
 			self.log_warning(f"Overwriting app widget {variable}")
 		self.app_widgets[variable] = myWidget
+		
+		myWidget._getter = (myWidget.getValue, getter)[getter is not None]
+		myWidget._setter = (myWidget.setValue, setter)[setter is not None]
 
 		if (updateGUI):
-			myWidget.setValue(getattr(self.module, variable))
+			myWidget._setter(getattr(self.module, variable))
 
-	def addSettingWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True):
+	def addSettingWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True, setter = None, getter = None):
 		"""Marks the given widget as one that can change settings.
 
 		variable (str) - What setting variable this widget connects to
 		myWidget (wxWidget) - The widget that modifys this setting
 
-		Example Input: addSettingWidget("offsets", myWidget, window = self.frame_settings, toggleWidget = self.widget_generateButton)
+		Example Input: addSettingWidget("offsets", myWidget, toggleWidget = self.widget_generateButton)
 		"""
 
 		if (variable in self.setting_widgets):
 			self.log_warning(f"Overwriting setting widget {variable}")
 
 		self.setting_widgets[variable] = {"myWidget": myWidget, "toggleWidget": toggleWidget}
+		
+		myWidget._getter = (myWidget.getValue, getter)[getter is not None]
+		myWidget._setter = (myWidget.setValue, setter)[setter is not None]
 
 		if (checkFunction is not None):
 			self.addCheckFunction(variable = variable, myFunction = checkFunction)
 
 		if (updateGUI):
-			myWidget.setValue(getattr(self.module, variable))
+			myWidget._setter(getattr(self.module, variable))
+
+	def setToggleWidget(self, variable, toggleWidget):
+		if ("toggleWidget" in self.setting_widgets[variable]):
+			self.log_warning(f"Overwriting toggle widget for {variable}")
+
+		self.setting_widgets[variable]["toggleWidget"] = toggleWidget
 
 	def onRefreshAppWidgets(self, event):
 		self.refreshAppWidgets()
@@ -194,11 +207,11 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 
 	def refreshAppWidgets(self):
 		for variable, myWidget in self.app_widgets.items():
-			myWidget.setValue(getattr(self.module, variable))
+			myWidget._setter(getattr(self.module, variable))
 
 	def refreshSettingsWidgets(self):
 		for variable, catalogue in self.setting_widgets.items():
-			catalogue["myWidget"].setValue(getattr(self.module, variable))
+			catalogue["myWidget"]._setter(getattr(self.module, variable))
 
 	def addCheckFunction(self, variable, myFunction):
 		"""Adds a function to check if a setting is valid before modifying the setting.
@@ -263,7 +276,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 				continue
 
 			myWidget = self.setting_widgets[variable]["myWidget"]
-			if (not self._canContinue(variable, myWidget.getValue(), updateGUI = updateGUI)):
+			if (not self._canContinue(variable, myWidget._getter(), updateGUI = updateGUI)):
 				return False
 		return True
 
@@ -302,10 +315,10 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		if (getIndex):
 			value = myWidget.getIndex()
 		else:
-			value = myWidget.getValue()
+			value = myWidget._getter()
 
 		if (setterFunction is not None):
-			value = self.oneOrMany(self.ensure_functionInput(myFunction = setterFunction, myFunctionArgs = setterFunctionArgs, myFunctionKwargs = setterFunctionKwargs), forceContainer = False)
+			value = self.oneOrMany(self.ensure_functionInput(value, myFunction = setterFunction, myFunctionArgs = setterFunctionArgs, myFunctionKwargs = setterFunctionKwargs), forceContainer = False)
 
 		if (check and (not self._canContinue(variable, value))):
 			return
@@ -319,22 +332,22 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		"""Update the GUI to reflect the correct parameter value."""
 
 		if (variable in self.app_widgets):
-			self.app_widgets[variable].setValue(value)
+			self.app_widgets[variable]._setter(value)
 
 		if (variable in self.setting_widgets):
-			self.setting_widgets[variable]["myWidget"].setValue(value)
+			self.setting_widgets[variable]["myWidget"]._setter(value)
 
 	def refresh_parameters(self):
 		"""Loads the settings for each parameter and places it in the GUI and Modifier."""
 	
 		for variable, myWidget in self.app_widgets.items():
 			value = getattr(self.module, variable)
-			myWidget.setValue(value)
+			myWidget._setter(value)
 			if (variable in self.setting_widgets):
-				self.setting_widgets[variable].setValue(value)
+				self.setting_widgets[variable]._setter(value)
 
 	def refresh_settings(self):
 		"""Loads the settings for each parameter and places it in the GUI and Modifier."""
 
 		for variable, myWidget in self.setting_widgets.items():
-			myWidget.setValue(getattr(self.module, variable))
+			myWidget._setter(getattr(self.module, variable))
