@@ -1,5 +1,6 @@
-
 import sys
+
+import contextlib
 
 from API_Database import db_config
 import MyUtilities.common
@@ -8,14 +9,13 @@ import MyUtilities.wxPython
 
 NULL = MyUtilities.common.NULL
 
-
 #Decorators
 wrap_skipEvent = MyUtilities.wxPython.wrap_skipEvent
 
 def build(*args, **kwargs):
 	return LoadingController(*args, **kwargs)
 
-class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.LoggingFunctions):
+class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.CommonFunctions, MyUtilities.logger.LoggingFunctions):
 	logger_config = {
 		None: {
 			"level": 1,
@@ -29,16 +29,37 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 
 	def __init__(self, module = None, filePath = "settings.ini", section = "parameters", *, logger_name = None, logger_config = None):
 		MyUtilities.common.EnsureFunctions.__init__(self)
+		MyUtilities.common.CommonFunctions.__init__(self)
 		MyUtilities.logger.LoggingFunctions.__init__(self, label = logger_name or __name__, config = logger_config or self.logger_config, force_quietRoot = __name__ == "__main__")
 	
 		self.building = True
-		self.updateFrames = set()
-		self.app_widgets = {} #Widgets that access setting values, but do not modify them
-		self.setting_widgets = {} #Widgets that modify setting values
-		self.checkFunctions = {} #{setting_widgets label (str): function}
-		
+
+		self.databound_widgets = {} # {
+			# settings variable (str): [
+				# {
+					# "widget": GUI_Maker widget, 
+					# "variable": The settings variable this is used for (duplicate of parent key)
+					# "displayOnly": If setting values can be modified (bool), 
+					# "getter": What function to run to get the setting from the widget (function), 
+					# "setter": What function to run to set the setting in the widget (function), 
+					# "toggle": [
+						# {
+							# "widget": A widget to toggle,
+							# "enable": If the enable state should be toggled (bool),
+							# "show": If the show state should be toggled (bool),
+							# "saveError": If an error means this value shoudl not be saled (bool),
+							# "checkFunctions": List of functions to run that control the toggle state (function),
+							# "updateFrames": Set of frames to update with status messages
+						# }
+					#],
+				# }
+			# ]
+		# }
+
 		self.module = self.ensure_default(module, default = self)
 		self.database = db_config.build(default_filePath = filePath, default_section = section)
+
+		self.default_updateFrames = set()
 
 		self.loadSettings()
 
@@ -46,29 +67,22 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 	def applyUserFunctions(self):
 		self.module.getSetting = self.getSetting
 		self.module.setSetting = self.setSetting
-		self.module.loadSettings = self.loadSettings
-		self.module.addAppWidget = self.addAppWidget
-		self.module.getAppWidget = self.getAppWidget
-		self.module.getFirstError = self.getFirstError
-		self.module.onGUIParameter = self.onGUIParameter
-		self.module.setGuiParameter = self.setGuiParameter
-		self.module.onChangeSetting = self.onChangeSetting
-		self.module.onResetSettings = self.onResetSettings
-		self.module.setUpdateWindow = self.setUpdateWindow
-		self.module.setToggleWidget = self.setToggleWidget
 		self.module.addSettingWidget = self.addSettingWidget
-		self.module.addCheckFunction = self.addCheckFunction
-		self.module.refresh_settings = self.refresh_settings
-		self.module.getCheckFunction = self.getCheckFunction
-		self.module.refreshAppWidgets = self.refreshAppWidgets
-		self.module.refresh_parameters = self.refresh_parameters
-		self.module.getSettingAppWidget = self.getSettingAppWidget
-		self.module.onRefreshAppWidgets = self.onRefreshAppWidgets
-		self.module.refreshSettingsWidgets = self.refreshSettingsWidgets
-		self.module.onRefreshSettingsWidgets = self.onRefreshSettingsWidgets
+		self.module.addToggleWidget = self.addToggleWidget
 
 	def setBuilding(self, state):
 		self.building = state
+
+	@contextlib.contextmanager
+	def isBuilding(self):
+		current_building = self.building
+
+		self.setBuilding(True)
+		yield
+		self.setBuilding(current_building)
+
+	def finished(self):
+		self.setBuilding(False)
 
 	#Setting Functions
 	def loadSettings(self):
@@ -101,226 +115,239 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 			self.setGuiParameter(variable, value)
 		setattr(self.module, variable, value)
 
-	def onChangeSetting(self, event, myWidget, *, save = True, getIndex = False, **kwargs):
-		"""Changes a setting for this application."""
-
-		variable = myWidget.getLabel()
-
-		if (variable is None):
-			errorMessage = "Setting widgets must have labels that are the variable name"
-			raise ValueError(errorMessage)
-
-		if (variable in self.setting_widgets):
-			return self.onGUIParameter(event, variable, myWidget, save = save, getIndex = getIndex, **kwargs)
-
-		if (getIndex):
-			value = myWidget.getIndex()
-		else:
-			value = myWidget._getter()
-
-		self.setSetting(variable, value)
-		event.Skip()
-
-	def onResetSettings(self, event):
-		"""Changes the all settings to their default values."""
-
-		self.log_warning(f"Resetting Values")
-		with self.isBuilding():
-			self.database.set(self.database.get(section = "DEFAULT", forceSetting = True), section = "parameters", save = True)
-			self.loadSettings()
-			self.refresh_settings()
-			self.refresh_parameters()
-		event.Skip()
-
-	#GUI Functions
-	def setUpdateWindow(self, myFrame = None):
-		"""The given window will have it's status message updated when necissary.
-
-		myFrame (wxFrame) - Which window to update the status message of
-			- If list: All windows in the list will be updated
-			- If None: No window will be updated
-
-		Example setUpdateWindow(self, self.frame_main)
-		Example setUpdateWindow(self, (self.frame_main, self.frame_html))
-		"""
-
-		self.updateFrames = self.ensure_container(myFrame)
-
-	def _setStatusText(self, text = None):
-		for myFrame in self.updateFrames:
-			myFrame.setStatusText(text)
-
-	def addAppWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True, setter = None, getter = None):
-		"""Marks the given widget as one that can NOT change settings, but accesses it's value by default.
-
-		Example Input: addAppWidget("offsets", myWidget)
-		"""
-
-		if (variable in self.app_widgets):
-			self.log_warning(f"Overwriting app widget {variable}")
-		self.app_widgets[variable] = myWidget
-		
-		myWidget._getter = (myWidget.getValue, getter)[getter is not None]
-		myWidget._setter = (myWidget.setValue, setter)[setter is not None]
-
-		if (updateGUI):
-			myWidget._setter(getattr(self.module, variable))
-
-	def addSettingWidget(self, variable, myWidget, *, checkFunction = None, toggleWidget = None, updateGUI = True, setter = None, getter = None):
-		"""Marks the given widget as one that can change settings.
+	#Widget Functions
+	def addSettingWidget(self, variable, myWidget, *, getter = None, setter = None, 
+		displayOnly = False, updateGUI = True, 
+		autoSave = True, autoSave_check = NULL,
+		toggleWidget = None, checkFunction = None, toggle_enable = NULL, toggle_show = NULL, toggle_saveError = NULL):
+		"""Connects the *myWidget* to *variable*.
+		Returns the index for *myWidget* in the list of widgets for *variable*.
 
 		variable (str) - What setting variable this widget connects to
-		myWidget (wxWidget) - The widget that modifys this setting
+		myWidget (guiWidget) - The widget that modifies this setting
+		getter (function) - What function to run to get the value from *myWidget*
+		setter (function) - What function to run to set the value for *myWidget*
 
-		Example Input: addSettingWidget("offsets", myWidget, toggleWidget = self.widget_generateButton)
+		displayOnly (bool) - If the setting can be modified
+		updateGUI (bool) - If *myWidget* should be updated with the new setting value
+		autoSave (bool) - If the setting value should be saved after it is edited
+
+		toggleWidget (guiWidget) - A widget to toggle the state of based on *checkFunction*
+		checkFunction (function) - A function that controls the state of *toggleWidget*
+
+		Example Input: addSettingWidget("current_quantity", myWidget)
+		Example Input: addSettingWidget("current_date_use_override", myWidget, toggleWidget = "current_date", toggle_saveError = True, checkFunction = lambda value: not value)
 		"""
 
-		if (variable in self.setting_widgets):
-			self.log_warning(f"Overwriting setting widget {variable}")
+		if (variable in self.databound_widgets):
+			self.log_warning(f"Overwriting databound widget {variable}")
+		else:
+			self.databound_widgets[variable] = []
 
-		self.setting_widgets[variable] = {"myWidget": myWidget, "toggleWidget": toggleWidget}
+		widgetCatalogue = {
+			"widget": myWidget,
+			"displayOnly": displayOnly,
+			"getter": (myWidget.getValue, getter)[getter is not None],
+			"setter": (myWidget.setValue, setter)[setter is not None],
+			"toggle": [],
+			"variable": variable,
+		}
+
+		myWidget._databoundSettingCatalogue = widgetCatalogue
+
+		self.databound_widgets[variable].append(widgetCatalogue)
+		index = len(self.databound_widgets[variable]) - 1
+
+		if (autoSave):
+			self.autoSave(variable = variable, widgetCatalogue = widgetCatalogue, check = autoSave_check, save = not displayOnly)
+
+		if (toggleWidget is not None):
+			if (checkFunction is not None):
+				self.addToggleWidget(variable = variable, toggleWidget = toggleWidget, checkFunction = checkFunction, 
+					widgetCatalogue = widgetCatalogue, enable = toggle_enable, show = toggle_show, saveError = toggle_saveError)
+			else:
+				self.log_error(f"Must provide 'checkFunction' along with 'toggleWidget' to add a toggle widget for {label}")
+		else:
+			if (checkFunction is not None):
+				self.log_error(f"Must provide 'toggleWidget' along with 'checkFunction' to add a toggle widget for {label}")
 		
-		myWidget._getter = (myWidget.getValue, getter)[getter is not None]
-		myWidget._setter = (myWidget.setValue, setter)[setter is not None]
-
-		if (checkFunction is not None):
-			self.addCheckFunction(variable = variable, myFunction = checkFunction)
-
 		if (updateGUI):
-			myWidget._setter(getattr(self.module, variable))
+			self.updateGuiSettings(variable = variable, widgetCatalogue = widgetCatalogue)
 
-	def setToggleWidget(self, variable, toggleWidget):
-		if ("toggleWidget" in self.setting_widgets[variable]):
-			self.log_warning(f"Overwriting toggle widget for {variable}")
+		return index
 
-		self.setting_widgets[variable]["toggleWidget"] = toggleWidget
+	def _yieldWidgetCatalogue(self, variable = None, index = None, *, widgetCatalogue = None, exclude = ()):
+		"""Yields the widget catalogue(s) for *variable*.
 
-	def onRefreshAppWidgets(self, event):
-		self.refreshAppWidgets()
-		if (event is not None):
-			event.Skip()
+		variable (str) - What setting to yield the widget catalogue(s) for
+			~ If None: Will yield for all variables
+			~ If List: Will yield for all variables in the list
 
-	def onRefreshSettingsWidgets(self, event):
-		self.refreshSettingsWidgets()
-		if (event is not None):
-			event.Skip()
+		index (int) - Which widget  yield the widget catalogue(s) for (in order added)
+			~ If None: Will yield for all widgets for *variable*
+			~ If List: Will yield for all widgets for *variable* in the list
 
-	def refreshAppWidgets(self):
-		for variable, myWidget in self.app_widgets.items():
-			myWidget._setter(getattr(self.module, variable))
+		widgetCatalogue (dict) - If provided, will yield this instead of doing the normal yield routine
 
-	def refreshSettingsWidgets(self):
-		for variable, catalogue in self.setting_widgets.items():
-			catalogue["myWidget"]._setter(getattr(self.module, variable))
-
-	def addCheckFunction(self, variable, myFunction):
-		"""Adds a function to check if a setting is valid before modifying the setting.
-
-		myFunction (function) - A function that takes the value of the setting as the first parameter
-			~ Returns None if no error, otherwise returns a string that is an error message
+		Example Input: _yieldWidgetCatalogue()
+		Example Input: _yieldWidgetCatalogue("current_quantity")
+		Example Input: _yieldWidgetCatalogue("current_quantity", 2)
+		Example Input: _yieldWidgetCatalogue(["current_quantity", "current_file"])
+		Example Input: _yieldWidgetCatalogue(widgetCatalogue = widgetCatalogue)
 		"""
 
-		if (variable not in self.setting_widgets):
-			errorMessage = f"There must be a settings widget for the variable {variable} first."
-			raise KeyError(errorMessage)
-	
-		if (variable in self.checkFunctions):
-			self.log_warning(f"Overwriting check function {variable}")
-		self.checkFunctions[variable] = myFunction
+		def yieldVariable():
+			nonlocal variable
 
-	def getAppWidget(self, label):
-		return self.app_widgets.get(label, None)
+			if (variable is None):
+				for item in self.databound_widgets.keys():
+					yield item
+				return
 
-	def getSettingAppWidget(self, label):
-		if (label in self.setting_widgets):
-			return self.setting_widgets[label]["myWidget"]
+			for item in self.ensure_container(variable):
+				if (item not in self.databound_widgets):
+					self.log_error(f"'{item}' not found in databound widgets; cannot update GUI")
+					continue
 
-	def getCheckFunction(self, label):
-		return self.checkFunctions.get(label, None)
+				yield item
 
-	def yieldCheckError(self):
-		"""Yields the current errors."""
+		def yieldIndex(_variable):
+			nonlocal index
 
-		for function in self.checkFunctions.values():
-			errorMessage = function(self)
-			if (errorMessage):
-				yield errorMessage
+			numberOfWidgets = len(self.databound_widgets[_variable])
 
-	def _yieldToggleWidget(self):
-		for catalogue in self.setting_widgets.values():
-			toggleWidget = catalogue["toggleWidget"]
-			if (toggleWidget is None):
+			if (index is None):
+				for item in range(numberOfWidgets):
+					yield item
+				return
+
+			for item in self.ensure_container(index):
+				if (item >= numberOfWidgets):
+					self.log_error(f"There are less than '{item}' databound widgets for '{_variable}'; cannot update GUI")
+					continue
+
+				yield item
+
+		######################################################
+
+		if (widgetCatalogue != None):
+			yield widgetCatalogue
+			return
+
+		for _variable in yieldVariable():
+			if (_variable in exclude):
 				continue
+
+			for _index in yieldIndex(_variable):
+				yield self.databound_widgets[_variable][_index]
+
+	def yieldSettingsWidget(self, variable = None, index = None):
+		"""Yields the settings widget for *variable* at the insert position of *index*
+
+		Example Input: yieldSettingsWidget("current_quantity")
+		"""
+
+		for _widgetCatalogue in self._yieldWidgetCatalogue(variable = variable, index = index):
+			yield _widgetCatalogue["widget"]
+
+	def autoSave(self, variable = None, index = None, *, widgetCatalogue = None, check = True, save = True):
+		"""Sets up *variable* to automatically save after it is interacted with.
+
+		variable (str) - What setting to automatically save for
+		index (int) - Which widget(s) to automatically save when interacted with (in order added)
+
+		check (bool) - If check functions should all pass before it is allowed to save
+
+		Example Input: autoSave()
+		Example Input: autoSave("current_quantity")
+		"""
+
+		for _widgetCatalogue in self._yieldWidgetCatalogue(variable = variable, index = index, widgetCatalogue = widgetCatalogue):
+			myWidget = _widgetCatalogue["widget"]
+
+			myWidget.setFunction_click(myFunction = self.onChangeSetting, myFunctionKwargs = {
+				"variable": self.ensure_default(variable, default = _widgetCatalogue["variable"]), "myWidget": myWidget, 
+				"check": check, "save": save,
+			})
+
+	def addToggleWidget(self, toggleWidget, checkFunction, variable = None, index = None, *, widgetCatalogue = None, 
+		enable = True, show = False, saveError = False, updateFrame = None):
+		"""Allows the widget(s) for *variable* to toggle *toggleWidget* based on the results of *checkFunction*.
+
+		toggleWidget (guiWidget) - The widget to toggle states on
+		checkFunction (function) - A function to run to see if the state shoudl be toggled
+			~ If returns Falsey: Will make the toggle state positive
+			~ If returns Truthy: Will make the toggle state negative
+			~ If returns a string: Will also display the string as a status message for *updateFrame*
+
+		variable (str) - What setting to add a toggle widget to
+		index (int) - Which widget(s) to connect the toggle widget
+
+		saveError (bool) - If an error state means the setting should not be saved
+		enable (bool) - If the enable state of *toggleWidget* should be toggled
+		show (bool) - If the show state of *toggleWidget* should be toggled
+		updateFrame (guiWindow) - The window(s) to update status text on
+
+		Example Input: addToggleWidget(self.widget_submitButton, self.check_file, variable = "current_file")
+		Example Input: addToggleWidget(self.widget_submitButton, self.check_file, variable = "current_file", saveError = True)
+		Example Input: addToggleWidget(self.widget_submitButton, self.check_file, variable = "current_file", enable = False, show = True)
+		"""
+
+		def yieldToggleWidget(_widgetCatalogue):
+			nonlocal toggleWidget
+
+			if (isinstance(toggleWidget, str)):
+				yielded = False
+				for catalogue in self._yieldWidgetCatalogue(variable = toggleWidget, index = None):
+					yield catalogue["widget"]
+					yielded = True
+
+				if (not yielded):
+					self.log_error(f"Could not find toggle widget for '{toggleWidget}'")
+				return
+
 			yield toggleWidget
 
-	def getFirstError(self, toggle = False):
-		"""Returns the first error (if there are any).
+		#################################
 
-		Example Input: getFirstError()
+		show = self.ensure_default(show, False, defaultFlag = NULL)
+		enable = self.ensure_default(enable, True, defaultFlag = NULL)
+		saveError = self.ensure_default(saveError, False, defaultFlag = NULL)
+
+		_checkFunctions = self.ensure_container(checkFunction)
+		_updateFrames = None if (updateFrame is None) else self.ensure_container(updateFrame)
+		for _widgetCatalogue in self._yieldWidgetCatalogue(variable = variable, index = index, widgetCatalogue = widgetCatalogue):
+			for _toggleWidget in yieldToggleWidget(_widgetCatalogue):
+				_widgetCatalogue["toggle"].append({
+					"toggleWidget": _toggleWidget,
+					"saveError": saveError,
+					"enable": enable,
+					"show": show,
+					"checkFunctions": _checkFunctions,
+					"updateFrames": _updateFrames,
+				})
+
+	def _getWidgetValue(self, widgetCatalogue, *, getterArgs = None, getterKwargs = None):
+		"""Returns the value of the widget in the widget catalogue. 
+
+		Example Input: _getWidgetValue(widgetCatalogue)
 		"""
 
-		errorMessage = next(self.yieldCheckError(), None)
+		return self.runMyFunction(myFunction = widgetCatalogue["getter"], myFunctionArgs = getterArgs, myFunctionKwargs = getterKwargs)
 
-		if (not toggle):
-			return errorMessage
+	def changeSetting(self, variable, myWidget, *, check = False, save = False, checkBuilding = True,
+		getterArgs = None, getterKwargs = None):
+		"""An event for when a setting widget is modified.
 
-		state = errorMessage is None
-		for toggleWidget in set(_yieldToggleWidget()):
-			toggleWidget.setEnable(state = state)
-
-		return errorMessage
-
-	def checkAll(self, exclude = (), updateGUI = True):
-		for variable in self.checkFunctions.keys():
-			if (variable in exclude):
-				continue
-
-			myWidget = self.setting_widgets[variable]["myWidget"]
-			if (not self._canContinue(variable, myWidget._getter(), updateGUI = updateGUI)):
-				return False
-		return True
-
-	def _canContinue(self, variable, value, updateGUI = True):
-		errorMessage = self.checkFunctions[variable](value)
-
-		if (not updateGUI):
-			return not bool(errorMessage)
-
-		if (errorMessage):
-			self._setStatusText(errorMessage)
-
-		toggleWidget = self.setting_widgets[variable]["toggleWidget"]
-
-		if (toggleWidget is None):
-			return not bool(errorMessage)
-
-		if (errorMessage):
-			toggleWidget.disable()
-			return False
-
-		if (toggleWidget.checkEnabled() or self.checkAll(exclude = (variable,), updateGUI = False)):
-			self._setStatusText()
-			toggleWidget.enable()
-
-		return True
-
-	@wrap_skipEvent()
-	def onGUIParameter(self, event, variable, myWidget, *, check = False, save = False, getIndex = False, checkBuilding = True,
-		setterFunction = None, setterFunctionArgs = None, setterFunctionKwargs = None):
-		"""The GUI is modifying a parameter."""
+		variable (str) - Which variable to change
+		myWidget (guiWidget) - The widget to get the value from
+		"""
 
 		if (checkBuilding and self.building):
 			return
 
-		if (getIndex):
-			value = myWidget.getIndex()
-		else:
-			value = myWidget._getter()
-
-		if (setterFunction is not None):
-			value = self.oneOrMany(self.ensure_functionInput(value, myFunction = setterFunction, myFunctionArgs = setterFunctionArgs, myFunctionKwargs = setterFunctionKwargs), forceContainer = False)
-
-		if (check and (not self._canContinue(variable, value))):
+		value = self._getWidgetValue(myWidget._databoundSettingCatalogue, getterArgs = getterArgs, getterKwargs = getterKwargs)
+		if (check and (not self._checkSetting(variable = variable, value = value, widgetCatalogue = myWidget._databoundSettingCatalogue))):
 			return
 
 		if (save):
@@ -328,26 +355,144 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.logger.L
 		else:
 			setattr(self.module, variable, value)
 
-	def setGuiParameter(self, variable, value):
-		"""Update the GUI to reflect the correct parameter value."""
+	@wrap_skipEvent()
+	def onChangeSetting(self, event, *args, **kwargs):
+		"""A wxEvent version of *changeSetting*."""
 
-		if (variable in self.app_widgets):
-			self.app_widgets[variable]._setter(value)
+		self.changeSetting(*args, **kwargs)
 
-		if (variable in self.setting_widgets):
-			self.setting_widgets[variable]["myWidget"]._setter(value)
+	def resetSettings(self):
+		"""Changes the all settings to their default values."""
 
-	def refresh_parameters(self):
-		"""Loads the settings for each parameter and places it in the GUI and Modifier."""
+		self.log_warning(f"Resetting Values")
+		with self.isBuilding():
+			self.database.set(self.database.get(section = "DEFAULT", forceSetting = True), section = "parameters", save = True)
+			self.loadSettings()
+			self.updateGuiSettings()
+
+	@wrap_skipEvent()
+	def onResetSettings(self, event, *args, **kwargs):
+		"""A wxEvent version of *resetSettings*."""
+
+		self.resetSettings(*args, **kwargs)
+
+	#GUI Functions
+	def updateGuiSettings(self, variable = None, index = None, *, widgetCatalogue = None):
+		"""Updates the widget(s) for *variable*.
+
+		variable (str) - What setting to update widgets for
+		index (int) - Which widget to update (in order added)
+
+		Example Input: updateGuiSettings()
+		Example Input: updateGuiSettings("current_quantity")
+		"""
+
+		for _widgetCatalogue in self._yieldWidgetCatalogue(variable = variable, index = index, widgetCatalogue = widgetCatalogue):
+			_widgetCatalogue["setter"](getattr(self.module, variable or _widgetCatalogue["variable"]))
 	
-		for variable, myWidget in self.app_widgets.items():
-			value = getattr(self.module, variable)
-			myWidget._setter(value)
-			if (variable in self.setting_widgets):
-				self.setting_widgets[variable]._setter(value)
+	@wrap_skipEvent()
+	def onUpdateGuiSettings(self, event, *args, **kwargs):
+		"""A wxEvent version of *updateGuiSettings*."""
 
-	def refresh_settings(self):
-		"""Loads the settings for each parameter and places it in the GUI and Modifier."""
+		self.updateGuiSettings(*args, **kwargs)
 
-		for variable, myWidget in self.setting_widgets.items():
-			myWidget._setter(getattr(self.module, variable))
+	def setDefaultUpdateWindow(self, myFrame = None):
+		"""Adds *myFrame* to the list of default frames to push status messages to when check functions are run.
+
+		myFrame (guiWindow) - Which window to update the status message of
+			- If list: All windows in the list will be updated
+			- If None: No window will be updated
+
+		Example setDefaultUpdateWindow(self.frame_main)
+		Example setDefaultUpdateWindow([self.frame_main, self.frame_html])
+		"""
+
+		self.default_updateFrames.update(self.ensure_container(myFrame))
+
+	def _setStatusText(self, myFrame, text = None):
+		"""Updates the status text for *myFrame*
+
+		myFrame (guiWindow) - Which window to update the status message of
+			- If list: All windows in the list will be updated
+			- If None: Will update the windows in *default_updateFrames*
+
+		text (str) - What the status text will say
+
+		Example Input: _setStatusText(myFrame, text)
+		"""
+
+		if (myFrame is None):
+			_updateFrames = self.default_updateFrames
+		else:
+			_updateFrames = self.ensure_container(myFrame)
+
+		for myFrame in _updateFrames:
+			myFrame.setStatusText(text)
+
+	def yieldCheckFunctionResult(self, value, widgetCatalogue):
+		for toggleCatalogue in widgetCatalogue["toggle"]:
+			for checkFunction in toggleCatalogue["checkFunctions"]:
+				yield checkFunction(value), toggleCatalogue
+
+	def _checkSetting(self, variable, value, widgetCatalogue, *, updateGUI = True):
+		windowCatalogue = {} # {updateFrame (guiWindow): Error Message (str)}
+		toggleStateCatalogue = {} # {toggleWidget (guiWidget): {"state": If the state is positive or negative (bool), "enable": If the enable state can be changes (bool), "show": If the shown state can be changed (bool)}}
+
+		noError = True
+		for errorMessage, toggleCatalogue in self.yieldCheckFunctionResult(value, widgetCatalogue):
+			toggleWidget = toggleCatalogue["toggleWidget"]
+
+			if (not errorMessage):
+				# Do not overwrite a negative
+				if (toggleWidget not in toggleStateCatalogue):
+					toggleStateCatalogue[toggleWidget] = {"state": True, "enable": toggleCatalogue["enable"], "show": toggleCatalogue["show"]}
+				
+				if (toggleCatalogue["updateFrames"] not in windowCatalogue):
+					windowCatalogue[toggleCatalogue["updateFrames"]] = None
+				continue
+
+			#Account for saving on an error being ok
+			noError = noError and toggleCatalogue["saveError"]
+
+			# Only show the first error found for their respective window(s)
+			if ((toggleCatalogue["updateFrames"] not in windowCatalogue) or (windowCatalogue[toggleCatalogue["updateFrames"]] is None)):
+				windowCatalogue[toggleCatalogue["updateFrames"]] = errorMessage
+
+			# Ensure a negative
+			toggleStateCatalogue[toggleWidget] = {"state": False, "enable": toggleCatalogue["enable"], "show": toggleCatalogue["show"]}
+
+		if (updateGUI):
+			for toggleWidget, stateCatalogue in toggleStateCatalogue.items():
+				if (stateCatalogue["enable"]):
+					toggleWidget.setEnable(stateCatalogue["state"])
+
+				if (stateCatalogue["show"]):
+					toggleWidget.setShow(stateCatalogue["state"])
+
+
+			for myFrame, text in windowCatalogue.items():
+				if (isinstance(text, str)):
+					self._setStatusText(myFrame, text)
+
+		return noError
+
+	def checkAll(self, exclude = (), *, updateGUI = True, getterArgs = None, getterKwargs = None):
+		"""Runs all check functions.
+
+		Example Input: checkAll()
+		"""
+
+		noError = True
+		for _widgetCatalogue in self._yieldWidgetCatalogue(exclude = exclude):
+			variable = _widgetCatalogue["variable"]
+			value = self._getWidgetValue(_widgetCatalogue, getterArgs = getterArgs, getterKwargs = getterKwargs)
+			noError = noError and self._checkSetting(variable = variable, value = value, widgetCatalogue = _widgetCatalogue)
+
+		return noError
+	
+	@wrap_skipEvent()
+	def onCheckAll(self, event, *args, **kwargs):
+		"""A wxEvent version of *checkAll*."""
+
+		self.checkAll(*args, **kwargs)
+	
