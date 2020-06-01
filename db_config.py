@@ -49,7 +49,7 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 	"""
 
 	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False, forceCondition = None,
-		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None,
+		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None, backup_filePath = None,
 		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
 		"""
 
@@ -78,6 +78,7 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		self.defaultFileExtension = defaultFileExtension or "ini"
 		self.default_section = default_section or "main"
 		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
+		self.backup_filePath = backup_filePath
 
 		if (interpolation):
 			interpolation = self.MyExtendedInterpolation()
@@ -360,7 +361,7 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		if (save):
 			self.save()
 
-	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None):
+	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None, allowBackup = True):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
@@ -379,10 +380,16 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 
 		filePath = filePath or self.default_filePath
 		if (not os.path.exists(filePath)):
-			if (not forceExists):
+			if (allowBackup and (self.backup_filePath is not None)):
+				if (not os.path.exists(self.backup_filePath)):
+					raise FileExistsError(self.backup_filePath)
+
+				self.config.read(self.backup_filePath)
+
+			elif (not forceExists):
 				raise FileExistsError(filePath)
 
-			if (isinstance(forceExists, dict)):
+			if (forceExists and isinstance(forceExists, dict)):
 				self.set(forceExists, valid_section = None)
 
 			with openPlus(filePath) as config_file:

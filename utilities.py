@@ -73,10 +73,10 @@ class _JSONDecoder(json.JSONDecoder):
 			return set(catalogue[self.tag_set])
 
 		if (self.tag_datetime in catalogue):
-			return datetime.datetime(catalogue[self.tag_datetime])
+			return datetime.datetime(**catalogue[self.tag_datetime])
 
 		if (self.tag_timedelta in catalogue):
-			return datetime.timedelta(catalogue[self.tag_timedelta])
+			return datetime.timedelta(**catalogue[self.tag_timedelta])
 
 		return catalogue
 
@@ -103,7 +103,7 @@ def mp_dumps(*args, cls = None, **kwargs):
 	return original_dumps(*args, cls = cls, **kwargs)
 json.dumps = mp_dumps
 
-original_loads = json.load
+original_load = json.load
 def mp_load(*args, cls = None, **kwargs):
 	"""Defaults to *_JSONDecoder* when kwargs are given"""
 

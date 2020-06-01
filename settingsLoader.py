@@ -27,7 +27,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 		},
 	}
 
-	def __init__(self, module = None, filePath = "settings.ini", section = "parameters", *, logger_name = None, logger_config = None):
+	def __init__(self, module = None, filePath = "settings.ini", section = "parameters", *, logger_name = None, logger_config = None, **configKwargs):
 		MyUtilities.common.EnsureFunctions.__init__(self)
 		MyUtilities.common.CommonFunctions.__init__(self)
 		MyUtilities.logger.LoggingFunctions.__init__(self, label = logger_name or __name__, config = logger_config or self.logger_config, force_quietRoot = __name__ == "__main__")
@@ -57,7 +57,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 		# }
 
 		self.module = self.ensure_default(module, default = self)
-		self.database = db_config.build(default_filePath = filePath, default_section = section)
+		self.database = db_config.build(default_filePath = filePath, default_section = section, **configKwargs)
 
 		self.default_updateFrames = set()
 
@@ -118,7 +118,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 	#Widget Functions
 	def addSettingWidget(self, variable, myWidget, *, getter = None, setter = None, 
 		displayOnly = False, updateGUI = True, 
-		autoSave = True, autoSave_check = NULL,
+		autoSave = True, autoSave_check = NULL, autoSave_getterArgs = None, autoSave_getterKwargs = None,
 		toggleWidget = None, checkFunction = None, toggle_enable = NULL, toggle_show = NULL, toggle_saveError = NULL):
 		"""Connects the *myWidget* to *variable*.
 		Returns the index for *myWidget* in the list of widgets for *variable*.
@@ -159,7 +159,8 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 		index = len(self.databound_widgets[variable]) - 1
 
 		if (autoSave):
-			self.autoSave(variable = variable, widgetCatalogue = widgetCatalogue, check = autoSave_check, save = not displayOnly)
+			self.autoSave(variable = variable, widgetCatalogue = widgetCatalogue, check = autoSave_check, save = not displayOnly,
+				getterArgs = autoSave_getterArgs, getterKwargs = autoSave_getterKwargs)
 
 		if (toggleWidget is not None):
 			if (checkFunction is not None):
@@ -250,7 +251,8 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 		for _widgetCatalogue in self._yieldWidgetCatalogue(variable = variable, index = index):
 			yield _widgetCatalogue["widget"]
 
-	def autoSave(self, variable = None, index = None, *, widgetCatalogue = None, check = True, save = True):
+	def autoSave(self, variable = None, index = None, *, widgetCatalogue = None, 
+		check = True, save = True, getterArgs = None, getterKwargs = None):
 		"""Sets up *variable* to automatically save after it is interacted with.
 
 		variable (str) - What setting to automatically save for
@@ -267,7 +269,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 
 			myWidget.setFunction_click(myFunction = self.onChangeSetting, myFunctionKwargs = {
 				"variable": self.ensure_default(variable, default = _widgetCatalogue["variable"]), "myWidget": myWidget, 
-				"check": check, "save": save,
+				"check": check, "save": save, "getterArgs": getterArgs, "getterKwargs": getterKwargs,
 			})
 
 	def addToggleWidget(self, toggleWidget, checkFunction, variable = None, index = None, *, widgetCatalogue = None, 
