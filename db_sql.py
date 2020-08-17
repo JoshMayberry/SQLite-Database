@@ -1,3 +1,5 @@
+# pylint: skip-file
+
 __version__ = "3.4.0"
 
 ## TO DO ##
@@ -234,6 +236,7 @@ class Base_Database(Base):
 		"unicode": sqlalchemy.Unicode(), "utext": sqlalchemy.UnicodeText(), 
 		"json": sqlalchemy.JSON(), "json_2": _JSON, 
 		
+		"timestamp": sqlalchemy.TIMESTAMP,
 		datetime.date: sqlalchemy.Date, "date": sqlalchemy.Date, 
 		datetime.datetime: sqlalchemy.DateTime(), "datetime": sqlalchemy.DateTime(), 
 		datetime.time: sqlalchemy.Time(), "time": sqlalchemy.Time(), 
@@ -258,11 +261,13 @@ class Base_Database(Base):
 		return sqlalchemy.inspection.inspect(relationHandle).primary_key[0].name
 
 	@classmethod
-	def schema_column(cls, dataType = int, default = None, used = None,
+	def schema_column(cls, dataType = int, default = None, server_default = None, used = None,
 		system = False, quote = None, docstring = None, comment = None, info = None, 
 		foreignKey = None, foreign_update = True, foreign_delete = False, foreign_info = None,
-		unique = None, notNull = None, autoIncrement = None, primary = None):
+		unique = None, notNull = None, autoIncrement = None, primary = None,
+		onUpdate = None, order = None):
 		"""Returns a schema column.
+		See: https://alembic.sqlalchemy.org/en/latest/ops.html#alembic.operations.Operations.alter_column
 
 		dataType (type) - What data type the column will have
 			~ int, float, bool, str, datetime.date
@@ -326,7 +331,7 @@ class Base_Database(Base):
 				"primary_key": True, 
 				"nullable": (notNull, False)[notNull is None], 
 				"unique": (unique, True)[unique is None], 
-				"autoincrement": (False, False)[autoIncrement is None],
+				"autoincrement": (autoIncrement, True)[autoIncrement is None],
 			})
 		else:
 			if (unique):
@@ -337,22 +342,31 @@ class Base_Database(Base):
 			elif (notNull is not None):
 				columnKwargs["nullable"] = True
 
-			# if (autoIncrement):
-			#   columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
+			if (autoIncrement):
+			  columnKwargs["autoincrement"] = True #Use: https://docs.sqlalchemy.org/en/latest/core/metadata.html#sqlalchemy.schema.Column.params.autoincrement
 
 		if (default is not None):
 			columnKwargs["default"] = default
+		if (server_default is not None):
+			columnKwargs["server_default"] = server_default
 		if (system):
 			columnKwargs["system"] = True
 		if (docstring):
 			columnKwargs["doc"] = docstring
 		if (comment):
 			columnKwargs["comment"] = comment
+		if (onUpdate is not None):
+			columnKwargs["onupdate"] = onUpdate
 
 		if ((used is not None) and columnKwargs["unique"]):
 			columnKwargs["used"] = used
 
-		return MyColumn(dataType, *columnItems, **columnKwargs)
+		column = MyColumn(dataType, *columnItems, **columnKwargs)
+
+		if (order):
+			column._creation_order = order
+
+		return column
 
 	@classmethod
 	def printSQL(cls, query):
@@ -1700,7 +1714,7 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		##############################
 
 		with self.makeConnection() as connection:
-			return yieldResult(connection.execute(command, valueList or ()))
+			return yieldResult(connection.execute(sqlalchemy.text(command), valueList or ()))
 
 	def checkExists(self, myTuple, *, forceRelation = False, **kwargs):
 		"""Returns if the given value currently exists or not.
@@ -3239,6 +3253,51 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 		return self.oneOrMany(results_catalogue, forceTuple = forceRelation, isDict = True)
 
 	@wrap_errorCheck()
+	def createProcedure(self, label, procedure, procedureArgs = None, applyChanges = None):
+		"""Creates a stored procedure.
+
+		label (str) - What the stored procedure will be called in the database
+		procedure (str) - The procedure to run
+		procedureArgs (str) - the args for the procedure
+
+		Example Input: createProcedure("Lorem", "SELECT * FROM Users")
+		"""
+
+		def yield_raw_sql():
+			yield     f"CREATE PROCEDURE `{label}` ({procedureArgs or ''})"
+			yield     "BEGIN"
+			yield         procedure
+			yield     f"END;"
+
+		#################################
+
+		self.executeCommand(f"DROP procedure IF EXISTS `{label}`;")
+		self.executeCommand("\n".join(yield_raw_sql()))
+
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
+
+	def removeProcedure(self, label, applyChanges = None):
+		"""Removes a stored procedure.
+
+		Example Input: removeProcedure("Lorem")
+		"""
+
+		self.executeCommand(f"DROP procedure IF EXISTS `{label}`;")
+
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
+
+
+	@wrap_errorCheck()
 	def createTrigger(self, label, relation,
 
 		event = "update", event_when = "before", event_relation = None, event_attribute = None,
@@ -3272,11 +3331,6 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 			~ 'lastModified' - Updates 'reaction_attribute' in 'reaction_relation' to the current date
 				- reaction_attribute default: 'lastModified'
-				- Only works for the event 'update'
-
-			~ 'createdOn' - Marks when the row was first created 
-				- reaction_attribute default: 'createdOn'
-				- Only works for the event 'insert'
 
 			~ 'ignore'
 
@@ -3294,6 +3348,76 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		Example Input: createTrigger("Users_lastModified", "Users", reaction = "lastModified")
 		"""
+
+		def yield_raw_sql():
+
+			yield "CREATE TRIGGER"
+			if (noReplication != None):
+				yield "IF NOT EXISTS"
+			yield f"{label}"
+
+			#Create Condition
+			if (event_when[0] == "b"):
+				yield "BEFORE"
+			elif (event_when[0] == "a"):
+				yield "AFTER"
+			else:
+				yield "INSTEAD OF"
+		
+			if (event[0] == "u"):
+				yield "UPDATE"
+			elif (event[0] == "i"):
+				yield "INSERT"
+			else:
+				yield "DELETE"
+
+			if (event_attribute != None):
+				yield f"OF {event_attribute}"
+			
+			yield f"ON {event_relation} FOR EACH ROW"
+
+			#Create Reation
+			if (reaction[0] == "l"):
+				yield f"UPDATE {reaction_relation} SET {reaction_attribute} = strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime') WHERE (rowid = new.rowid);"
+			else:
+				errorMessage = f"Unknown reaction {reaction} in createTrigger() for {self.__repr__()}"
+				raise KeyError(errorMessage)
+
+		############################
+
+		if (self.connectionType == "access"):
+			errorMessage = "The ODBC driver for MS Access does not support adding triggers"
+			raise KeyError(errorMessage)
+
+		if (noReplication == None):
+			self.removeTrigger(label)
+
+		#Ensure correct format
+		event = event.lower()
+		reaction = reaction.lower()
+		event_when = event_when.lower()
+
+		# Apply defaults
+		if (event_relation == None):
+			event_relation = relation
+
+		if (reaction_relation == None):
+			reaction_relation = relation
+
+		if ((reaction[0] == "l") and (reaction_attribute == None)):
+			if ("lastModified" not in self.getAttributeNames(reaction_relation)):
+				self.addAttribute(reaction_relation, "lastModified", dataType = str, default = "strftime('%m/%d/%Y %H:%M:%S:%s','now', 'localtime')")
+			reaction_attribute = "lastModified"
+
+		#Execute SQL
+		self.executeCommand(" ".join(yield_raw_sql()))
+
+		#Save Changes
+		if (applyChanges == None):
+			applyChanges = self.defaultCommit
+
+		if (applyChanges):
+			self.saveDatabase()
 
 	@wrap_errorCheck()
 	def getTrigger(self, label = None, exclude = None):
@@ -3317,6 +3441,26 @@ class Database(Utility_Base, MyUtilities.logger.LoggingFunctions):
 
 		Example Input: removeTrigger("Users_lastModified")
 		"""
+
+		if (self.connectionType == "access"):
+			errorMessage = "The ODBC driver for MS Access does not support removing triggers"
+			raise KeyError(errorMessage)
+
+		triggerList = self.getTrigger(label)
+		if (triggerList != None):
+			if (not isinstance(triggerList, (list, tuple, range))):
+				triggerList = [triggerList]
+
+			for trigger in triggerList:
+				#Execute SQL
+				self.executeCommand("DROP TRIGGER IF EXISTS [{}]".format(trigger))
+
+			#Save Changes
+			if (applyChanges == None):
+				applyChanges = self.defaultCommit
+
+			if (applyChanges):
+				self.saveDatabase()
 
 	@wrap_errorCheck()
 	def createIndex(self, relation, attribute, name = None, noReplication = False):

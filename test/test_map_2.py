@@ -1,3 +1,5 @@
+# pylint: skip-file
+
 import sys
 import sqlalchemy
 import sqlalchemy.ext.declarative
