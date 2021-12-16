@@ -117,7 +117,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 
 	#Widget Functions
 	def addSettingWidget(self, variable, myWidget, *, getter = None, setter = None, 
-		displayOnly = False, updateGUI = True, 
+		displayOnly = False, updateGUI = True, checkAnother = None, check_onUpdate = None,
 		autoSave = True, autoSave_check = NULL, autoSave_getterArgs = None, autoSave_getterKwargs = None,
 		toggleWidget = None, checkFunction = None, toggle_enable = NULL, toggle_show = NULL, toggle_saveError = NULL):
 		"""Connects the *myWidget* to *variable*.
@@ -136,6 +136,9 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 		checkFunction (function) - A function that controls the state of *toggleWidget*
 
 		Example Input: addSettingWidget("current_quantity", myWidget)
+		Example Input: addSettingWidget("current_quantity", myWidget, checkAnother = "current_job")
+		Example Input: addSettingWidget("current_quantity", myWidget, checkAnother = ["current_job", "current_date"])
+		Example Input: addSettingWidget("current_quantity", myWidget, autoSave_check = True, displayOnly = True)
 		Example Input: addSettingWidget("current_date_use_override", myWidget, toggleWidget = "current_date", toggle_saveError = True, checkFunction = lambda value: not value)
 		"""
 
@@ -151,6 +154,7 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 			"setter": (myWidget.setValue, setter)[setter is not None],
 			"toggle": [],
 			"variable": variable,
+			"checkAnother": checkAnother,
 		}
 
 		myWidget._databoundSettingCatalogue = widgetCatalogue
@@ -172,6 +176,12 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 			if (checkFunction is not None):
 				self.log_error(f"Must provide 'toggleWidget' along with 'checkFunction' to add a toggle widget for {label}")
 		
+		if (check_onUpdate and not autoSave_check):
+			myWidget.setFunction_click(self.onCheckAll, myFunctionKwargs = { "variable": variable })
+
+		if (checkAnother):
+			myWidget.setFunction_click(self.onCheckAll, myFunctionKwargs = { "variable": checkAnother })
+
 		if (updateGUI):
 			self.updateGuiSettings(variable = variable, widgetCatalogue = widgetCatalogue)
 
@@ -478,17 +488,30 @@ class LoadingController(MyUtilities.common.EnsureFunctions, MyUtilities.common.C
 
 		return noError
 
-	def checkAll(self, exclude = (), *, updateGUI = True, getterArgs = None, getterKwargs = None):
+	def checkAll(self, exclude = (), *, updateGUI = True, getterArgs = None, getterKwargs = None, variable = None, index = None):
 		"""Runs all check functions.
 
 		Example Input: checkAll()
+		Example Input: checkAll(variable = "current_job")
 		"""
 
 		noError = True
-		for _widgetCatalogue in self._yieldWidgetCatalogue(exclude = exclude):
+		for _widgetCatalogue in self._yieldWidgetCatalogue(exclude = exclude, variable = variable, index = index):
 			variable = _widgetCatalogue["variable"]
 			value = self._getWidgetValue(_widgetCatalogue, getterArgs = getterArgs, getterKwargs = getterKwargs)
 			noError = noError and self._checkSetting(variable = variable, value = value, widgetCatalogue = _widgetCatalogue)
+
+		if (noError and updateGUI):
+			updateFrameList = set()
+			for _widgetCatalogue in self._yieldWidgetCatalogue(exclude = exclude, variable = variable, index = index):
+				if (_widgetCatalogue["toggle"]):
+					for item in _widgetCatalogue["toggle"]:
+						updateFrameList.add(item["updateFrames"])
+				else:
+					updateFrameList.add(None)
+
+			for myFrame in updateFrameList:
+				self._setStatusText(myFrame)
 
 		return noError
 	

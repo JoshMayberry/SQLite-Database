@@ -50,7 +50,7 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 
 	def __init__(self, default_filePath = None, *, default_values = None, default_section = None, forceExists = False, forceCondition = None,
 		allowNone = True, interpolation = True, valid_section = None, readOnly = False, defaultFileExtension = None, backup_filePath = None,
-		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None):
+		knownTypes = None, knownTypesSection = "knownTypes", knownTypeDefault = None, version = None):
 		"""
 
 		allowNone (bool) - Determines what happens if a setting does not have a set value
@@ -70,6 +70,10 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		knownTypesSection (str) - Which section is used to store knownTypes
 			- If None: Will not use a section to get knownTypes from
 
+		version (str) - What version the config file must have
+			- If None: Will not do a version check
+			- If different: Will replace the config file with the one from *default_filePath*
+
 		Example Input: Configuration(self)
 		Example Input: Configuration(self, source_directory = "database")
 		Example Input: Configuration(self, defaults = {"startup_user": "admin"})
@@ -79,6 +83,7 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		self.default_section = default_section or "main"
 		self.default_filePath = default_filePath or f"settings.{self.defaultFileExtension}"
 		self.backup_filePath = backup_filePath
+		self.version = version
 
 		if (interpolation):
 			interpolation = self.MyExtendedInterpolation()
@@ -361,7 +366,32 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		if (save):
 			self.save()
 
-	def load(self, filePath = None, *, valid_section = NULL, forceExists = False, forceCondition = None, allowBackup = True):
+	def replaceWithDefault(self, filePath = None, *, forceExists = False, allowBackup = True, mustRead = False):
+		"""Replaces the file with the backup file, or throws an error
+
+		Example Input: replaceWithDefault()
+		Example Input: replaceWithDefault("database/settings_user.ini")
+		"""
+		global openPlus
+
+		filePath = filePath or self.default_filePath
+
+		if (allowBackup and (self.backup_filePath is not None)):
+			if (not os.path.exists(self.backup_filePath)):
+				raise FileExistsError(self.backup_filePath)
+
+			self.config.read(self.backup_filePath)
+
+		elif (mustRead):
+			raise ValueError("Could not read from a backup file")
+
+		if (forceExists and isinstance(forceExists, dict)):
+			self.set(forceExists, valid_section = None)
+
+		with openPlus(filePath) as config_file:
+			self.config.write(config_file)
+
+	def load(self, filePath = None, *, version = NULL, valid_section = NULL, forceExists = False, forceCondition = None, allowBackup = True):
 		"""Loads the configuration file.
 
 		filePath (str) - Where to load the config file from
@@ -373,36 +403,38 @@ class Configuration(MyUtilities.common.EnsureFunctions, MyUtilities.common.Commo
 		Example Input: load("database/settings_user.ini")
 		Example Input: load("database/settings_user.ini", valid_section = ("testing",))
 		"""
-		global openPlus
 
 		if (valid_section is not NULL):
 			self.set_validSection(valid_section)
 
+		if (version is NULL):
+			version = self.version
+
 		filePath = filePath or self.default_filePath
 		if (not os.path.exists(filePath)):
-			if (allowBackup and (self.backup_filePath is not None)):
-				if (not os.path.exists(self.backup_filePath)):
-					raise FileExistsError(self.backup_filePath)
-
-				self.config.read(self.backup_filePath)
-
-			elif (not forceExists):
+			if ((not allowBackup) or (self.backup_filePath is None)):
 				raise FileExistsError(filePath)
 
-			if (forceExists and isinstance(forceExists, dict)):
-				self.set(forceExists, valid_section = None)
-
-			with openPlus(filePath) as config_file:
-				self.config.write(config_file)
+			self.replaceWithDefault(filePath, forceExists = forceExists, allowBackup = allowBackup)
 
 		self.config.read(filePath)
+
+		if (version is not None):
+			_version = self.config["DEFAULT"].get("_version_", None)
+			if (_version != version):
+				self.replaceWithDefault(filePath, forceExists = forceExists, allowBackup = allowBackup, mustRead = True)
+				self.config.read(filePath)
+
+				__version = self.config["DEFAULT"].get("_version_", None)
+				if (__version != version):
+					raise KeyError(f"Reset config, but version still does not match; old: {__version}; new: {_version}; match: {version}")
 
 		if (forceCondition is not None):
 			for variable, value in forceCondition.items():
 				var_mustBe = self.tryInterpolation(variable, value)
 				var_isActually = self.get(variable)
 				if (var_mustBe != var_isActually):
-					print(f"Forced conditions not met: {var_mustBe} is not {var_isActually}. Replacing config file with 'forceMatch'")
+					print(f"Forced conditions not met: '{var_mustBe}' is not '{var_isActually}'. Replacing config file with 'forceMatch'")
 					os.remove(filePath)
 					self.reset()
 
